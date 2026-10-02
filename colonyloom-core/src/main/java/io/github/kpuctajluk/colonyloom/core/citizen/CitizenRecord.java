@@ -36,6 +36,12 @@ public record CitizenRecord(UUID citizenId, UUID colonyId, UUID entityId, long b
         if (ticks < activeTimeTicks) throw new IllegalArgumentException("Active time cannot reverse");
         return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, needs, lifecycle, admission, readiness, ticks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));
     }
+    public CitizenRecord withAdmission(Admission value) {
+        return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, needs, lifecycle, value, readiness, activeTimeTicks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));
+    }
+    public CitizenRecord withPosition(WorldPosition value) {
+        return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, needs, lifecycle, admission, readiness, activeTimeTicks, remainingTimers, value, Math.incrementExact(revision));
+    }
     public CitizenRecord withProfession(String id) {
         return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, id, skills, needs, lifecycle, admission, readiness, activeTimeTicks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));
     }

@@ -10,6 +10,7 @@ import java.util.UUID;
 /** Authoritative owner-thread state. Only WorkBoard may mutate it. */
 public final class WorkOrder {
     public static final String ACTIVE_WAIT = "colonyloom:active_wait";
+    public static final String MOVE = "colonyloom:move";
     public static final int MAX_DEPENDENCIES = 16;
     public enum State { PLANNED, READY, ASSIGNED, RUNNING, WAITING, COMPLETED, CANCELLED, FAILED }
     public enum Reason { NONE, MATERIALS, TOOL, WORKER, CAPACITY, UNREACHABLE, CHUNK_NOT_READY,

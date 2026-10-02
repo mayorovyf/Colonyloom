@@ -17,6 +17,9 @@ public final class MinecraftServerRuntime {
     private final Path worldPath;
     private int lastMinecraftTick;
     private final ColonyPersistence persistence;
+    private io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager chunks;
+    private io.github.kpuctajluk.colonyloom.core.navigation.NavigationService navigation;
+    private CitizenAdmissionService citizens;
 
     private MinecraftServerRuntime(MinecraftServer server) {
         this.server = server;
@@ -60,6 +63,47 @@ public final class MinecraftServerRuntime {
         runtime.configureCommands(persistence::ensureSessionDirty, definitions);
         runtime.setSimulationEnabled(persistence.isAvailable());
     }
+    public void configurePhysical(io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager.ChunkAccess access) {
+        runtime.requireOwnerThread();
+        if (chunks != null) throw new IllegalStateException("Physical services already configured");
+        chunks = new io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager(runtime.registry(), runtime.budgets(), access);
+        navigation = new io.github.kpuctajluk.colonyloom.core.navigation.NavigationService(runtime.registry(), runtime.budgets(), chunks,
+                new io.github.kpuctajluk.colonyloom.minecraft.navigation.MinecraftNavigationBackend(server, runtime.registry(), chunks));
+        citizens = new CitizenAdmissionService(server, runtime, chunks);
+        runtime.scheduler().beforeWork(tick -> {
+            chunks.tick(tick);
+            citizens.tick();
+            navigation.tick(tick);
+            runtime.registry().targetClaims().tick();
+        });
+        runtime.scheduler().movementExecutor(new io.github.kpuctajluk.colonyloom.core.scheduler.SimulationScheduler.MovementExecutor() {
+            public void step(io.github.kpuctajluk.colonyloom.core.work.WorkOrder work, long tick) {
+                var citizen = runtime.registry().citizen(work.assignee());
+                try {
+                    if (navigation.request(work.id(), work.colonyId(), citizen.citizenId(), citizen.bindingEpoch(), 0, work.target(), work.lane(), work.priority()) == null) {
+                        runtime.registry().workBoard().waitAssigned(work.id(), io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.RECONCILING, "move");
+                        return;
+                    }
+                } catch (io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.AdmissionException denied) {
+                    runtime.registry().workBoard().waitAssigned(work.id(), denied.reason() == io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Reason.CRITICAL_CAPACITY
+                            ? io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.CRITICAL_CAPACITY : io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.STATE_LIMIT, "move");
+                    return;
+                }
+                if (navigation.atTarget(work.id())) {
+                    runtime.registry().workBoard().transition(work.id(), io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.COMPLETED,
+                            io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.NONE, "completed");
+                    navigation.cancel(work.id());
+                } else if (navigation.state(work.id()) == io.github.kpuctajluk.colonyloom.core.navigation.NavigationService.State.WAITING) {
+                    runtime.registry().workBoard().waitAssigned(work.id(), navigation.reason(work.id()), "move");
+                }
+            }
+            public void cancel(UUID workId) { navigation.cancel(workId); }
+        });
+    }
+    public io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager chunks() { runtime.requireOwnerThread(); return chunks; }
+    public io.github.kpuctajluk.colonyloom.core.navigation.NavigationService navigation() { runtime.requireOwnerThread(); return navigation; }
+    public void citizenObserved(UUID id) { runtime.requireOwnerThread(); if (citizens != null) citizens.observe(id); }
+    public void physicalLimitsUpdated() { runtime.requireOwnerThread(); if (chunks != null) chunks.limitsUpdated(); }
 
     public void postTick(MinecraftServer eventServer) {
         requireBoundServer(eventServer);
@@ -76,6 +120,9 @@ public final class MinecraftServerRuntime {
     public void beginStopping(MinecraftServer eventServer) {
         requireBoundServer(eventServer);
         runtime.beginStopping();
+        if (navigation != null) navigation.close();
+        if (citizens != null) citizens.close();
+        if (chunks != null) chunks.close();
         if (persistence.isAvailable()) persistence.checkpointAndClean();
     }
 

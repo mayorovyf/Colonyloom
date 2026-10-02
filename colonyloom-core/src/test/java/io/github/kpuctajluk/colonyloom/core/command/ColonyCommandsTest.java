@@ -38,6 +38,20 @@ final class ColonyCommandsTest {
         runtime.bindings().observe(citizen.citizenId(), citizen.entityId(), citizen.bindingEpoch());
         return citizen;
     }
+    @Test void validInactiveEmbodimentCanReconcileWithoutAdmissionCatchup() {
+        ServerRuntime runtime = runtime(); ColonyRuntime colony = colony(runtime,0); CitizenRecord citizen = citizen(runtime,colony);
+        runtime.commands().updateCitizenReadiness(citizen.citizenId(),CitizenRecord.Readiness.READY);
+        runtime.commands().updateCitizenAdmission(citizen.citizenId(),CitizenRecord.Admission.INACTIVE);
+        runtime.bindings().unload(citizen.entityId());
+        runtime.commands().updateCitizenReadiness(citizen.citizenId(),CitizenRecord.Readiness.UNKNOWN);
+        runtime.bindings().observe(citizen.citizenId(),citizen.entityId(),citizen.bindingEpoch());
+        runtime.commands().updateCitizenReadiness(citizen.citizenId(),CitizenRecord.Readiness.READY);
+        assertEquals(citizen.entityId(),runtime.bindings().activeEntity(citizen.citizenId()).orElseThrow());
+        assertEquals(CitizenRecord.Admission.INACTIVE,runtime.registry().citizen(citizen.citizenId()).admission());
+        runtime.commands().updateCitizenAdmission(citizen.citizenId(),CitizenRecord.Admission.ACTIVE);
+        CitizenRecord active = runtime.registry().citizen(citizen.citizenId());
+        assertEquals(citizen.activeTimeTicks(),active.activeTimeTicks());assertEquals(citizen.remainingTimers(),active.remainingTimers());
+    }
     @Test
     void workAuthorityAndCitizenAdmissionRejectBeforePhysicalEffects() {
         ServerRuntime runtime = runtime();
@@ -190,7 +204,7 @@ final class ColonyCommandsTest {
         assertTrue(restored.bindings().activeEntity(citizen.citizenId()).isEmpty());
         assertThrows(IllegalStateException.class, () -> restored.commands().bind(context(owner, true), citizen.citizenId(), citizen.entityId()));
         RegistrySnapshot before = restored.registry().snapshot();
-        RegistrySnapshot invalid = new RegistrySnapshot(before.colonies(), List.of(citizen, citizen), before.buildings(), before.tombstones(), before.observations(), before.works());
+        RegistrySnapshot invalid = new RegistrySnapshot(before.colonies(), List.of(citizen, citizen), before.buildings(), before.tombstones(), before.observations(), before.works(), before.targetClaims());
         assertThrows(IllegalArgumentException.class, () -> restored.registry().restore(invalid));
         assertEquals(before, restored.registry().snapshot());
     }

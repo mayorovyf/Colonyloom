@@ -82,6 +82,7 @@ final class IdentityPlatform {
             bridge.core().commands().updateCitizenReadiness(citizenId, active.isPresent()
                     ? CitizenRecord.Readiness.READY : blocked ? CitizenRecord.Readiness.BLOCKED : CitizenRecord.Readiness.UNKNOWN);
         });
+        if (bridge.core().registry().findCitizen(citizenId).isPresent()) bridge.citizenObserved(citizenId);
         inspections.clear();
     }
     void death(LivingDeathEvent event) {
@@ -158,6 +159,11 @@ final class IdentityPlatform {
         bridge.persistence().capture();
         return "work="+work.id()+" state="+work.state()+" remainingActiveTicks="+work.remainingActiveTicks();
     }
+    String createMove(CommandSourceStack source, UUID colony, BlockPos target) throws CommandSyntaxException {
+        var work = bridge.core().commands().createMoveWork(context(source), UUID.randomUUID(), colony, position(source.getLevel(), target));
+        bridge.persistence().capture();
+        return "work=" + work.id() + " state=" + work.state();
+    }
     String cancelWork(CommandSourceStack source,UUID workId) throws CommandSyntaxException {
         var work=bridge.core().commands().cancelWork(context(source),workId);
         bridge.persistence().capture(); return "work="+work.id()+" state="+work.state();
@@ -174,10 +180,14 @@ final class IdentityPlatform {
             result.append("\nadmission=").append(resource).append(" used=").append(admission.used(resource))
                     .append(" limit=").append(admission.limits().resource(resource)).append(" overLimit=").append(admission.overLimit(resource));
         }
+        if (bridge.chunks() != null) result.append("\nchunkFootprint=").append(bridge.chunks().footprint())
+                .append(" blockTicking=").append(bridge.chunks().blockTicking()).append(" entityTicking=").append(bridge.chunks().entityTicking())
+                .append(" ticketNanosHighWater=").append(bridge.chunks().ticketNanosHighWater());
         for (var citizen : bridge.core().registry().citizens(colony)) {
             result.append("\ncitizen=").append(citizen.citizenId()).append(" entity=").append(citizen.entityId())
                     .append(" epoch=").append(citizen.bindingEpoch()).append(" lifecycle=").append(citizen.lifecycle())
-                    .append(" readiness=").append(citizen.readiness()).append(" profession=").append(citizen.professionId())
+                    .append(" readiness=").append(citizen.readiness()).append(" citizenAdmission=").append(citizen.admission())
+                    .append(" activeTimeTicks=").append(citizen.activeTimeTicks()).append(" profession=").append(citizen.professionId())
                     .append(" food=").append(citizen.needs().get("food"));
         }
         for (var work:bridge.core().workBoard().works()) if(work.colonyId().equals(colony)) {

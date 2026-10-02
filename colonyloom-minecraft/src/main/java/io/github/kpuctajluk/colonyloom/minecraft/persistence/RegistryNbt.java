@@ -29,7 +29,8 @@ final class RegistryNbt {
             "productionOrders", "deliveries", "reservations", "allocations", "evidence", "tombstones", "pinnedDefinitions");
     private static final Map<String, String> KNOWN_TYPES = Map.of("colonies", "colonyloom:colony",
             "citizens", "colonyloom:citizen", "buildings", "colonyloom:building", "tombstones", "colonyloom:tombstone",
-            "bindingObservations", "colonyloom:binding_observation", "works", WorkOrder.ACTIVE_WAIT);
+            "bindingObservations", "colonyloom:binding_observation", "works", WorkOrder.ACTIVE_WAIT,
+            "evidence", "colonyloom:target_claim");
 
     record Decoded(RegistrySnapshot snapshot, Map<String, List<CompoundTag>> retained, Set<UUID> blockedColonies) {}
 
@@ -66,7 +67,7 @@ final class RegistryNbt {
             for (Tag element : entries) {
                 CompoundTag entry = (CompoundTag) element;
                 String type = string(entry, "typeId");
-                if (type.equals(KNOWN_TYPES.get(key))) {
+                if (type.equals(KNOWN_TYPES.get(key)) || key.equals("works") && type.equals(WorkOrder.MOVE)) {
                     decoded.add(entry);
                 } else {
                     opaque.add(entry.copy());
@@ -188,8 +189,20 @@ final class RegistryNbt {
         for (CitizenRecord citizen : citizens) {
             if (unknownObservedCitizens.contains(citizen.citizenId())) blocked.add(citizen.colonyId());
         }
+        List<io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot> claims = new ArrayList<>();
+        Set<UUID> claimIds = new HashSet<>();
+        for (CompoundTag entry : known.get("evidence")) {
+            var claim = targetClaim(entry);
+            if (!claimIds.add(claim.ownerId())) throw invalid("Duplicate target owner");
+            if (!colonyIds.contains(claim.colonyId()) || claim.buildingId() != null && !buildingIds.contains(claim.buildingId())) {
+                if (!colonyIds.contains(claim.colonyId()) && !unknownColonies.contains(claim.colonyId())) throw invalid("Target references missing colony");
+                if (claim.buildingId() != null && !buildingIds.contains(claim.buildingId()) && !unknownBuildings.contains(claim.buildingId())) throw invalid("Target references missing building");
+                retained.get("evidence").add(entry.copy()); blocked.add(claim.colonyId());
+            } else claims.add(claim);
+        }
+        if (claims.size() > 512) throw invalid("Too many physical target claims");
         blocked.retainAll(colonyIds);
-        return new Decoded(new RegistrySnapshot(colonies, citizens, buildings, tombstones, observations, works), retained, blocked);
+        return new Decoded(new RegistrySnapshot(colonies, citizens, buildings, tombstones, observations, works, claims), retained, blocked);
     }
 
     static CompoundTag encode(RegistrySnapshot snapshot, UUID checkpoint, Map<String, List<CompoundTag>> retained) {
@@ -201,6 +214,7 @@ final class RegistryNbt {
         for (ColonyRuntime value : snapshot.colonies()) root.getList("colonies", Tag.TAG_COMPOUND).add(colony(value));
         for (CitizenRecord value : snapshot.citizens()) root.getList("citizens", Tag.TAG_COMPOUND).add(citizen(value));
         for (WorkOrder.Snapshot value : snapshot.works()) root.getList("works", Tag.TAG_COMPOUND).add(work(value));
+        for (var claim : snapshot.targetClaims()) root.getList("evidence", Tag.TAG_COMPOUND).add(targetClaim(claim));
         for (BuildingRecord value : snapshot.buildings()) {
             CompoundTag entry = typed("colonyloom:building");
             entry.putUUID("buildingId", value.buildingId());
@@ -258,6 +272,17 @@ final class RegistryNbt {
         ListTag dependencies = new ListTag();
         for (UUID id : value.dependencies()) { CompoundTag reference = new CompoundTag(); reference.putUUID("workId", id); dependencies.add(reference); }
         entry.put("dependencies", dependencies);
+        return entry;
+    }
+    private static io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot targetClaim(CompoundTag entry) {
+        return new io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot(uuid(entry, "ownerId"), uuid(entry, "colonyId"), optionalUuid(entry, "buildingId"),
+                string(entry, "dimension"), integer(entry, "minX"), integer(entry, "minY"), integer(entry, "minZ"), integer(entry, "maxX"), integer(entry, "maxY"), integer(entry, "maxZ"), number(entry, "revision"));
+    }
+    private static CompoundTag targetClaim(io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot value) {
+        CompoundTag entry = typed("colonyloom:target_claim");
+        entry.putUUID("ownerId", value.ownerId()); entry.putUUID("colonyId", value.colonyId()); optionalUuid(entry, "buildingId", value.buildingId());
+        entry.putString("dimension", value.dimension()); entry.putInt("minX", value.minX()); entry.putInt("minY", value.minY()); entry.putInt("minZ", value.minZ());
+        entry.putInt("maxX", value.maxX()); entry.putInt("maxY", value.maxY()); entry.putInt("maxZ", value.maxZ()); entry.putLong("revision", value.revision());
         return entry;
     }
 

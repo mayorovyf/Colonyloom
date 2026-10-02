@@ -40,6 +40,32 @@ final class SimulationSchedulerTest {
         WorkOrder timer(long number, UUID colony, long duration) { return board.createTimer(id(number),colony,new WorldPosition("minecraft:overworld",registry.colony(colony).territory().minX(),64,0),null,0,AdmissionLedger.Lane.NORMAL,duration); }
         void ticks(int count) { for (int i=0;i<count;i++) scheduler.tick(++tick); }
     }
+    @Test void physicalBackoffRetainsExactWorkerAndCancellationStopsImmediately() {
+        Fixture f = new Fixture(); UUID colony = f.colony(1,0); UUID citizen = f.citizen(11,colony); f.citizen(12,colony);
+        UUID[] held = {null}; int[] steps = {0}, stops = {0};
+        f.scheduler.movementExecutor(new SimulationScheduler.MovementExecutor() {
+            public void step(WorkOrder work,long tick) {
+                if (held[0] == null) held[0] = work.assignee();
+                assertEquals(held[0],work.assignee()); steps[0]++;
+                f.board.waitAssigned(work.id(),WorkOrder.Reason.UNREACHABLE,"move");
+            }
+            public void cancel(UUID work) { stops[0]++; }
+        });
+        WorkOrder move = f.board.createMove(id(21),colony,new WorldPosition("minecraft:overworld",8,64,0),0,AdmissionLedger.Lane.NORMAL);
+        f.ticks(30); assertTrue(steps[0] > 1); assertEquals(held[0],move.assignee()); assertEquals(move.id(),f.registry.citizen(held[0]).assignedWorkId());
+        f.board.cancel(move.id()); assertTrue(stops[0] > 0); int before = steps[0]; f.ticks(30);
+        assertEquals(before,steps[0]); assertNull(f.registry.citizen(held[0]).assignedWorkId());
+    }
+    @Test void inactiveTimerKeepsResidualAndDoesNotCatchUpOnReadmission() {
+        Fixture f = new Fixture(); UUID colony = f.colony(1,0); UUID citizen = f.citizen(11,colony); WorkOrder timer = f.timer(21,colony,100);
+        f.ticks(8); f.board.releaseAssignment(timer.id());
+        f.registry.updateCitizen(f.registry.citizen(citizen).withAdmission(CitizenRecord.Admission.INACTIVE));
+        long residual = f.board.snapshots().getFirst().remainingActiveTicks();
+        f.ticks(200); assertEquals(residual,f.board.snapshots().getFirst().remainingActiveTicks());
+        f.registry.updateCitizen(f.registry.citizen(citizen).withAdmission(CitizenRecord.Admission.ACTIVE));
+        f.ticks(2); assertTrue(f.board.snapshots().getFirst().remainingActiveTicks() >= residual-2);
+        f.ticks(200); assertEquals(WorkOrder.State.COMPLETED,timer.state());
+    }
     @Test void saturatedSingleNormalReadySlotStillServicesBothColonies() {
         Fixture f = new Fixture(); UUID a = f.colony(1,0), b = f.colony(2,64);
         f.citizen(11,a); f.citizen(12,b);

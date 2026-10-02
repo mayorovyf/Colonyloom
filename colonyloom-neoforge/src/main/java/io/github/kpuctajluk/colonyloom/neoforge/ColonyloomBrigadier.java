@@ -51,6 +51,9 @@ final class ColonyloomBrigadier {
         work.then(literal("wait").then(argument("colony", UuidArgument.uuid())
                 .then(argument("ticks", LongArgumentType.longArg(1, 1_000_000_000L)).executes(ctx -> execute(ctx, resolve, platform ->
                         platform.createTimer(ctx.getSource(), uuid(ctx, "colony"), LongArgumentType.getLong(ctx, "ticks")))))));
+        work.then(literal("move").then(argument("colony", UuidArgument.uuid())
+                .then(argument("pos", BlockPosArgument.blockPos()).executes(ctx -> execute(ctx, resolve, platform ->
+                        platform.createMove(ctx.getSource(), uuid(ctx, "colony"), pos(ctx, "pos")))))));
         work.then(literal("cancel").then(argument("work", UuidArgument.uuid()).executes(ctx -> execute(ctx, resolve, platform ->
                 platform.cancelWork(ctx.getSource(), uuid(ctx, "work"))))));
         work.then(literal("priority").then(argument("work", UuidArgument.uuid())

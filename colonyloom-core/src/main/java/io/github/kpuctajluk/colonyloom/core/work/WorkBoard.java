@@ -51,9 +51,16 @@ public final class WorkBoard {
     public WorkOrder createTimer(UUID id, UUID colony, WorldPosition target, String profession, int priority, Lane lane, long duration) {
         registry.requireOwner();
         if (duration < 1 || duration > 1_000_000_000L) throw new IllegalArgumentException("Duration must be 1..1000000000");
+        return create(id, colony, target, profession, priority, lane, WorkOrder.ACTIVE_WAIT, "timer", duration);
+    }
+    public WorkOrder createMove(UUID id, UUID colony, WorldPosition target, int priority, Lane lane) {
+        return create(id, colony, target, null, priority, lane, WorkOrder.MOVE, "move", 0);
+    }
+    private WorkOrder create(UUID id, UUID colony, WorldPosition target, String profession, int priority, Lane lane, String type, String stage, long duration) {
+        registry.requireOwner();
         if (!registry.colony(colony).territory().contains(target) || works.containsKey(id) || registry.usedId(id)) throw new IllegalArgumentException("Invalid work identity or target");
         if (registry.colony(colony).recoveryBlocked() || registry.colony(colony).contentBlocked()) throw new IllegalStateException("Colony unavailable");
-        WorkOrder value = WorkOrder.restore(new WorkOrder.Snapshot(WorkOrder.ACTIVE_WAIT,id,colony,target,profession,priority,lane,WorkOrder.State.PLANNED,null,"timer",0,List.of(),WorkOrder.Reason.NONE,duration,0));
+        WorkOrder value = WorkOrder.restore(new WorkOrder.Snapshot(type,id,colony,target,profession,priority,lane,WorkOrder.State.PLANNED,null,stage,0,List.of(),WorkOrder.Reason.NONE,duration,0));
         Lease lease = ledger.reserveRoot(colony,lane,ROOT);
         try { registry.beforeMutation(); } catch (RuntimeException failure) { lease.close(); throw failure; }
         works.put(id,value); leases.put(id,lease); changed.accept(id); return value;
@@ -115,16 +122,30 @@ public final class WorkBoard {
         if (state == WorkOrder.State.READY || state == WorkOrder.State.WAITING || state == WorkOrder.State.COMPLETED || state == WorkOrder.State.CANCELLED || state == WorkOrder.State.FAILED) releaseAssignmentInternal(value);
         value.transition(state,reason,stage); if (value.terminal()) leases.get(id).finishRoot(); changed.accept(id);
     }
+    /** Physical waits retain their exact worker/cargo rather than silently choosing a substitute. */
+    public void waitAssigned(UUID id, WorkOrder.Reason reason, String stage) {
+        WorkOrder value = work(id);
+        if (value.assignee() == null || value.terminal() || reason == WorkOrder.Reason.NONE) throw new IllegalStateException("Assigned wait requires a live executor and reason");
+        if (value.state() == WorkOrder.State.WAITING && value.waitingReason() == reason && value.stage().equals(stage)) return;
+        registry.beforeMutation(); value.transition(WorkOrder.State.WAITING, reason, stage); changed.accept(id);
+    }
+    public void resumeAssigned(UUID id, String stage) {
+        WorkOrder value = work(id);
+        if (value.state() != WorkOrder.State.WAITING || value.assignee() == null) throw new IllegalStateException("No waiting executor");
+        registry.beforeMutation(); value.transition(WorkOrder.State.READY, WorkOrder.Reason.NONE, stage);
+        value.transition(WorkOrder.State.ASSIGNED, WorkOrder.Reason.NONE, stage);
+        value.transition(WorkOrder.State.RUNNING, WorkOrder.Reason.NONE, stage); changed.accept(id);
+    }
     public boolean assign(UUID id, UUID citizenId) {
         WorkOrder value = work(id); CitizenRecord citizen = registry.citizen(citizenId);
         if (value.state() != WorkOrder.State.READY || citizen.assignedWorkId() != null || !citizen.colonyId().equals(value.colonyId()) || citizen.lifecycle() != CitizenRecord.Lifecycle.ALIVE || citizen.admission() != CitizenRecord.Admission.ACTIVE || citizen.readiness() != CitizenRecord.Readiness.READY) return false;
         if (value.professionId() != null && !value.professionId().equals(citizen.professionId())) return false;
-        registry.beforeMutation(); value.assignment(citizenId); value.transition(WorkOrder.State.ASSIGNED,WorkOrder.Reason.NONE,"timer");
+        registry.beforeMutation(); value.assignment(citizenId); value.transition(WorkOrder.State.ASSIGNED,WorkOrder.Reason.NONE,value.stage());
         registry.updateCitizen(citizen.withAssignment(id)); changed.accept(id); return true;
     }
     public void releaseAssignment(UUID id) {
         WorkOrder value = work(id); if (value.assignee() == null) return;
-        transition(id,WorkOrder.State.WAITING,WorkOrder.Reason.RECONCILING,"timer");
+        transition(id,WorkOrder.State.WAITING,WorkOrder.Reason.RECONCILING,value.stage());
     }
     /** Called by registry before replacing a citizen that clears its old assignment. No recursive registry write. */
     public void citizenDetached(UUID citizenId) {
@@ -133,7 +154,7 @@ public final class WorkBoard {
         WorkOrder value = work(citizen.assignedWorkId());
         if (!citizenId.equals(value.assignee())) return;
         registry.beforeMutation();
-        value.assignment(null); value.transition(WorkOrder.State.WAITING,WorkOrder.Reason.RECONCILING,"timer"); changed.accept(value.id());
+        value.assignment(null); value.transition(WorkOrder.State.WAITING,WorkOrder.Reason.RECONCILING,value.stage()); changed.accept(value.id());
     }
     private void releaseAssignmentInternal(WorkOrder value) {
         UUID assignee = value.assignee(); if (assignee == null) return;

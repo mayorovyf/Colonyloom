@@ -27,6 +27,7 @@ public final class CitizenEntity extends PathfinderMob {
     private UUID citizenId;
     private long bindingEpoch;
     private boolean quarantined = true;
+    private Runnable managedMovementGuard;
 
     public CitizenEntity(EntityType<? extends CitizenEntity> type, Level level) {
         super(type, level);
@@ -83,6 +84,12 @@ public final class CitizenEntity extends PathfinderMob {
 
     public boolean isQuarantined() {
         return quarantined;
+    }
+    /** Backend-owned safety check only; pathfinding and progression stay in global managed budgets. */
+    public void managedMovementGuard(Runnable guard) { requireServerThread(); managedMovementGuard = guard; }
+    @Override public void tick() {
+        if (!level().isClientSide && managedMovementGuard != null) managedMovementGuard.run();
+        super.tick();
     }
 
     /** Runtime-only decision. Never loaded from NBT or accepted from a client. */
@@ -147,6 +154,7 @@ public final class CitizenEntity extends PathfinderMob {
         ContainerHelper.loadAllItems(data, inventory.getItems(), registryAccess());
         inventory.setChanged();
         quarantined = true;
+        managedMovementGuard = null;
         setPersistenceRequired();
         setCanPickUpLoot(false);
     }

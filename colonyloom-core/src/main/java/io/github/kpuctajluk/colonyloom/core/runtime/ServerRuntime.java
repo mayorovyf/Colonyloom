@@ -36,7 +36,7 @@ public final class ServerRuntime {
         this.sessionId = UUID.randomUUID();
         this.registry = new ColonyRegistry(this::requireOwnerThread);
         this.commands = new ColonyCommands(registry);
-        budgets = new GlobalWorkBudgets(SimulationLimits.development());
+        budgets = registry.budgets();
         scheduler = new SimulationScheduler(registry.workBoard(), budgets);
         registry.setAfterRestore(scheduler::rebuild);
         registry.setBeforeMutation(() -> {

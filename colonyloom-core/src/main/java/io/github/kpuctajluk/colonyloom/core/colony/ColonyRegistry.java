@@ -24,6 +24,8 @@ import java.util.UUID;
 public final class ColonyRegistry {
     private AdmissionLedger admission;
     private final WorkBoard workBoard;
+    private final io.github.kpuctajluk.colonyloom.core.scheduler.GlobalWorkBudgets budgets;
+    private final io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry targetClaims;
     private Map<UUID, AdmissionLedger.Lease> colonyLeases = new LinkedHashMap<>();
     private Map<UUID, AdmissionLedger.Lease> citizenLeases = new LinkedHashMap<>();
     private Map<UUID, AdmissionLedger.Lease> tombstoneLeases = new LinkedHashMap<>();
@@ -40,6 +42,8 @@ public final class ColonyRegistry {
         this.ownerCheck = Objects.requireNonNull(ownerCheck, "ownerCheck");
         admission = new AdmissionLedger(SimulationLimits.development(), ownerCheck);
         workBoard = new WorkBoard(this, admission);
+        budgets = new io.github.kpuctajluk.colonyloom.core.scheduler.GlobalWorkBudgets(SimulationLimits.development());
+        targetClaims = new io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry(this, budgets);
         bindings = new BindingRegistry(this);
     }
     public void requireOwner() { ownerCheck.run(); }
@@ -49,6 +53,8 @@ public final class ColonyRegistry {
     public BindingRegistry bindings() { requireOwner(); return bindings; }
     public AdmissionLedger admission() { requireOwner(); return admission; }
     public WorkBoard workBoard() { requireOwner(); return workBoard; }
+    public io.github.kpuctajluk.colonyloom.core.scheduler.GlobalWorkBudgets budgets() { requireOwner(); return budgets; }
+    public io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry targetClaims() { requireOwner(); return targetClaims; }
     public Collection<CitizenRecord> citizensView() { requireOwner(); return Collections.unmodifiableCollection(citizens.values()); }
     public List<ColonyRuntime> colonies() { requireOwner(); return List.copyOf(colonies.values()); }
     public List<CitizenRecord> citizens() { requireOwner(); return List.copyOf(citizens.values()); }
@@ -99,14 +105,14 @@ public final class ColonyRegistry {
         tombstones.put(tombstone.citizenId(), tombstone);
     }
     public RegistrySnapshot snapshot() {
-        return new RegistrySnapshot(colonies(), citizens(), buildings(), tombstones(), bindings.observations(), workBoard.snapshots());
+        return new RegistrySnapshot(colonies(), citizens(), buildings(), tombstones(), bindings.observations(), workBoard.snapshots(), targetClaims.snapshots());
     }
 
     /** Validates the whole DTO before replacing any authoritative state. */
     public void restore(RegistrySnapshot snapshot) {
         requireOwner();
         SimulationLimits limits = admission.limits();
-        if (snapshot.colonies().size() > 3 || snapshot.citizens().size() > 300 || snapshot.buildings().size() > 512 || snapshot.works().size() > 8192 || snapshot.tombstones().size() > 65536 || snapshot.observations().size() > BindingRegistry.MAX_OBSERVATIONS) throw new IllegalArgumentException("Snapshot exceeds bounded persistence envelope");
+        if (snapshot.colonies().size() > 3 || snapshot.citizens().size() > 300 || snapshot.buildings().size() > 512 || snapshot.works().size() > 8192 || snapshot.targetClaims().size() > 512 || snapshot.tombstones().size() > 65536 || snapshot.observations().size() > BindingRegistry.MAX_OBSERVATIONS) throw new IllegalArgumentException("Snapshot exceeds bounded persistence envelope");
         LinkedHashMap<UUID, ColonyRuntime> newColonies = new LinkedHashMap<>();
         LinkedHashMap<UUID, CitizenRecord> newCitizens = new LinkedHashMap<>();
         LinkedHashMap<UUID, BuildingRecord> newBuildings = new LinkedHashMap<>();
@@ -142,7 +148,7 @@ public final class ColonyRegistry {
         Set<UUID> assignedCitizens = new HashSet<>();
         for (WorkOrder.Snapshot work : snapshot.works()) {
             ColonyRuntime colony = required(newColonies, work.colonyId(), "work colony");
-            if (!objectIds.add(work.id()) || !WorkOrder.ACTIVE_WAIT.equals(work.typeId()) || !colony.territory().contains(work.target())) throw new IllegalArgumentException("Invalid work identity/type/target");
+            if (!objectIds.add(work.id()) || !(WorkOrder.ACTIVE_WAIT.equals(work.typeId()) || WorkOrder.MOVE.equals(work.typeId())) || !colony.territory().contains(work.target())) throw new IllegalArgumentException("Invalid work identity/type/target");
             newWorks.put(work.id(), work);
             if (work.assignee() != null) {
                 CitizenRecord citizen = required(newCitizens, work.assignee(), "work assignee");
@@ -153,13 +159,20 @@ public final class ColonyRegistry {
             if (!required(newWorks, dependency, "work dependency").colonyId().equals(work.colonyId())) throw new IllegalArgumentException("Foreign work dependency");
         }
         for (CitizenRecord citizen : newCitizens.values()) if (citizen.assignedWorkId() != null && !citizen.citizenId().equals(required(newWorks, citizen.assignedWorkId(), "citizen assignment").assignee())) throw new IllegalArgumentException("Work/citizen assignment mismatch");
+        Set<UUID> claimIds = new HashSet<>();
+        for (var claim : snapshot.targetClaims()) {
+            required(newColonies, claim.colonyId(), "target colony");
+            if (!claimIds.add(claim.ownerId())) throw new IllegalArgumentException("Duplicate target owner");
+            if (claim.buildingId() != null && !required(newBuildings, claim.buildingId(), "target building").colonyId().equals(claim.colonyId())) throw new IllegalArgumentException("Foreign target building");
+        }
         // Restore already accepted state, then drain at the configured limits without eviction.
         int restorationRoots = Math.max(1, snapshot.works().size());
         SimulationLimits restorationLimits = limits
                 .withResource(SimulationLimits.Resource.COLONIES, Math.max(limits.resource(SimulationLimits.Resource.COLONIES), snapshot.colonies().size()))
                 .withResource(SimulationLimits.Resource.CITIZENS, Math.max(limits.resource(SimulationLimits.Resource.CITIZENS), snapshot.citizens().size()))
                 .withResource(SimulationLimits.Resource.TOMBSTONES, Math.max(limits.resource(SimulationLimits.Resource.TOMBSTONES), Math.addExact(snapshot.citizens().size(), snapshot.tombstones().size())))
-                .withResource(SimulationLimits.Resource.PHYSICAL_TARGETS, Math.max(limits.resource(SimulationLimits.Resource.PHYSICAL_TARGETS), snapshot.buildings().size()))
+                .withResource(SimulationLimits.Resource.PHYSICAL_TARGETS, Math.max(limits.resource(SimulationLimits.Resource.PHYSICAL_TARGETS), Math.addExact(snapshot.buildings().size(), snapshot.targetClaims().size())))
+                .withResource(SimulationLimits.Resource.SPATIAL_INDEX_LINKS, Math.max(limits.resource(SimulationLimits.Resource.SPATIAL_INDEX_LINKS), Math.multiplyExact(snapshot.targetClaims().size(), 128)))
                 .withResource(SimulationLimits.Resource.WORKS, Math.max(limits.resource(SimulationLimits.Resource.WORKS), Math.multiplyExact(restorationRoots, 16)))
                 .withResource(SimulationLimits.Resource.EVIDENCE, Math.max(limits.resource(SimulationLimits.Resource.EVIDENCE), Math.addExact(snapshot.citizens().size(), snapshot.observations().size())))
                 .withResource(SimulationLimits.Resource.WAIT_REGISTRATIONS, Math.max(limits.resource(SimulationLimits.Resource.WAIT_REGISTRATIONS), Math.multiplyExact(restorationRoots, 144)));
@@ -175,7 +188,10 @@ public final class ColonyRegistry {
             CitizenRecord citizen = newCitizens.get(value.citizenId());
             if (citizen == null || !citizen.entityId().equals(value.entityId())) replacement.reserve(citizen == null ? new UUID(0, 0) : citizen.colonyId(), AdmissionLedger.Lane.NORMAL, Map.of(SimulationLimits.Resource.EVIDENCE, 1));
         }
-        workBoard.restoreValidated(snapshot.works(), replacement);
+        try (var preparedClaims = targetClaims.prepareRestore(snapshot.targetClaims(), replacement)) {
+            workBoard.restoreValidated(snapshot.works(), replacement);
+            preparedClaims.commit();
+        }
         replacement.updateLimits(limits);
         replacement.inheritCounters(admission);
         admission = replacement;

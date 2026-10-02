@@ -9,7 +9,7 @@ import java.util.List;
 
 public record RegistrySnapshot(List<ColonyRuntime> colonies, List<CitizenRecord> citizens,
         List<BuildingRecord> buildings, List<Tombstone> tombstones, List<BindingRegistry.Observation> observations,
-        List<WorkOrder.Snapshot> works) {
+        List<WorkOrder.Snapshot> works, List<io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot> targetClaims) {
     public RegistrySnapshot {
         colonies = List.copyOf(colonies);
         citizens = List.copyOf(citizens);
@@ -17,5 +17,6 @@ public record RegistrySnapshot(List<ColonyRuntime> colonies, List<CitizenRecord>
         tombstones = List.copyOf(tombstones);
         observations = List.copyOf(observations);
         works = List.copyOf(works);
+        targetClaims = List.copyOf(targetClaims);
     }
 }

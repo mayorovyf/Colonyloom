@@ -68,7 +68,7 @@ public final class IdentityScenarioMod {
 
     private void register(RegisterCommandsEvent event) {
         var identity = literal("identity");
-        for (String action : List.of("setup", "verify", "conflict", "recovery-check", "isolation", "timer-start", "timer-save", "timer-resume", "timer-complete", "config-observe")) {
+        for (String action : List.of("setup", "verify", "conflict", "recovery-check", "isolation", "timer-start", "timer-save", "timer-resume", "timer-complete", "config-observe", "move-start", "move-complete")) {
             identity.then(literal(action).executes(context -> run(context.getSource(), action)));
         }
         event.getDispatcher().register(literal("colonyloomtest")
@@ -110,7 +110,7 @@ public final class IdentityScenarioMod {
                 BlockPos position = origin.offset(offset, 0, 4);
                 if (!level.hasChunkAt(position) || !level.isPositionEntityTicking(position)) return false;
             }
-        } else if (action.equals("verify") || action.startsWith("timer-")) {
+        } else if (action.equals("verify") || action.startsWith("timer-") || action.startsWith("move-")) {
             CompoundTag manifest = readManifest(source);
             for (Tag value : manifest.getList("citizens", Tag.TAG_COMPOUND)) {
                 int[] position = ((CompoundTag) value).getIntArray("position");
@@ -144,6 +144,7 @@ public final class IdentityScenarioMod {
                     case "conflict" -> conflict(source, player, manifest);
                     case "recovery-check" -> recovery(source, manifest);
                     case "timer-start", "timer-save", "timer-resume", "timer-complete" -> timer(source, manifest, action);
+                    case "move-start", "move-complete" -> move(source, manifest, action);
                     case "config-observe" -> {
                         for (Tag tag : manifest.getList("colonies", Tag.TAG_COMPOUND)) {
                             UUID colony = ((CompoundTag) tag).getUUID("id");
@@ -168,6 +169,28 @@ public final class IdentityScenarioMod {
         }
     }
 
+    private static void move(CommandSourceStack source, CompoundTag manifest, String action) throws Exception {
+        if (action.equals("move-start")) {
+            require(source, !manifest.contains("moveWork"), "move_fixture_once", action);
+            CompoundTag citizen = manifest.getList("citizens", Tag.TAG_COMPOUND).getCompound(2);
+            CitizenEntity physical = entity(source, citizen.getUUID("entity"));
+            BlockPos start = physical.blockPosition(), target = start.offset(2, 0, 0);
+            for (int x=0;x<=2;x++) { validateSite(source,start.offset(x,0,0)); prepareFloor(source.getLevel(),start.offset(x,0,0)); }
+            CompoundTag move = new CompoundTag();
+            move.putUUID("citizen", citizen.getUUID("citizen")); move.putUUID("entity", citizen.getUUID("entity")); move.putUUID("colony", citizen.getUUID("colony"));
+            move.putIntArray("target",new int[]{target.getX(),target.getY(),target.getZ()});
+            UUID work = uuid(success(source,"colonyloom work move "+citizen.getUUID("colony")+" "+coordinates(target)),"work");
+            move.putUUID("work",work); manifest.put("moveWork",move); writeManifest(source,manifest);
+            fact(source,"move_command_accepted",true,"work="+work+" start="+coordinates(start)+" target="+coordinates(target));
+        } else {
+            CompoundTag move=manifest.getCompound("moveWork");require(source,move.hasUUID("work"),"move_fixture_exists",action);
+            String status=success(source,"colonyloom status "+move.getUUID("colony"));
+            require(source,status.contains("work="+move.getUUID("work")+" state=COMPLETED reason=NONE assignee=null"),"move_command_real_completion",status);
+            CitizenEntity physical=entity(source,move.getUUID("entity"));int[] target=move.getIntArray("target");
+            require(source,physical.distanceToSqr(target[0]+0.5,target[1],target[2]+0.5)<=1.1,"move_actual_entity_arrival",physical.position().toString());
+            CompoundTag expected=manifest.getList("citizens",Tag.TAG_COMPOUND).getCompound(2);checkEntity(source,physical,expected);
+        }
+    }
     private static void timer(CommandSourceStack source, CompoundTag manifest, String action) throws Exception {
         ListTag colonies = manifest.getList("colonies", Tag.TAG_COMPOUND);
         if (action.equals("timer-start")) {

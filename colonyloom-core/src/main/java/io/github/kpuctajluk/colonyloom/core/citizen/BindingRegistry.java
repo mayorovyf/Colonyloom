@@ -68,7 +68,7 @@ public final class BindingRegistry {
     public Optional<UUID> activeEntity(UUID citizenId) {
         registry.requireOwner();
         CitizenRecord citizen = registry.findCitizen(citizenId).orElse(null);
-        if (citizen == null || citizen.lifecycle() != CitizenRecord.Lifecycle.ALIVE || citizen.admission() != CitizenRecord.Admission.ACTIVE || !registry.colony(citizen.colonyId()).available()) return Optional.empty();
+        if (citizen == null || citizen.lifecycle() != CitizenRecord.Lifecycle.ALIVE || !registry.colony(citizen.colonyId()).available()) return Optional.empty();
         Observation candidate = observations.get(citizen.entityId());
         if (candidate == null || !citizenId.equals(candidate.citizenId()) || !candidate.loaded() || candidate.quarantined() || candidate.retired() || candidate.bindingEpoch() != citizen.bindingEpoch()) return Optional.empty();
         return Optional.of(candidate.entityId());

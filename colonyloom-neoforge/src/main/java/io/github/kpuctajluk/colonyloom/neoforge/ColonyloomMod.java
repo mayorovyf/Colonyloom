@@ -33,10 +33,14 @@ public final class ColonyloomMod {
     private final Map<MinecraftServer, net.minecraft.server.packs.resources.ResourceManager> contentManagers = new IdentityHashMap<>();
     private final SimulationConfig simulationConfig;
     private final Map<MinecraftServer, io.github.kpuctajluk.colonyloom.core.config.SimulationLimits> configuredLimits = new IdentityHashMap<>();
+    private final net.neoforged.neoforge.common.world.chunk.TicketController tickets = new net.neoforged.neoforge.common.world.chunk.TicketController(
+            net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(MOD_ID, "runtime"), NeoForgeChunkAccess::validate);
 
     public ColonyloomMod(IEventBus modBus, net.neoforged.fml.ModContainer container) {
         simulationConfig = new SimulationConfig(container);
         CitizenRegistration.register(modBus);
+        modBus.addListener((net.neoforged.neoforge.common.world.chunk.RegisterTicketControllersEvent event) -> event.register(tickets));
+        NeoForge.EVENT_BUS.addListener(this::onBlockChange);
         NeoForge.EVENT_BUS.addListener(this::onReload);
         NeoForge.EVENT_BUS.addListener(this::onCommands);
         NeoForge.EVENT_BUS.addListener(this::onEntityJoin);
@@ -62,6 +66,7 @@ public final class ColonyloomMod {
         runtime.core().updateLimits(limits);
         configuredLimits.put(server, limits);
         contentManagers.put(server,server.getResourceManager());
+        runtime.configurePhysical(new NeoForgeChunkAccess(server, tickets));
         IdentityPlatform identity = new IdentityPlatform(server, runtime);
         identities.put(server, identity);
         identity.reconcileLoaded();
@@ -77,6 +82,7 @@ public final class ColonyloomMod {
         var limits = simulationConfig.snapshot();
         if (!limits.equals(configuredLimits.get(event.getServer()))) {
             runtime.core().updateLimits(limits);
+            runtime.physicalLimitsUpdated();
             configuredLimits.put(event.getServer(), limits);
         }
         var manager=event.getServer().getResourceManager();
@@ -121,6 +127,13 @@ public final class ColonyloomMod {
 
     private void onReload(AddReloadListenerEvent event) {
         event.addListener(new ContentLoader());
+    }
+    private synchronized void onBlockChange(net.neoforged.neoforge.event.level.BlockEvent.NeighborNotifyEvent event) {
+        if (event.getLevel() instanceof net.minecraft.server.level.ServerLevel level) {
+            var runtime = runtimes.get(level.getServer());
+            if (runtime != null && runtime.navigation() != null) runtime.navigation().invalidate(new io.github.kpuctajluk.colonyloom.core.chunk.ChunkKey(
+                    level.dimension().location().toString(), event.getPos().getX() >> 4, event.getPos().getZ() >> 4));
+        }
     }
 
     private void onCommands(RegisterCommandsEvent event) {

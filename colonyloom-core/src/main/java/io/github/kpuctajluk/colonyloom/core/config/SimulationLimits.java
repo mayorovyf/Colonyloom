@@ -19,7 +19,7 @@ public final class SimulationLimits {
         CHUNK_DEMANDS("admission.maxChunkDemands", 4096), EVIDENCE("admission.maxEvidence", 8192),
         TOMBSTONES("admission.maxTombstones", 65536), CACHE_ENTRIES("admission.maxCacheEntries", 8192),
         CACHE_ENTRIES_PER_OWNER("admission.maxCacheEntriesPerOwner", 128),
-        LOADED_FOOTPRINT("chunks.maxLoadedFootprint", 128), BLOCK_TICKING("chunks.maxBlockTicking", 64),
+        LOADED_FOOTPRINT("chunks.maxLoadedFootprint", 200), BLOCK_TICKING("chunks.maxBlockTicking", 64),
         ENTITY_TICKING("chunks.maxEntityTicking", 32);
 
         private final String key;

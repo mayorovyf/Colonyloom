@@ -30,8 +30,9 @@ public final class ColonyCommands {
     }
     public record RecoveryInspection(UUID colonyId, UUID checkpointId, long colonyRevision,
             long bindingRevision, List<CitizenRecord> citizens, List<BindingRegistry.Observation> observations,
-            List<io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Snapshot> works, boolean ready) {
-        public RecoveryInspection { citizens = List.copyOf(citizens); observations = List.copyOf(observations); works = List.copyOf(works); }
+            List<io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Snapshot> works,
+            List<io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot> targetClaims, boolean ready) {
+        public RecoveryInspection { citizens = List.copyOf(citizens); observations = List.copyOf(observations); works = List.copyOf(works); targetClaims = List.copyOf(targetClaims); }
     }
     private final ColonyRegistry registry;
     private Map<String, ProfessionDefinition> professions = Map.of();
@@ -117,6 +118,11 @@ public final class ColonyCommands {
         return registry.workBoard().createTimer(workId, colonyId, target, professionId, priority,
                 io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL, activeTicks);
     }
+    public io.github.kpuctajluk.colonyloom.core.work.WorkOrder createMoveWork(CommandContext context, UUID workId, UUID colonyId, WorldPosition target) {
+        requireAvailable(requireRank(context, colonyId, MemberRank.MANAGER));
+        return registry.workBoard().createMove(workId, colonyId, target, 0,
+                io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);
+    }
     public io.github.kpuctajluk.colonyloom.core.work.WorkOrder cancelWork(CommandContext context, UUID workId) {
         var work = registry.workBoard().work(workId);
         requireRank(context, work.colonyId(), MemberRank.MANAGER);
@@ -138,7 +144,7 @@ public final class ColonyCommands {
         List<BindingRegistry.Observation> observations = colonyObservations(citizens);
         boolean ready = !colony.contentBlocked() && citizens.stream().allMatch(value -> registry.bindings().recoveryReady(value.citizenId()));
         long colonyRevision = colony.revision(); long bindingRevision = registry.bindings().revision();
-        return new RecoveryInspection(colonyId, colony.recoveryCheckpointId(), colonyRevision, bindingRevision, citizens, observations, colonyWorks(colonyId), ready);
+        return new RecoveryInspection(colonyId, colony.recoveryCheckpointId(), colonyRevision, bindingRevision, citizens, observations, colonyWorks(colonyId), colonyClaims(colonyId), ready);
     }
     public ColonyRuntime acceptWorld(CommandContext context, UUID colonyId, UUID checkpointId, RecoveryInspection inspection) {
         requireOperator(context);
@@ -148,12 +154,15 @@ public final class ColonyCommands {
         List<BindingRegistry.Observation> observations = colonyObservations(citizens);
         if (!inspection.ready() || colony.contentBlocked() || inspection.colonyRevision() != colony.revision() || inspection.bindingRevision() != registry.bindings().revision() || !inspection.citizens().equals(citizens) || !inspection.observations().equals(observations) || citizens.stream().anyMatch(value -> !registry.bindings().recoveryReady(value.citizenId()))) throw new IllegalStateException("Recovery incomplete or stale; inspect again");
         if (!sameWorkRevisions(inspection.works(), colonyWorks(colonyId))) throw new IllegalStateException("Work state changed; inspect again");
+        if (!inspection.targetClaims().equals(colonyClaims(colonyId))) throw new IllegalStateException("Target state changed; inspect again");
         context.checks().validateRecovery(colony, citizens, observations);
         if (inspection.colonyRevision() != registry.colony(colonyId).revision() || inspection.bindingRevision() != registry.bindings().revision() || !citizens.equals(registry.citizens(colonyId))) throw new IllegalStateException("Recovery changed during verification");
         if (!sameWorkRevisions(inspection.works(), colonyWorks(colonyId))) throw new IllegalStateException("Work state changed during verification");
+        if (!inspection.targetClaims().equals(colonyClaims(colonyId))) throw new IllegalStateException("Target state changed during verification");
         ColonyRuntime changed = revised(colony, colony.ownerId(), colony.members(), false, false, null);
         registry.beforeMutation();
         for (var work : registry.workBoard().works()) if (work.colonyId().equals(colonyId) && !work.terminal()) registry.workBoard().cancel(work.id());
+        for (var claim : inspection.targetClaims()) registry.targetClaims().release(claim.ownerId());
         for (CitizenRecord citizen : registry.citizens(colonyId)) registry.updateCitizen(citizen.reconciled());
         registry.updateColony(changed);
         return changed;
@@ -208,9 +217,21 @@ public final class ColonyCommands {
         registry.beforeMutation(); registry.updateCitizen(changed);
         return changed;
     }
+    public CitizenRecord updateCitizenAdmission(UUID citizenId, CitizenRecord.Admission admission) {
+        CitizenRecord citizen = registry.citizen(citizenId);
+        if (citizen.admission() == admission) return citizen;
+        if (admission == CitizenRecord.Admission.ACTIVE && (citizen.lifecycle() != CitizenRecord.Lifecycle.ALIVE || citizen.readiness() != CitizenRecord.Readiness.READY)) throw new IllegalStateException("Citizen not ready for admission");
+        registry.beforeMutation();
+        if (admission == CitizenRecord.Admission.INACTIVE && citizen.assignedWorkId() != null) registry.workBoard().releaseAssignment(citizen.assignedWorkId());
+        CitizenRecord changed = registry.citizen(citizenId).withAdmission(admission);
+        registry.updateCitizen(changed); return changed;
+    }
     private List<BindingRegistry.Observation> colonyObservations(List<CitizenRecord> citizens) { return citizens.stream().flatMap(value -> registry.bindings().observations(value.citizenId()).stream()).toList(); }
     private List<io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Snapshot> colonyWorks(UUID colonyId) {
         return registry.workBoard().snapshots().stream().filter(work -> work.colonyId().equals(colonyId)).toList();
+    }
+    private List<io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot> colonyClaims(UUID colonyId) {
+        return registry.targetClaims().snapshots().stream().filter(claim -> claim.colonyId().equals(colonyId)).toList();
     }
     private static boolean sameWorkRevisions(List<io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Snapshot> expected, List<io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Snapshot> actual) {
         if (expected.size() != actual.size()) return false;
