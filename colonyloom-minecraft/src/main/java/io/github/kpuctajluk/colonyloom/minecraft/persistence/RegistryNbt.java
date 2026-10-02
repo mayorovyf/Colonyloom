@@ -9,6 +9,8 @@ import io.github.kpuctajluk.colonyloom.core.colony.Territory;
 import io.github.kpuctajluk.colonyloom.core.colony.WorldPosition;
 import io.github.kpuctajluk.colonyloom.core.persistence.RegistrySnapshot;
 import io.github.kpuctajluk.colonyloom.core.persistence.Tombstone;
+import io.github.kpuctajluk.colonyloom.core.work.WorkOrder;
+import io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -27,7 +29,7 @@ final class RegistryNbt {
             "productionOrders", "deliveries", "reservations", "allocations", "evidence", "tombstones", "pinnedDefinitions");
     private static final Map<String, String> KNOWN_TYPES = Map.of("colonies", "colonyloom:colony",
             "citizens", "colonyloom:citizen", "buildings", "colonyloom:building", "tombstones", "colonyloom:tombstone",
-            "bindingObservations", "colonyloom:binding_observation");
+            "bindingObservations", "colonyloom:binding_observation", "works", WorkOrder.ACTIVE_WAIT);
 
     record Decoded(RegistrySnapshot snapshot, Map<String, List<CompoundTag>> retained, Set<UUID> blockedColonies) {}
 
@@ -47,17 +49,18 @@ final class RegistryNbt {
             ListTag entries = list(root, key);
             int limit = switch (key) {
                 case "colonies" -> 3;
-                case "citizens" -> 30;
-                case "buildings" -> 128;
+                case "citizens" -> 300;
+                case "buildings" -> 512;
                 case "bindingObservations" -> 256;
-                case "works", "productionOrders", "deliveries" -> 2048;
-                case "demands" -> 4096;
-                case "reservations", "allocations", "evidence" -> 8192;
+                case "works", "productionOrders", "deliveries" -> 8192;
+                case "demands" -> 16384;
+                case "reservations", "allocations" -> 32768;
+                case "evidence" -> 65536;
                 case "pinnedDefinitions" -> 64;
                 case "tombstones" -> 65536;
                 default -> throw invalid("Unsupported root list: " + key);
             };
-            if (entries.size() > limit) throw invalid("Development admission exceeded: " + key);
+            if (entries.size() > limit) throw invalid("Bounded persistence envelope exceeded: " + key);
             List<CompoundTag> opaque = new ArrayList<>();
             List<CompoundTag> decoded = new ArrayList<>();
             for (Tag element : entries) {
@@ -84,6 +87,10 @@ final class RegistryNbt {
         Set<UUID> unknownBuildings = referencedIds(retained.get("buildings"), "buildingId");
         Set<UUID> unknownWorks = referencedIds(retained.get("works"), "workId");
         Set<UUID> objectIds = new HashSet<>(colonyIds);
+        for (String key : List.of("colonies", "buildings", "works", "citizens")) {
+            String idKey = switch (key) { case "colonies" -> "colonyId"; case "buildings" -> "buildingId"; case "works" -> "workId"; default -> "citizenId"; };
+            for (CompoundTag entry : retained.get(key)) if (entry.hasUUID(idKey) && !objectIds.add(entry.getUUID(idKey))) throw invalid("Duplicate retained object identity");
+        }
         List<BuildingRecord> buildings = new ArrayList<>();
         Set<UUID> buildingIds = new HashSet<>();
         for (CompoundTag entry : known.get("buildings")) {
@@ -97,6 +104,17 @@ final class RegistryNbt {
             buildingIds.add(building.buildingId());
             buildings.add(building);
         }
+        List<WorkOrder.Snapshot> works = new ArrayList<>();
+        Set<UUID> workIds = new HashSet<>();
+        for (CompoundTag entry : known.get("works")) {
+            WorkOrder.Snapshot work = work(entry);
+            if (!objectIds.add(work.id())) throw invalid("Duplicate work identity");
+            if (!colonyIds.contains(work.colonyId())) {
+                if (!unknownColonies.contains(work.colonyId())) throw invalid("Work references missing colony");
+                retained.get("works").add(entry.copy());
+                unknownWorks.add(work.id());
+            } else { works.add(work); workIds.add(work.id()); }
+        }
         List<CitizenRecord> citizens = new ArrayList<>();
         Set<UUID> entityIds = new HashSet<>();
         for (CompoundTag entry : known.get("citizens")) {
@@ -104,17 +122,49 @@ final class RegistryNbt {
             if (!objectIds.add(citizen.citizenId()) || !entityIds.add(citizen.entityId())) throw invalid("Duplicate citizen/entity identity");
             if (!colonyIds.contains(citizen.colonyId()) ||
                     (citizen.homeId() != null && !buildingIds.contains(citizen.homeId())) ||
-                    (citizen.workplaceId() != null && !buildingIds.contains(citizen.workplaceId())) || citizen.assignedWorkId() != null) {
+                    (citizen.workplaceId() != null && !buildingIds.contains(citizen.workplaceId())) ||
+                    (citizen.assignedWorkId() != null && !workIds.contains(citizen.assignedWorkId()))) {
                 if (!colonyIds.contains(citizen.colonyId()) && !unknownColonies.contains(citizen.colonyId())) throw invalid("Citizen references missing colony");
                 if (citizen.homeId() != null && !buildingIds.contains(citizen.homeId()) && !unknownBuildings.contains(citizen.homeId())) throw invalid("Citizen references missing home");
                 if (citizen.workplaceId() != null && !buildingIds.contains(citizen.workplaceId()) && !unknownBuildings.contains(citizen.workplaceId())) throw invalid("Citizen references missing workplace");
-                if (citizen.assignedWorkId() != null && !unknownWorks.contains(citizen.assignedWorkId())) throw invalid("Citizen references missing work");
+                if (citizen.assignedWorkId() != null && !workIds.contains(citizen.assignedWorkId()) && !unknownWorks.contains(citizen.assignedWorkId())) throw invalid("Citizen references missing work");
                 retained.get("citizens").add(entry.copy());
                 blocked.add(citizen.colonyId());
                 continue;
             }
             citizens.add(citizen);
         }
+        Map<UUID, CompoundTag> originalWorks = new HashMap<>();
+        for (CompoundTag entry : known.get("works")) originalWorks.put(uuid(entry, "workId"), entry);
+        Map<UUID, CompoundTag> originalCitizens = new HashMap<>();
+        for (CompoundTag entry : known.get("citizens")) originalCitizens.put(uuid(entry, "citizenId"), entry);
+        Set<UUID> unknownCitizens = referencedIds(retained.get("citizens"), "citizenId");
+        Set<UUID> knownCitizenIds = new HashSet<>();
+        for (CitizenRecord citizen : citizens) knownCitizenIds.add(citizen.citizenId());
+        boolean changed;
+        do {
+            changed = false;
+            for (var iterator = works.iterator(); iterator.hasNext();) {
+                WorkOrder.Snapshot work = iterator.next();
+                boolean opaqueDependency = false;
+                for (UUID dependency : work.dependencies()) {
+                    if (!workIds.contains(dependency) && !unknownWorks.contains(dependency)) throw invalid("Work references missing dependency");
+                    opaqueDependency |= unknownWorks.contains(dependency);
+                }
+                if (work.assignee() != null && !knownCitizenIds.contains(work.assignee()) && !unknownCitizens.contains(work.assignee())) throw invalid("Work references missing citizen");
+                if (opaqueDependency || work.assignee() != null && unknownCitizens.contains(work.assignee())) {
+                    retained.get("works").add(originalWorks.get(work.id()).copy()); unknownWorks.add(work.id());
+                    workIds.remove(work.id()); iterator.remove(); blocked.add(work.colonyId()); changed = true;
+                }
+            }
+            for (var iterator = citizens.iterator(); iterator.hasNext();) {
+                CitizenRecord citizen = iterator.next();
+                if (citizen.assignedWorkId() != null && unknownWorks.contains(citizen.assignedWorkId())) {
+                    retained.get("citizens").add(originalCitizens.get(citizen.citizenId()).copy()); unknownCitizens.add(citizen.citizenId());
+                    knownCitizenIds.remove(citizen.citizenId()); iterator.remove(); blocked.add(citizen.colonyId()); changed = true;
+                }
+            }
+        } while (changed);
         List<Tombstone> tombstones = new ArrayList<>();
         Set<UUID> tombstoneIds = new HashSet<>();
         for (CompoundTag entry : known.get("tombstones")) {
@@ -139,7 +189,7 @@ final class RegistryNbt {
             if (unknownObservedCitizens.contains(citizen.citizenId())) blocked.add(citizen.colonyId());
         }
         blocked.retainAll(colonyIds);
-        return new Decoded(new RegistrySnapshot(colonies, citizens, buildings, tombstones, observations), retained, blocked);
+        return new Decoded(new RegistrySnapshot(colonies, citizens, buildings, tombstones, observations, works), retained, blocked);
     }
 
     static CompoundTag encode(RegistrySnapshot snapshot, UUID checkpoint, Map<String, List<CompoundTag>> retained) {
@@ -150,6 +200,7 @@ final class RegistryNbt {
         root.put("bindingObservations", new ListTag());
         for (ColonyRuntime value : snapshot.colonies()) root.getList("colonies", Tag.TAG_COMPOUND).add(colony(value));
         for (CitizenRecord value : snapshot.citizens()) root.getList("citizens", Tag.TAG_COMPOUND).add(citizen(value));
+        for (WorkOrder.Snapshot value : snapshot.works()) root.getList("works", Tag.TAG_COMPOUND).add(work(value));
         for (BuildingRecord value : snapshot.buildings()) {
             CompoundTag entry = typed("colonyloom:building");
             entry.putUUID("buildingId", value.buildingId());
@@ -179,6 +230,35 @@ final class RegistryNbt {
         }
         retained.forEach((key, entries) -> entries.forEach(entry -> root.getList(key, Tag.TAG_COMPOUND).add(entry.copy())));
         return root;
+    }
+
+    private static WorkOrder.Snapshot work(CompoundTag entry) {
+        ListTag dependencyTags = list(entry, "dependencies");
+        if (dependencyTags.size() > WorkOrder.MAX_DEPENDENCIES) throw invalid("Too many work dependencies");
+        List<UUID> dependencies = new ArrayList<>(dependencyTags.size());
+        for (Tag tag : dependencyTags) dependencies.add(uuid((CompoundTag) tag, "workId"));
+        return new WorkOrder.Snapshot(string(entry, "typeId"), uuid(entry, "workId"), uuid(entry, "colonyId"),
+                position(compound(entry, "target")), entry.contains("professionId") ? string(entry, "professionId") : null,
+                integer(entry, "priority"), AdmissionLedger.Lane.valueOf(string(entry, "lane")),
+                WorkOrder.State.valueOf(string(entry, "state")), optionalUuid(entry, "assignee"), string(entry, "stage"),
+                number(entry, "revision"), dependencies, WorkOrder.Reason.valueOf(string(entry, "waitingReason")),
+                number(entry, "remainingActiveTicks"), number(entry, "ageActiveTicks"));
+    }
+
+    private static CompoundTag work(WorkOrder.Snapshot value) {
+        CompoundTag entry = typed(value.typeId());
+        entry.putUUID("workId", value.id()); entry.putUUID("colonyId", value.colonyId());
+        entry.put("target", position(value.target()));
+        if (value.professionId() != null) entry.putString("professionId", value.professionId());
+        entry.putInt("priority", value.priority()); entry.putString("lane", value.lane().name());
+        entry.putString("state", value.state().name()); optionalUuid(entry, "assignee", value.assignee());
+        entry.putString("stage", value.stage()); entry.putLong("revision", value.revision());
+        entry.putString("waitingReason", value.waitingReason().name());
+        entry.putLong("remainingActiveTicks", value.remainingActiveTicks()); entry.putLong("ageActiveTicks", value.ageActiveTicks());
+        ListTag dependencies = new ListTag();
+        for (UUID id : value.dependencies()) { CompoundTag reference = new CompoundTag(); reference.putUUID("workId", id); dependencies.add(reference); }
+        entry.put("dependencies", dependencies);
+        return entry;
     }
 
     private static ColonyRuntime colony(CompoundTag entry) {

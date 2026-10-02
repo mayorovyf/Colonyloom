@@ -58,6 +58,7 @@ public final class MinecraftServerRuntime {
 
     public void configureProfessions(Collection<ProfessionDefinition> definitions) {
         runtime.configureCommands(persistence::ensureSessionDirty, definitions);
+        runtime.setSimulationEnabled(persistence.isAvailable());
     }
 
     public void postTick(MinecraftServer eventServer) {
@@ -67,6 +68,7 @@ public final class MinecraftServerRuntime {
         if (minecraftTick != lastMinecraftTick + 1) {
             throw new IllegalStateException("Duplicate or non-sequential Minecraft post-tick event");
         }
+        if (!persistence.isAvailable()) runtime.setSimulationEnabled(false);
         runtime.tick(runtime.serverTick() + 1);
         lastMinecraftTick = minecraftTick;
     }

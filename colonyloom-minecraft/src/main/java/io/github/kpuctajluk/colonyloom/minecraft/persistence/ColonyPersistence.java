@@ -58,6 +58,7 @@ public final class ColonyPersistence {
             // is unbounded and requires vanilla DFU. Attach the exact bounded preflight result
             // instead of computeIfAbsent, which could silently replace a failed load with empty data.
             server.overworld().getDataStorage().set(ColonySavedData.NAME, loaded);
+            loaded.bindSnapshotSource(runtime.registry()::snapshot);
         } catch (IOException | RuntimeException exception) {
             persistence.failureReason = "Colonyloom persistence blocked: " + exception.getMessage();
             persistence.data = null;
@@ -88,6 +89,7 @@ public final class ColonyPersistence {
     /** REQUIRED before the first durable mutation, including identity binding transitions. */
     public void ensureSessionDirty() {
         requireAvailable();
+        data.setDirty();
         if (sessionDirty) return;
         try {
             DurableNbt.writeVerified(markerPath, marker(false, data.checkpointId()), DurableNbt.MARKER_LIMIT);

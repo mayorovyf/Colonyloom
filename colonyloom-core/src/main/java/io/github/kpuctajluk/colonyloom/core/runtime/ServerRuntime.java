@@ -4,6 +4,11 @@ import io.github.kpuctajluk.colonyloom.core.citizen.BindingRegistry;
 import io.github.kpuctajluk.colonyloom.core.citizen.ProfessionDefinition;
 import io.github.kpuctajluk.colonyloom.core.colony.ColonyRegistry;
 import io.github.kpuctajluk.colonyloom.core.command.ColonyCommands;
+import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits;
+import io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger;
+import io.github.kpuctajluk.colonyloom.core.scheduler.GlobalWorkBudgets;
+import io.github.kpuctajluk.colonyloom.core.scheduler.SimulationScheduler;
+import io.github.kpuctajluk.colonyloom.core.work.WorkBoard;
 import java.util.Collection;
 import java.util.Objects;
 import java.util.UUID;
@@ -22,12 +27,18 @@ public final class ServerRuntime {
     private long serverTick;
     private final ColonyRegistry registry;
     private final ColonyCommands commands;
+    private final GlobalWorkBudgets budgets;
+    private final SimulationScheduler scheduler;
+    private boolean simulationEnabled;
 
     private ServerRuntime(Thread ownerThread) {
         this.ownerThread = ownerThread;
         this.sessionId = UUID.randomUUID();
         this.registry = new ColonyRegistry(this::requireOwnerThread);
         this.commands = new ColonyCommands(registry);
+        budgets = new GlobalWorkBudgets(SimulationLimits.development());
+        scheduler = new SimulationScheduler(registry.workBoard(), budgets);
+        registry.setAfterRestore(scheduler::rebuild);
         registry.setBeforeMutation(() -> {
             requireLifecycle(Lifecycle.RUNNING);
             throw new IllegalStateException("Persistence mutation gate is not configured");
@@ -46,6 +57,15 @@ public final class ServerRuntime {
     public ColonyRegistry registry() { requireOwnerThread(); return registry; }
     public BindingRegistry bindings() { requireOwnerThread(); return registry.bindings(); }
     public ColonyCommands commands() { requireOwnerThread(); return commands; }
+    public WorkBoard workBoard() { requireOwnerThread(); return registry.workBoard(); }
+    public AdmissionLedger admission() { requireOwnerThread(); return registry.admission(); }
+    public GlobalWorkBudgets budgets() { requireOwnerThread(); return budgets; }
+    public SimulationScheduler scheduler() { requireOwnerThread(); return scheduler; }
+    public void updateLimits(SimulationLimits limits) {
+        requireLifecycle(Lifecycle.RUNNING);
+        registry.admission().updateLimits(limits); budgets.updateLimits(limits); scheduler.limitsUpdated();
+    }
+    public void setSimulationEnabled(boolean enabled) { requireLifecycle(Lifecycle.RUNNING); simulationEnabled = enabled; if (enabled) scheduler.rebuild(); }
 
     public void configureCommands(Runnable beforeMutation, Collection<ProfessionDefinition> professions) {
         requireLifecycle(Lifecycle.RUNNING);
@@ -55,6 +75,7 @@ public final class ServerRuntime {
             requireLifecycle(Lifecycle.RUNNING);
             beforeMutation.run();
         });
+        simulationEnabled = true;
     }
 
     public UUID sessionId() {
@@ -79,6 +100,7 @@ public final class ServerRuntime {
             throw new IllegalStateException("Runtime tick must advance exactly once");
         }
         serverTick = nextServerTick;
+        if (simulationEnabled) scheduler.tick(serverTick);
     }
 
     public void beginStopping() {

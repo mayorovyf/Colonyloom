@@ -20,6 +20,7 @@ public final class ColonySavedData extends SavedData {
     private final Set<UUID> contentBlockedColonies;
     private RegistrySnapshot snapshot;
     private UUID checkpointId;
+    private java.util.function.Supplier<RegistrySnapshot> snapshotSource;
 
     private ColonySavedData(RegistrySnapshot snapshot, UUID checkpointId,
             Map<String, List<CompoundTag>> retained, Set<UUID> contentBlockedColonies) {
@@ -64,6 +65,9 @@ public final class ColonySavedData extends SavedData {
         return retained.values().stream().mapToInt(List::size).sum();
     }
 
+    public void bindSnapshotSource(java.util.function.Supplier<RegistrySnapshot> source) {
+        snapshotSource = java.util.Objects.requireNonNull(source);
+    }
     public void capture(RegistrySnapshot snapshot) {
         this.snapshot = snapshot;
         setDirty();
@@ -76,6 +80,7 @@ public final class ColonySavedData extends SavedData {
 
     @Override
     public CompoundTag save(CompoundTag tag, HolderLookup.Provider registries) {
+        if (snapshotSource != null) snapshot = snapshotSource.get();
         CompoundTag encoded = RegistryNbt.encode(snapshot, checkpointId, retained);
         tag.merge(encoded);
         return tag;

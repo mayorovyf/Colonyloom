@@ -152,14 +152,38 @@ final class IdentityPlatform {
     String assign(CommandSourceStack source,UUID citizen,String profession) throws CommandSyntaxException {
         bridge.core().commands().assignProfession(context(source),citizen,profession); bridge.persistence().capture(); return "citizen="+citizen+" profession="+profession;
     }
+    String createTimer(CommandSourceStack source,UUID colony,long ticks) throws CommandSyntaxException {
+        var work=bridge.core().commands().createTimerWork(context(source),UUID.randomUUID(),colony,
+                position(source.getLevel(),BlockPos.containing(source.getPosition())),null,0,ticks);
+        bridge.persistence().capture();
+        return "work="+work.id()+" state="+work.state()+" remainingActiveTicks="+work.remainingActiveTicks();
+    }
+    String cancelWork(CommandSourceStack source,UUID workId) throws CommandSyntaxException {
+        var work=bridge.core().commands().cancelWork(context(source),workId);
+        bridge.persistence().capture(); return "work="+work.id()+" state="+work.state();
+    }
+    String priorityWork(CommandSourceStack source,UUID workId,int priority) throws CommandSyntaxException {
+        var work=bridge.core().commands().prioritizeWork(context(source),workId,priority);
+        bridge.persistence().capture(); return "work="+work.id()+" priority="+work.priority();
+    }
     String status(CommandSourceStack source,UUID colony) throws CommandSyntaxException {
         var state=bridge.core().commands().status(context(source),colony);
         StringBuilder result=new StringBuilder(state.toString());
+        var admission = bridge.core().admission();
+        for (var resource : io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.values()) {
+            result.append("\nadmission=").append(resource).append(" used=").append(admission.used(resource))
+                    .append(" limit=").append(admission.limits().resource(resource)).append(" overLimit=").append(admission.overLimit(resource));
+        }
         for (var citizen : bridge.core().registry().citizens(colony)) {
             result.append("\ncitizen=").append(citizen.citizenId()).append(" entity=").append(citizen.entityId())
                     .append(" epoch=").append(citizen.bindingEpoch()).append(" lifecycle=").append(citizen.lifecycle())
                     .append(" readiness=").append(citizen.readiness()).append(" profession=").append(citizen.professionId())
                     .append(" food=").append(citizen.needs().get("food"));
+        }
+        for (var work:bridge.core().workBoard().works()) if(work.colonyId().equals(colony)) {
+            result.append("\nwork=").append(work.id()).append(" state=").append(work.state())
+                    .append(" reason=").append(work.waitingReason()).append(" assignee=").append(work.assignee())
+                    .append(" remainingActiveTicks=").append(work.remainingActiveTicks()).append(" revision=").append(work.revision());
         }
         return result.toString();
     }

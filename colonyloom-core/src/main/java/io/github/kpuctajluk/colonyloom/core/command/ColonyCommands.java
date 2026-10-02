@@ -30,8 +30,8 @@ public final class ColonyCommands {
     }
     public record RecoveryInspection(UUID colonyId, UUID checkpointId, long colonyRevision,
             long bindingRevision, List<CitizenRecord> citizens, List<BindingRegistry.Observation> observations,
-            boolean ready) {
-        public RecoveryInspection { citizens = List.copyOf(citizens); observations = List.copyOf(observations); }
+            List<io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Snapshot> works, boolean ready) {
+        public RecoveryInspection { citizens = List.copyOf(citizens); observations = List.copyOf(observations); works = List.copyOf(works); }
     }
     private final ColonyRegistry registry;
     private Map<String, ProfessionDefinition> professions = Map.of();
@@ -49,7 +49,7 @@ public final class ColonyCommands {
         registry.requireOwner();
         if (context.actorId() == null) throw new SecurityException("Colony founding requires a player");
         ColonyRuntime created = new ColonyRuntime(colonyId, name, territory, context.actorId(), Map.of(), 1, 1, false, null, false);
-        if (registry.usedId(colonyId) || registry.colonies().size() >= ColonyRegistry.MAX_COLONIES) throw new IllegalStateException("Colony identity/capacity unavailable");
+        if (registry.usedId(colonyId)) throw new IllegalStateException("Colony identity unavailable");
         if (registry.colonies().stream().anyMatch(value -> territory.overlaps(value.territory()))) throw new IllegalArgumentException("Colony territories overlap");
         context.checks().validateTerritory(territory);
         registry.beforeMutation();
@@ -87,14 +87,13 @@ public final class ColonyCommands {
         requireAvailable(colony);
         Objects.requireNonNull(citizenId, "citizenId"); Objects.requireNonNull(entityId, "entityId");
         if (!colony.territory().contains(position)) throw new IllegalArgumentException("Citizen position outside colony");
-        if (registry.usedId(citizenId) || registry.entityIdUsed(entityId) || registry.citizens().size() >= ColonyRegistry.MAX_CITIZENS || registry.tombstones().size() >= ColonyRegistry.MAX_TOMBSTONES) throw new IllegalStateException("Citizen identity/capacity unavailable");
+        if (registry.usedId(citizenId) || registry.entityIdUsed(entityId)) throw new IllegalStateException("Citizen identity unavailable");
         if (registry.bindings().observations().size() >= BindingRegistry.MAX_OBSERVATIONS) throw new IllegalStateException("Binding observation capacity unavailable");
         CitizenRecord created = new CitizenRecord(citizenId, colonyId, entityId, 1, null, null, null, null, Map.of(), Map.of("food", 20), CitizenRecord.Lifecycle.ALIVE, CitizenRecord.Admission.ACTIVE, CitizenRecord.Readiness.UNKNOWN, 0, Map.of("food", 1200L), position, 1);
         ColonyRuntime changed = revised(colony, colony.ownerId(), colony.members(), false, false, null);
         context.checks().validateCitizenPosition(colony, position);
         registry.beforeMutation();
-        spawn.accept(created);
-        registry.addCitizen(created); registry.updateColony(changed);
+        registry.addCitizen(created, spawn); registry.updateColony(changed);
         return created;
     }
     public CitizenRecord assignProfession(CommandContext context, UUID citizenId, String professionId) {
@@ -111,6 +110,27 @@ public final class ColonyCommands {
     }
     public ColonyRuntime status(CommandContext context, UUID colonyId) { return requireRank(context, colonyId, MemberRank.VIEWER); }
 
+    public io.github.kpuctajluk.colonyloom.core.work.WorkOrder createTimerWork(CommandContext context, UUID workId, UUID colonyId, WorldPosition target, String professionId, int priority, long activeTicks) {
+        ColonyRuntime colony = requireRank(context, colonyId, MemberRank.MANAGER);
+        requireAvailable(colony);
+        if (professionId != null && !professions.containsKey(professionId)) throw new IllegalArgumentException("Unknown profession ID");
+        return registry.workBoard().createTimer(workId, colonyId, target, professionId, priority,
+                io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL, activeTicks);
+    }
+    public io.github.kpuctajluk.colonyloom.core.work.WorkOrder cancelWork(CommandContext context, UUID workId) {
+        var work = registry.workBoard().work(workId);
+        requireRank(context, work.colonyId(), MemberRank.MANAGER);
+        // Cancellation is service work: recovery/unavailable colonies must still release obligations.
+        registry.workBoard().cancel(workId);
+        return work;
+    }
+    public io.github.kpuctajluk.colonyloom.core.work.WorkOrder prioritizeWork(CommandContext context, UUID workId, int priority) {
+        var work = registry.workBoard().work(workId);
+        requireAvailable(requireRank(context, work.colonyId(), MemberRank.MANAGER));
+        registry.workBoard().priority(workId, priority);
+        return work;
+    }
+
     public RecoveryInspection inspect(CommandContext context, UUID colonyId) {
         requireOperator(context);
         ColonyRuntime colony = registry.colony(colonyId);
@@ -118,7 +138,7 @@ public final class ColonyCommands {
         List<BindingRegistry.Observation> observations = colonyObservations(citizens);
         boolean ready = !colony.contentBlocked() && citizens.stream().allMatch(value -> registry.bindings().recoveryReady(value.citizenId()));
         long colonyRevision = colony.revision(); long bindingRevision = registry.bindings().revision();
-        return new RecoveryInspection(colonyId, colony.recoveryCheckpointId(), colonyRevision, bindingRevision, citizens, observations, ready);
+        return new RecoveryInspection(colonyId, colony.recoveryCheckpointId(), colonyRevision, bindingRevision, citizens, observations, colonyWorks(colonyId), ready);
     }
     public ColonyRuntime acceptWorld(CommandContext context, UUID colonyId, UUID checkpointId, RecoveryInspection inspection) {
         requireOperator(context);
@@ -127,11 +147,15 @@ public final class ColonyCommands {
         List<CitizenRecord> citizens = registry.citizens(colonyId);
         List<BindingRegistry.Observation> observations = colonyObservations(citizens);
         if (!inspection.ready() || colony.contentBlocked() || inspection.colonyRevision() != colony.revision() || inspection.bindingRevision() != registry.bindings().revision() || !inspection.citizens().equals(citizens) || !inspection.observations().equals(observations) || citizens.stream().anyMatch(value -> !registry.bindings().recoveryReady(value.citizenId()))) throw new IllegalStateException("Recovery incomplete or stale; inspect again");
+        if (!sameWorkRevisions(inspection.works(), colonyWorks(colonyId))) throw new IllegalStateException("Work state changed; inspect again");
         context.checks().validateRecovery(colony, citizens, observations);
         if (inspection.colonyRevision() != registry.colony(colonyId).revision() || inspection.bindingRevision() != registry.bindings().revision() || !citizens.equals(registry.citizens(colonyId))) throw new IllegalStateException("Recovery changed during verification");
-        List<CitizenRecord> changedCitizens = citizens.stream().map(CitizenRecord::reconciled).toList();
+        if (!sameWorkRevisions(inspection.works(), colonyWorks(colonyId))) throw new IllegalStateException("Work state changed during verification");
         ColonyRuntime changed = revised(colony, colony.ownerId(), colony.members(), false, false, null);
-        registry.beforeMutation(); changedCitizens.forEach(registry::updateCitizen); registry.updateColony(changed);
+        registry.beforeMutation();
+        for (var work : registry.workBoard().works()) if (work.colonyId().equals(colonyId) && !work.terminal()) registry.workBoard().cancel(work.id());
+        for (CitizenRecord citizen : registry.citizens(colonyId)) registry.updateCitizen(citizen.reconciled());
+        registry.updateColony(changed);
         return changed;
     }
     public CitizenRecord bind(CommandContext context, UUID citizenId, UUID chosenEntityId) {
@@ -146,7 +170,10 @@ public final class ColonyCommands {
         context.checks().validateRecovery(colony, List.of(citizen), registry.bindings().observations(citizenId));
         if (!citizen.equals(registry.citizen(citizenId))) throw new IllegalStateException("Identity changed during physical verification");
         registry.bindings().validateBind(citizenId, chosenEntityId);
-        registry.beforeMutation(); registry.updateCitizen(changed); registry.bindings().applyBind(citizenId, chosenEntityId, epoch); registry.updateColony(changedColony);
+        registry.beforeMutation();
+        if (citizen.assignedWorkId() != null) registry.workBoard().transition(citizen.assignedWorkId(), io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.WAITING, io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.RECONCILING, "timer");
+        changed = registry.citizen(citizenId).withBinding(chosenEntityId, epoch);
+        registry.updateCitizen(changed); registry.bindings().applyBind(citizenId, chosenEntityId, epoch); registry.updateColony(changedColony);
         return changed;
     }
 
@@ -161,13 +188,15 @@ public final class ColonyCommands {
         CitizenRecord citizen = registry.citizen(citizenId);
         if (citizen.lifecycle() == lifecycle) return citizen;
         if (citizen.lifecycle() != CitizenRecord.Lifecycle.ALIVE && lifecycle != CitizenRecord.Lifecycle.REMOVED) throw new IllegalStateException("Invalid lifecycle transition");
-        if (registry.tombstones().size() >= ColonyRegistry.MAX_TOMBSTONES && registry.tombstones().stream().noneMatch(value -> value.citizenId().equals(citizenId))) throw new IllegalStateException("Tombstone capacity reached");
         CitizenRecord changed = citizen.withLifecycle(lifecycle);
         ColonyRuntime colony = registry.colony(citizen.colonyId());
         ColonyRuntime changedColony = revised(colony, colony.ownerId(), colony.members(), false, colony.recoveryBlocked(), colony.recoveryCheckpointId());
         Tombstone tombstone = new Tombstone(citizenId, citizen.colonyId(), citizen.bindingEpoch(), lifecycle);
         Math.incrementExact(registry.bindings().revision());
-        registry.beforeMutation(); registry.updateCitizen(changed); registry.addTombstone(tombstone); registry.bindings().quarantine(citizenId); registry.updateColony(changedColony);
+        registry.beforeMutation();
+        if (citizen.assignedWorkId() != null) registry.workBoard().transition(citizen.assignedWorkId(), io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.WAITING, io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.RECONCILING, "timer");
+        changed = registry.citizen(citizenId).withLifecycle(lifecycle);
+        registry.updateCitizen(changed); registry.addTombstone(tombstone); registry.bindings().quarantine(citizenId); registry.updateColony(changedColony);
         return changed;
     }
     public CitizenRecord updateCitizenReadiness(UUID citizenId, CitizenRecord.Readiness readiness) {
@@ -180,6 +209,14 @@ public final class ColonyCommands {
         return changed;
     }
     private List<BindingRegistry.Observation> colonyObservations(List<CitizenRecord> citizens) { return citizens.stream().flatMap(value -> registry.bindings().observations(value.citizenId()).stream()).toList(); }
+    private List<io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Snapshot> colonyWorks(UUID colonyId) {
+        return registry.workBoard().snapshots().stream().filter(work -> work.colonyId().equals(colonyId)).toList();
+    }
+    private static boolean sameWorkRevisions(List<io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Snapshot> expected, List<io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Snapshot> actual) {
+        if (expected.size() != actual.size()) return false;
+        for (int i = 0; i < expected.size(); i++) if (!expected.get(i).id().equals(actual.get(i).id()) || expected.get(i).revision() != actual.get(i).revision()) return false;
+        return true;
+    }
     private ColonyRuntime requireRank(CommandContext context, UUID colonyId, MemberRank required) {
         ColonyRuntime colony = registry.colony(colonyId);
         MemberRank actual = colony.rank(context.actorId());

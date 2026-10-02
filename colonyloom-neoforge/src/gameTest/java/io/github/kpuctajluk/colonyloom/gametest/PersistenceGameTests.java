@@ -31,6 +31,40 @@ import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 @PrefixGameTestTemplate(false)
 public final class PersistenceGameTests {
     @GameTest(template="identity_empty")
+    public static void activeTimerRestoresResidualWithoutOfflineProgress(GameTestHelper helper) throws Exception {
+        ServerRuntime source = fixture();
+        UUID workId = id(120);
+        var work = source.workBoard().createTimer(workId, id(1), source.registry().citizen(id(20)).lastKnownPosition(),
+                null, 4, io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL, 200);
+        source.commands().updateCitizenReadiness(id(20), CitizenRecord.Readiness.READY);
+        for (int tick = 0; tick < 60; tick++) source.tick(source.serverTick() + 1);
+        RegistrySnapshot snapshot = source.registry().snapshot();
+        long residual = snapshot.works().stream().filter(value -> value.id().equals(workId)).findFirst().orElseThrow().remainingActiveTicks();
+        helper.assertTrue(residual > 0 && residual < 200, "Timer did not make partial active progress");
+        ColonySavedData data = ColonySavedData.empty(snapshot);
+        try (CompressedState file = new CompressedState(data.save(new CompoundTag(), helper.getLevel().registryAccess()))) {
+            ColonySavedData loaded = ColonySavedData.preflight(file.path, helper.getLevel().registryAccess());
+            ServerRuntime restored = ServerRuntime.start(Thread.currentThread());
+            restored.configureCommands(() -> {}, List.of());
+            restored.registry().restore(loaded.snapshot());
+            restored.scheduler().rebuild();
+            var resumed = restored.workBoard().work(workId);
+            helper.assertTrue(resumed.remainingActiveTicks() == residual, "Compressed reload reset remaining active time");
+            for (int tick = 0; tick < 40; tick++) restored.tick(restored.serverTick() + 1);
+            helper.assertTrue(resumed.remainingActiveTicks() == residual, "Unreconciled/offline citizen advanced timer");
+            CitizenRecord citizen = restored.registry().citizen(id(20));
+            restored.bindings().observe(citizen.citizenId(), citizen.entityId(), citizen.bindingEpoch());
+            restored.commands().updateCitizenReadiness(citizen.citizenId(), CitizenRecord.Readiness.READY);
+            for (int tick = 0; tick < 1000 && !resumed.terminal(); tick++) restored.tick(restored.serverTick() + 1);
+            helper.assertTrue(resumed.state() == io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.COMPLETED && resumed.remainingActiveTicks() == 0, "Residual timer failed completion");
+            long completedRevision = resumed.revision();
+            for (int tick = 0; tick < 40; tick++) restored.tick(restored.serverTick() + 1);
+            helper.assertTrue(resumed.revision() == completedRevision && restored.registry().citizen(citizen.citizenId()).assignedWorkId() == null, "Timer executed twice or retained assignee");
+        }
+        helper.succeed();
+    }
+
+    @GameTest(template="identity_empty")
     public static void corruptedAndFutureStateAreNotReplaced(GameTestHelper helper) throws Exception {
         Path directory=Files.createTempDirectory("colonyloom-preflight-test-");
         try {
@@ -39,7 +73,7 @@ public final class PersistenceGameTests {
             try { ColonySavedData.preflight(corrupt,helper.getLevel().registryAccess()); helper.fail("Corrupt file accepted"); }
             catch(java.io.IOException expected) { }
             helper.assertTrue(Arrays.equals(damaged,Files.readAllBytes(corrupt)),"Corrupt file overwritten");
-            CompoundTag root=ColonySavedData.empty(new RegistrySnapshot(List.of(),List.of(),List.of(),List.of(),List.of()))
+            CompoundTag root=ColonySavedData.empty(new RegistrySnapshot(List.of(),List.of(),List.of(),List.of(),List.of(),List.of()))
                     .save(new CompoundTag(),helper.getLevel().registryAccess());
             root.putInt("schemaVersion",2);
             CompoundTag envelope=new CompoundTag(); envelope.put("data",root);
@@ -216,7 +250,7 @@ public final class PersistenceGameTests {
         ColonyRuntime second = new ColonyRuntime(id(2), "Second", new Territory("minecraft:overworld", 64, 0, 95, 31),
                 id(11), Map.of(id(13), MemberRank.VIEWER), 5, 2, false, null, false);
         List<CitizenRecord> citizens = List.of(citizen(20, 1, 30, 1, 4), citizen(21, 1, 31, 7, 8), citizen(22, 2, 32, 3, 68));
-        runtime.registry().restore(new RegistrySnapshot(List.of(first, second), citizens, List.of(), List.of(), List.of()));
+        runtime.registry().restore(new RegistrySnapshot(List.of(first, second), citizens, List.of(), List.of(), List.of(), List.of()));
         for (CitizenRecord citizen : citizens) runtime.bindings().observe(citizen.citizenId(), citizen.entityId(), citizen.bindingEpoch());
         runtime.bindings().unload(id(31));
         runtime.bindings().observe(id(22), id(33), 2);

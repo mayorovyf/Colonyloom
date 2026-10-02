@@ -38,6 +38,30 @@ final class ColonyCommandsTest {
         runtime.bindings().observe(citizen.citizenId(), citizen.entityId(), citizen.bindingEpoch());
         return citizen;
     }
+    @Test
+    void workAuthorityAndCitizenAdmissionRejectBeforePhysicalEffects() {
+        ServerRuntime runtime = runtime();
+        ColonyRuntime colony = colony(runtime, 0);
+        UUID viewer = UUID.randomUUID();
+        runtime.commands().setMember(context(owner, false), colony.colonyId(), viewer, MemberRank.VIEWER);
+        WorldPosition target = new WorldPosition("minecraft:overworld", 1, 64, 1);
+        assertThrows(SecurityException.class, () -> runtime.commands().createTimerWork(context(viewer, true), UUID.randomUUID(), colony.colonyId(), target, null, 0, 20));
+        var work = runtime.commands().createTimerWork(context(owner, false), UUID.randomUUID(), colony.colonyId(), target, null, 0, 20);
+        assertThrows(SecurityException.class, () -> runtime.commands().cancelWork(context(viewer, true), work.id()));
+        runtime.registry().markRecoveryBlocked(UUID.randomUUID());
+        runtime.commands().cancelWork(context(owner, false), work.id());
+        assertEquals(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.CANCELLED, work.state());
+        ServerRuntime capped = runtime();
+        ColonyRuntime other = colony(capped, 64);
+        capped.updateLimits(io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.development()
+                .withResource(io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.CITIZENS, 1));
+        citizen(capped, other);
+        int physicalCount = spawned.size();
+        assertThrows(IllegalStateException.class, () -> citizen(capped, other));
+        assertEquals(physicalCount, spawned.size());
+        assertEquals(1, capped.registry().citizens().size());
+    }
+
 
     @Test
     void membershipAndOperatorPrivilegesNeverCrossColonyAuthority() {
@@ -166,7 +190,7 @@ final class ColonyCommandsTest {
         assertTrue(restored.bindings().activeEntity(citizen.citizenId()).isEmpty());
         assertThrows(IllegalStateException.class, () -> restored.commands().bind(context(owner, true), citizen.citizenId(), citizen.entityId()));
         RegistrySnapshot before = restored.registry().snapshot();
-        RegistrySnapshot invalid = new RegistrySnapshot(before.colonies(), List.of(citizen, citizen), before.buildings(), before.tombstones(), before.observations());
+        RegistrySnapshot invalid = new RegistrySnapshot(before.colonies(), List.of(citizen, citizen), before.buildings(), before.tombstones(), before.observations(), before.works());
         assertThrows(IllegalArgumentException.class, () -> restored.registry().restore(invalid));
         assertEquals(before, restored.registry().snapshot());
     }

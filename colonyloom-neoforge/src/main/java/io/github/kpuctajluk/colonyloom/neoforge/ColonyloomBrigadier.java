@@ -2,6 +2,8 @@ package io.github.kpuctajluk.colonyloom.neoforge;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.LongArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.arguments.GameProfileArgument;
@@ -45,6 +47,16 @@ final class ColonyloomBrigadier {
         root.then(citizen);
         root.then(literal("status").then(argument("colony", UuidArgument.uuid()).executes(ctx -> execute(ctx, resolve, platform ->
                 platform.status(ctx.getSource(), uuid(ctx, "colony"))))));
+        var work = literal("work");
+        work.then(literal("wait").then(argument("colony", UuidArgument.uuid())
+                .then(argument("ticks", LongArgumentType.longArg(1, 1_000_000_000L)).executes(ctx -> execute(ctx, resolve, platform ->
+                        platform.createTimer(ctx.getSource(), uuid(ctx, "colony"), LongArgumentType.getLong(ctx, "ticks")))))));
+        work.then(literal("cancel").then(argument("work", UuidArgument.uuid()).executes(ctx -> execute(ctx, resolve, platform ->
+                platform.cancelWork(ctx.getSource(), uuid(ctx, "work"))))));
+        work.then(literal("priority").then(argument("work", UuidArgument.uuid())
+                .then(argument("priority", IntegerArgumentType.integer(0, 10)).executes(ctx -> execute(ctx, resolve, platform ->
+                        platform.priorityWork(ctx.getSource(), uuid(ctx, "work"), IntegerArgumentType.getInteger(ctx, "priority")))))));
+        root.then(work);
         var recovery = literal("recovery").requires(source -> source.hasPermission(2));
         recovery.then(literal("inspect").then(argument("colony", UuidArgument.uuid()).executes(ctx -> execute(ctx, resolve, platform ->
                 platform.inspect(ctx.getSource(), uuid(ctx, "colony"))))));

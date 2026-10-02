@@ -68,7 +68,7 @@ public final class IdentityScenarioMod {
 
     private void register(RegisterCommandsEvent event) {
         var identity = literal("identity");
-        for (String action : List.of("setup", "verify", "conflict", "recovery-check", "isolation")) {
+        for (String action : List.of("setup", "verify", "conflict", "recovery-check", "isolation", "timer-start", "timer-save", "timer-resume", "timer-complete", "config-observe")) {
             identity.then(literal(action).executes(context -> run(context.getSource(), action)));
         }
         event.getDispatcher().register(literal("colonyloomtest")
@@ -80,12 +80,13 @@ public final class IdentityScenarioMod {
         String requested = System.getProperty("colonyloom.test.identityAction", "");
         if (requested.isBlank()) return;
         AutomaticRun state = automaticRuns.computeIfAbsent(server, ignored -> new AutomaticRun(requested));
-        if (state.done) return;
+        if (state.done && !state.action.equals("config-observe")) return;
         ServerPlayer player = server.getPlayerList().getPlayers().stream()
                 .filter(candidate -> !(candidate instanceof net.neoforged.neoforge.common.util.FakePlayer))
                 .findFirst().orElse(null);
         if (player == null) return;
         if (++state.connectedTicks < 100) return;
+        if (state.action.equals("config-observe") && state.connectedTicks % 100 != 0) return;
         CommandSourceStack source = player.createCommandSourceStack().withPermission(2);
         try {
             if (state.connectedTicks < 1200 && !automaticPositionsReady(source, state.action)) return;
@@ -109,7 +110,7 @@ public final class IdentityScenarioMod {
                 BlockPos position = origin.offset(offset, 0, 4);
                 if (!level.hasChunkAt(position) || !level.isPositionEntityTicking(position)) return false;
             }
-        } else if (action.equals("verify")) {
+        } else if (action.equals("verify") || action.startsWith("timer-")) {
             CompoundTag manifest = readManifest(source);
             for (Tag value : manifest.getList("citizens", Tag.TAG_COMPOUND)) {
                 int[] position = ((CompoundTag) value).getIntArray("position");
@@ -142,6 +143,17 @@ public final class IdentityScenarioMod {
                     case "verify" -> verify(source, manifest, false);
                     case "conflict" -> conflict(source, player, manifest);
                     case "recovery-check" -> recovery(source, manifest);
+                    case "timer-start", "timer-save", "timer-resume", "timer-complete" -> timer(source, manifest, action);
+                    case "config-observe" -> {
+                        for (Tag tag : manifest.getList("colonies", Tag.TAG_COMPOUND)) {
+                            UUID colony = ((CompoundTag) tag).getUUID("id");
+                            String status = success(source, "colonyloom status " + colony);
+                            require(source, status.contains("admission=CITIZENS used=3"), "config_preserves_accepted_citizens", status);
+                            if (status.contains("admission=CITIZENS used=3 limit=2 overLimit=1")) {
+                                refused(timerSource(source, manifest, colony), "colonyloom citizen create " + colony + " " + coordinates(BlockPos.containing(timerSource(source, manifest, colony).getPosition())));
+                            }
+                        }
+                    }
                     default -> throw new IllegalArgumentException("Unknown identity scenario");
                 }
             }
@@ -154,6 +166,59 @@ public final class IdentityScenarioMod {
             source.sendFailure(Component.literal("Identity scenario " + action + " FAIL: " + error.getMessage()));
             return 0;
         }
+    }
+
+    private static void timer(CommandSourceStack source, CompoundTag manifest, String action) throws Exception {
+        ListTag colonies = manifest.getList("colonies", Tag.TAG_COMPOUND);
+        if (action.equals("timer-start")) {
+            require(source, !manifest.contains("timerWorks"), "timer_fixture_once", action);
+            ListTag timers = new ListTag();
+            for (Tag tag : colonies) {
+                UUID colony = ((CompoundTag) tag).getUUID("id");
+                CompoundTag entry = new CompoundTag(); entry.putUUID("colonyId", colony);
+                UUID work = uuid(success(timerSource(source, manifest, colony), "colonyloom work wait " + colony + " 12000"), "work");
+                success(source, "colonyloom work priority " + work + " 4");
+                entry.putUUID("workId", work); timers.add(entry);
+            }
+            manifest.put("timerWorks", timers); writeManifest(source, manifest);
+            return;
+        }
+        ListTag timers = manifest.getList("timerWorks", Tag.TAG_COMPOUND);
+        require(source, timers.size() == 2, "timer_two_colonies", action);
+        for (Tag tag : timers) {
+            CompoundTag timer = (CompoundTag) tag;
+            UUID colony = timer.getUUID("colonyId"), workId = timer.getUUID("workId");
+            String status = success(source, "colonyloom status " + colony);
+            var match = Pattern.compile("work=" + workId + " state=(\\w+) reason=\\w+ assignee=([^\\s]+) remainingActiveTicks=(\\d+) revision=(\\d+)").matcher(status);
+            require(source, match.find(), "timer_status_present", status);
+            String state = match.group(1); long remaining = Long.parseLong(match.group(3));
+            if (action.equals("timer-save")) {
+                require(source, remaining > 0 && remaining < 12000 && state.equals("RUNNING"), "timer_partial_real_progress", match.group());
+                timer.putLong("remainingAtSave", remaining);
+            } else if (action.equals("timer-resume")) {
+                require(source, timer.contains("remainingAtSave") && remaining > 0 && remaining <= timer.getLong("remainingAtSave") && remaining > timer.getLong("remainingAtSave") - 2000,
+                        "timer_residual_not_reset_or_offline_caught_up", match.group());
+                require(source, state.equals("RUNNING"), "timer_resumed_running", match.group());
+                success(source, "colonyloom work cancel " + workId);
+                UUID shortWork = uuid(success(timerSource(source, manifest, colony), "colonyloom work wait " + colony + " 40"), "work");
+                timer.putUUID("shortWorkId", shortWork);
+            } else {
+                require(source, state.equals("CANCELLED") && match.group(2).equals("null"), "timer_cancelled_assignment_released", match.group());
+                String shortStatus = Pattern.compile("work=" + timer.getUUID("shortWorkId") + " state=COMPLETED reason=\\w+ assignee=null remainingActiveTicks=0 revision=\\d+")
+                        .matcher(status).results().map(java.util.regex.MatchResult::group).findFirst().orElse("");
+                require(source, !shortStatus.isEmpty(), "timer_real_completion", status);
+            }
+        }
+        if (!action.equals("timer-complete")) writeManifest(source, manifest);
+    }
+    private static CommandSourceStack timerSource(CommandSourceStack source, CompoundTag manifest, UUID colony) {
+        for (Tag tag : manifest.getList("citizens", Tag.TAG_COMPOUND)) {
+            CompoundTag citizen = (CompoundTag) tag;
+            if (!colony.equals(citizen.getUUID("colony"))) continue;
+            int[] pos = citizen.getIntArray("position");
+            return source.withPosition(new net.minecraft.world.phys.Vec3(pos[0], pos[1], pos[2]));
+        }
+        throw new IllegalStateException("Timer colony lacks physical fixture citizen");
     }
 
     private static void isolation(CommandSourceStack source) throws Exception {

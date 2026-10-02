@@ -45,6 +45,11 @@ public final class BindingRegistry {
         if (next.equals(previous) && !competing) return;
         long nextRevision = Math.incrementExact(revision);
         registry.beforeMutation();
+        if (previous == null && (citizen == null || !citizen.entityId().equals(entityId))) {
+            registry.admission().reserve(citizen == null ? new UUID(0, 0) : citizen.colonyId(),
+                    io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL,
+                    java.util.Map.of(io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.EVIDENCE, 1));
+        }
         observations.put(entityId, next);
         if (competing) quarantineAll(citizenId);
         revision = nextRevision;

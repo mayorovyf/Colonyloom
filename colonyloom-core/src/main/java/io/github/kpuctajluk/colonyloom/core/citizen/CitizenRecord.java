@@ -29,6 +29,13 @@ public record CitizenRecord(UUID citizenId, UUID colonyId, UUID entityId, long b
         if (skills.values().stream().anyMatch(value -> value < 0) || needs.values().stream().anyMatch(value -> value < 0) || remainingTimers.values().stream().anyMatch(value -> value < 0)) throw new IllegalArgumentException("Negative citizen state");
         if (!needs.containsKey("food") || needs.get("food") > 20) throw new IllegalArgumentException("Citizen food must be 0..20");
     }
+    public CitizenRecord withAssignment(UUID workId) {
+        return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, workId, professionId, skills, needs, lifecycle, admission, readiness, activeTimeTicks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));
+    }
+    public CitizenRecord withActiveTime(long ticks) {
+        if (ticks < activeTimeTicks) throw new IllegalArgumentException("Active time cannot reverse");
+        return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, needs, lifecycle, admission, readiness, ticks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));
+    }
     public CitizenRecord withProfession(String id) {
         return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, id, skills, needs, lifecycle, admission, readiness, activeTimeTicks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));
     }

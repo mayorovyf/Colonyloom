@@ -31,8 +31,11 @@ public final class ColonyloomMod {
     private final Map<MinecraftServer, MinecraftServerRuntime> runtimes = new IdentityHashMap<>();
     private final Map<MinecraftServer, IdentityPlatform> identities = new IdentityHashMap<>();
     private final Map<MinecraftServer, net.minecraft.server.packs.resources.ResourceManager> contentManagers = new IdentityHashMap<>();
+    private final SimulationConfig simulationConfig;
+    private final Map<MinecraftServer, io.github.kpuctajluk.colonyloom.core.config.SimulationLimits> configuredLimits = new IdentityHashMap<>();
 
-    public ColonyloomMod(IEventBus modBus) {
+    public ColonyloomMod(IEventBus modBus, net.neoforged.fml.ModContainer container) {
+        simulationConfig = new SimulationConfig(container);
         CitizenRegistration.register(modBus);
         NeoForge.EVENT_BUS.addListener(this::onReload);
         NeoForge.EVENT_BUS.addListener(this::onCommands);
@@ -55,6 +58,9 @@ public final class ColonyloomMod {
         MinecraftServerRuntime runtime = MinecraftServerRuntime.start(server);
         runtimes.put(server, runtime);
         runtime.configureProfessions(ContentLoader.load(server.getResourceManager()).values());
+        var limits = simulationConfig.snapshot();
+        runtime.core().updateLimits(limits);
+        configuredLimits.put(server, limits);
         contentManagers.put(server,server.getResourceManager());
         IdentityPlatform identity = new IdentityPlatform(server, runtime);
         identities.put(server, identity);
@@ -68,6 +74,11 @@ public final class ColonyloomMod {
 
     private synchronized void onServerPostTick(ServerTickEvent.Post event) {
         MinecraftServerRuntime runtime=requireRuntime(event.getServer());
+        var limits = simulationConfig.snapshot();
+        if (!limits.equals(configuredLimits.get(event.getServer()))) {
+            runtime.core().updateLimits(limits);
+            configuredLimits.put(event.getServer(), limits);
+        }
         var manager=event.getServer().getResourceManager();
         if (contentManagers.get(event.getServer())!=manager) {
             runtime.configureProfessions(ContentLoader.load(manager).values());
@@ -93,6 +104,7 @@ public final class ColonyloomMod {
             runtimes.remove(server);
             identities.remove(server);
             contentManagers.remove(server);
+            configuredLimits.remove(server);
             LOGGER.info("Colonyloom runtime released: session={}, world={}, ticks={}, activeRuntimes={}",
                     runtime.sessionId(), runtime.worldPath(), runtime.serverTick(), runtimes.size());
         }
