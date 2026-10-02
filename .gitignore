@@ -1,0 +1,6 @@
+.gradle/
+**/build/
+**/runs/
+.idea/
+*.iml
+neoforge-*-installer.jar.log

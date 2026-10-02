@@ -1,0 +1,54 @@
+plugins {
+    id 'base'
+    id 'net.neoforged.moddev' version '2.0.148' apply false
+}
+allprojects {
+    group = rootProject.mod_group_id
+    version = rootProject.mod_version
+}
+subprojects {
+    apply plugin: 'java-library'
+    repositories { mavenCentral() }
+    java { toolchain.languageVersion = JavaLanguageVersion.of(21) }
+    tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+    dependencies {
+        testImplementation platform('org.junit:junit-bom:5.14.1')
+        testImplementation 'org.junit.jupiter:junit-jupiter'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    }
+    tasks.withType(Test).configureEach { useJUnitPlatform() }
+}
+tasks.register('checkArchitecture') {
+    doLast {
+        ['colonyloom-core', 'colonyloom-gameplay', 'colonyloom-minecraft'].each { name ->
+            def p = project(":$name")
+            def forbidden = name == 'colonyloom-minecraft'
+                ? ~/\bnet\.neoforged\./
+                : name == 'colonyloom-core'
+                    ? ~/\b(net\.minecraft\.|net\.neoforged\.|io\.github\.kpuctajluk\.colonyloom\.(gameplay|minecraft|neoforge)\.)/
+                    : ~/\b(net\.minecraft\.|net\.neoforged\.|io\.github\.kpuctajluk\.colonyloom\.(minecraft|neoforge)\.)/
+            p.fileTree('src') { include '**/*.java' }.each { source ->
+                if (source.getText('UTF-8') =~ forbidden) {
+                    throw new GradleException("Forbidden layer reference in $source")
+                }
+            }
+        }
+        ['colonyloom-core', 'colonyloom-gameplay'].each { name ->
+            project(":$name").configurations.compileClasspath.allDependencies.each { dep ->
+                if (dep instanceof ProjectDependency) {
+                    if (name != 'colonyloom-gameplay' || dep.path != ':colonyloom-core') {
+                        throw new GradleException("Forbidden project dependency: $name -> ${dep.path}")
+                    }
+                } else {
+                    throw new GradleException("Non-JDK production dependency in $name: $dep")
+                }
+            }
+        }
+    }
+}
+tasks.named('check') { dependsOn 'checkArchitecture', subprojects.collect { it.tasks.named('check') } }
+tasks.named('assemble') { dependsOn subprojects.collect { it.tasks.named('assemble') } }
+tasks.named('wrapper') {
+    gradleVersion = '9.2.1'
+    distributionType = Wrapper.DistributionType.BIN
+}

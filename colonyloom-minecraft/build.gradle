@@ -1,0 +1,12 @@
+plugins { id 'net.neoforged.moddev' }
+dependencies {
+    api project(':colonyloom-core')
+    api project(':colonyloom-gameplay')
+}
+neoForge {
+    neoFormVersion = project.neoform_version
+    parchment {
+        minecraftVersion = project.parchment_minecraft_version
+        mappingsVersion = project.parchment_mappings_version
+    }
+}

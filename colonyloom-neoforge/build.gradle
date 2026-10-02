@@ -1,0 +1,81 @@
+plugins { id 'net.neoforged.moddev' }
+evaluationDependsOn(':colonyloom-minecraft')
+dependencies { implementation project(':colonyloom-minecraft') }
+sourceSets {
+    gameTest {
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+configurations {
+    gameTestImplementation.extendsFrom implementation
+    gameTestRuntimeOnly.extendsFrom runtimeOnly
+}
+neoForge {
+    version = project.neo_version
+    parchment {
+        minecraftVersion = project.parchment_minecraft_version
+        mappingsVersion = project.parchment_mappings_version
+    }
+    addModdingDependenciesTo(sourceSets.gameTest)
+    mods {
+        colonyloom {
+            sourceSet sourceSets.main
+            sourceSet project(':colonyloom-core').sourceSets.main
+            sourceSet project(':colonyloom-gameplay').sourceSets.main
+            sourceSet project(':colonyloom-minecraft').sourceSets.main
+        }
+        colonyloom_tests { sourceSet sourceSets.gameTest }
+    }
+    runs {
+        configureEach {
+            logLevel = org.slf4j.event.Level.INFO
+            loadedMods = [mods.colonyloom]
+        }
+        client {
+            client()
+            gameDirectory = project.file('runs/client')
+            loadedMods = [mods.colonyloom, mods.colonyloom_tests]
+        }
+        client2 {
+            client()
+            programArguments.addAll('--username', 'ColonyloomGuest')
+            gameDirectory = project.file('runs/client2')
+            loadedMods = [mods.colonyloom, mods.colonyloom_tests]
+        }
+        server {
+            server()
+            programArgument '--nogui'
+            gameDirectory = project.file('runs/server')
+            jvmArguments.addAll('-Xms4G', '-Xmx4G')
+            loadedMods = [mods.colonyloom, mods.colonyloom_tests]
+        }
+        gameTestServer {
+            type = 'gameTestServer'
+            gameDirectory = project.file('runs/gametest')
+            sourceSet = sourceSets.gameTest
+            loadedMods = [mods.colonyloom, mods.colonyloom_tests]
+            systemProperty 'neoforge.enabledGameTestNamespaces', 'colonyloom'
+        }
+    }
+}
+def metadata = tasks.register('generateModMetadata', ProcessResources) {
+    def values = [mod_id: project.mod_id, mod_name: project.mod_name, mod_version: project.mod_version]
+    inputs.properties values
+    expand values
+    from 'src/main/templates'
+    into layout.buildDirectory.dir('generated/modMetadata')
+}
+sourceSets.main.resources.srcDir metadata
+neoForge.ideSyncTask metadata
+tasks.named('jar', Jar) {
+    archiveBaseName = 'colonyloom'
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+    ['colonyloom-core', 'colonyloom-gameplay', 'colonyloom-minecraft'].each { name ->
+        from project(":$name").sourceSets.main.output
+    }
+    from(rootProject.file('LICENSE'))
+}
+tasks.named('runServer', JavaExec) {
+    standardInput = System.in
+}
