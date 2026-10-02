@@ -49,6 +49,7 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
     private final MinecraftServer server;
     private final ColonyRegistry registry;
     private final ChunkDemandManager chunks;
+    private final NavigationService.GoalAuthority goals;
     private final Map<UUID, Moving> moving=new HashMap<>();
     private static final class Moving {
         final Request request;
@@ -67,7 +68,10 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         @Override public int nodeCount() { return path.getNodeCount(); }
     }
     public MinecraftNavigationBackend(MinecraftServer server,ColonyRegistry registry,ChunkDemandManager chunks) {
-        this.server=server; this.registry=registry; this.chunks=chunks;
+        this(server,registry,chunks,NavigationService::moveGoalCurrent);
+    }
+    public MinecraftNavigationBackend(MinecraftServer server,ColonyRegistry registry,ChunkDemandManager chunks,NavigationService.GoalAuthority goals) {
+        this.server=server; this.registry=registry; this.chunks=chunks; this.goals=java.util.Objects.requireNonNull(goals);
     }
     private void owner() { if (!server.isSameThread()) throw new IllegalStateException("Navigation requires the server thread"); }
     private CitizenEntity entity(Request request) {
@@ -79,7 +83,7 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
                 || !registry.colony(request.colonyId()).available()
                 || !registry.bindings().activeEntity(record.citizenId()).filter(record.entityId()::equals).isPresent()) return null;
         WorkOrder work=registry.workBoard().work(request.workId());
-        if (work.terminal() || !request.citizenId().equals(work.assignee()) || !request.target().equals(work.target())) return null;
+        if (work.terminal() || !request.citizenId().equals(work.assignee()) || !goals.current(work,request)) return null;
         ServerLevel level=server.getLevel(ResourceKey.create(Registries.DIMENSION,ResourceLocation.parse(request.target().dimension())));
         if (level==null) return null;
         Entity physical=level.getEntity(record.entityId());

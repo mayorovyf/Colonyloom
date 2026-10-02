@@ -60,6 +60,11 @@ final class ColonyloomBrigadier {
                 .then(argument("priority", IntegerArgumentType.integer(0, 10)).executes(ctx -> execute(ctx, resolve, platform ->
                         platform.priorityWork(ctx.getSource(), uuid(ctx, "work"), IntegerArgumentType.getInteger(ctx, "priority")))))));
         root.then(work);
+        root.then(literal("build").then(argument("colony",UuidArgument.uuid())
+                .then(argument("blueprint",ResourceLocationArgument.id())
+                        .then(argument("pos",BlockPosArgument.blockPos())
+                                .then(argument("rotation",IntegerArgumentType.integer(0,270)).executes(ctx -> execute(ctx,resolve,platform ->
+                                        platform.build(ctx.getSource(),uuid(ctx,"colony"),ResourceLocationArgument.getId(ctx,"blueprint").toString(),pos(ctx,"pos"),IntegerArgumentType.getInteger(ctx,"rotation")))))))));
         var recovery = literal("recovery").requires(source -> source.hasPermission(2));
         recovery.then(literal("inspect").then(argument("colony", UuidArgument.uuid()).executes(ctx -> execute(ctx, resolve, platform ->
                 platform.inspect(ctx.getSource(), uuid(ctx, "colony"))))));

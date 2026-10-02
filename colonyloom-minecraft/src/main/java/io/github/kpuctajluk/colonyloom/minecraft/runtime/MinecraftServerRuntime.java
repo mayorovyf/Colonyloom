@@ -16,25 +16,28 @@ public final class MinecraftServerRuntime {
     private final ServerRuntime runtime;
     private final Path worldPath;
     private int lastMinecraftTick;
+    private long lastCompactionAttempt=-1200;
     private final ColonyPersistence persistence;
     private io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager chunks;
     private io.github.kpuctajluk.colonyloom.core.navigation.NavigationService navigation;
     private CitizenAdmissionService citizens;
+    private io.github.kpuctajluk.colonyloom.gameplay.construction.ConstructionController construction;
+    private io.github.kpuctajluk.colonyloom.minecraft.construction.MinecraftConstructionService constructionService;
 
-    private MinecraftServerRuntime(MinecraftServer server) {
+    private MinecraftServerRuntime(MinecraftServer server,Runnable flushPendingIo) {
         this.server = server;
         this.worldPath = server.getWorldPath(LevelResource.ROOT).toAbsolutePath().normalize();
         this.lastMinecraftTick = server.getTickCount();
         this.runtime = ServerRuntime.start(server.getRunningThread());
-        this.persistence = ColonyPersistence.open(server, runtime);
+        this.persistence = ColonyPersistence.open(server, runtime,flushPendingIo);
     }
 
-    public static MinecraftServerRuntime start(MinecraftServer server) {
+    public static MinecraftServerRuntime start(MinecraftServer server,Runnable flushPendingIo) {
         requireServerThread(server);
         if (server.isStopped()) {
             throw new IllegalStateException("Cannot reuse a stopped Minecraft server");
         }
-        return new MinecraftServerRuntime(server);
+        return new MinecraftServerRuntime(server,flushPendingIo);
     }
 
     public UUID sessionId() {
@@ -59,16 +62,26 @@ public final class MinecraftServerRuntime {
         return persistence;
     }
 
-    public void configureProfessions(Collection<ProfessionDefinition> definitions) {
-        runtime.configureCommands(persistence::ensureSessionDirty, definitions);
+    public void configureContent(io.github.kpuctajluk.colonyloom.minecraft.content.ContentLoader.Content content) {
+        runtime.requireOwnerThread();
+        if(construction==null) construction=new io.github.kpuctajluk.colonyloom.gameplay.construction.ConstructionController(runtime.registry(),new io.github.kpuctajluk.colonyloom.minecraft.construction.MinecraftConstructionGeometry(server));
+        runtime.configureCommands(persistence::ensureSessionDirty, content.professions().values());
+        construction.definitions(content.blueprints());
+        runtime.commands().construction(construction);
         runtime.setSimulationEnabled(persistence.isAvailable());
     }
-    public void configurePhysical(io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager.ChunkAccess access) {
+    public void configurePhysical(io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager.ChunkAccess access,
+            io.github.kpuctajluk.colonyloom.minecraft.construction.BlockPlacementExecutor.ItemInteraction interaction,
+            io.github.kpuctajluk.colonyloom.minecraft.construction.BlockPlacementExecutor.FaultObserver observer) {
         runtime.requireOwnerThread();
         if (chunks != null) throw new IllegalStateException("Physical services already configured");
         chunks = new io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager(runtime.registry(), runtime.budgets(), access);
+        var placement=new io.github.kpuctajluk.colonyloom.minecraft.construction.BlockPlacementExecutor(server,runtime.registry(),interaction,observer);
+        constructionService=new io.github.kpuctajluk.colonyloom.minecraft.construction.MinecraftConstructionService(runtime.registry(),construction,chunks,placement,persistence::checkpointId);
         navigation = new io.github.kpuctajluk.colonyloom.core.navigation.NavigationService(runtime.registry(), runtime.budgets(), chunks,
-                new io.github.kpuctajluk.colonyloom.minecraft.navigation.MinecraftNavigationBackend(server, runtime.registry(), chunks));
+                new io.github.kpuctajluk.colonyloom.minecraft.navigation.MinecraftNavigationBackend(server, runtime.registry(), chunks,constructionService),constructionService);
+        constructionService.navigation(navigation);
+        runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.CONSTRUCTION,constructionService);
         citizens = new CitizenAdmissionService(server, runtime, chunks);
         runtime.scheduler().beforeWork(tick -> {
             chunks.tick(tick);
@@ -76,7 +89,7 @@ public final class MinecraftServerRuntime {
             navigation.tick(tick);
             runtime.registry().targetClaims().tick();
         });
-        runtime.scheduler().movementExecutor(new io.github.kpuctajluk.colonyloom.core.scheduler.SimulationScheduler.MovementExecutor() {
+        runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.MOVE, new io.github.kpuctajluk.colonyloom.core.scheduler.SimulationScheduler.PhysicalExecutor() {
             public void step(io.github.kpuctajluk.colonyloom.core.work.WorkOrder work, long tick) {
                 var citizen = runtime.registry().citizen(work.assignee());
                 try {
@@ -114,6 +127,16 @@ public final class MinecraftServerRuntime {
         }
         if (!persistence.isAvailable()) runtime.setSimulationEnabled(false);
         runtime.tick(runtime.serverTick() + 1);
+        if(persistence.isAvailable() && runtime.serverTick()-lastCompactionAttempt>=1200
+                && (runtime.registry().effects().size()>=2048 || runtime.registry().construction().size()>=384)
+                && runtime.registry().colonies().stream().noneMatch(colony -> colony.recoveryBlocked() || colony.contentBlocked())) {
+            lastCompactionAttempt=runtime.serverTick();
+            if(persistence.checkpointForCompaction()) {
+                runtime.registry().effects().compactAfterVerifiedCheckpoint();
+                runtime.registry().construction().compactAfterVerifiedCheckpoint();
+                persistence.persistSnapshot();
+            }
+        }
         lastMinecraftTick = minecraftTick;
     }
 
@@ -121,6 +144,7 @@ public final class MinecraftServerRuntime {
         requireBoundServer(eventServer);
         runtime.beginStopping();
         if (navigation != null) navigation.close();
+        if (constructionService != null) constructionService.close();
         if (citizens != null) citizens.close();
         if (chunks != null) chunks.close();
         if (persistence.isAvailable()) persistence.checkpointAndClean();

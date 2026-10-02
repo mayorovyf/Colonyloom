@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "version": 1,
+  "structure": "colonyloom:test_four_stairs",
+  "markers": {
+    "work_origin": [0, 0, 1],
+    "delivery_buffer": [-1, 0, 0]
+  }
+}

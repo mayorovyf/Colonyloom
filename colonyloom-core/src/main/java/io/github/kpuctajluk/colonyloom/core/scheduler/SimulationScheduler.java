@@ -45,12 +45,16 @@ public final class SimulationScheduler {
     private final Lane[] lanes = Lane.values();
     private Node executing;
     private Runnable beforeStep = () -> {};
-    public interface MovementExecutor {
+    public interface PhysicalExecutor {
         void step(WorkOrder work, long tick);
         void cancel(UUID workId);
     }
-    private MovementExecutor movement;
-    public void movementExecutor(MovementExecutor executor) { board.registry().requireOwner(); movement = Objects.requireNonNull(executor); }
+    private final Map<String,PhysicalExecutor> physical = new HashMap<>();
+    public void physicalExecutor(String type,PhysicalExecutor executor) {
+        board.registry().requireOwner(); Objects.requireNonNull(executor); io.github.kpuctajluk.colonyloom.core.citizen.ProfessionDefinition.validateId(type);
+        if (WorkOrder.ACTIVE_WAIT.equals(type) || physical.putIfAbsent(type,executor)!=null) throw new IllegalArgumentException("Physical executor already registered or reserved type");
+    }
+    private void cancelPhysical(WorkOrder work) { var executor=physical.get(work.typeId()); if(executor!=null) executor.cancel(work.id()); }
     private java.util.function.LongConsumer beforeWork = tick -> {};
     public void beforeWork(java.util.function.LongConsumer hook) { board.registry().requireOwner(); beforeWork = Objects.requireNonNull(hook); }
 
@@ -104,7 +108,7 @@ public final class SimulationScheduler {
     public void beforeStep(Runnable hook) { board.registry().requireOwner(); beforeStep = Objects.requireNonNull(hook); }
     public void rebuild() {
         board.registry().requireOwner();
-        if (movement != null) for (Node node : nodes.values()) if (WorkOrder.MOVE.equals(node.work.typeId())) movement.cancel(node.work.id());
+        for (Node node : nodes.values()) cancelPhysical(node.work);
         for (Node node : nodes.values()) if (node.readyLease != null) node.readyLease.close();
         for (int i=0;i<freeReady.size();i++) freeReady.get(i).close();
         freeReady.clear();
@@ -165,7 +169,7 @@ public final class SimulationScheduler {
             try { work = board.work(id); } catch (IllegalArgumentException absent) { return; }
             add(work); return;
         }
-        if (movement != null && WorkOrder.MOVE.equals(node.work.typeId()) && node.work.terminal()) movement.cancel(id);
+        if (node.work.terminal()) cancelPhysical(node.work);
         if (node == executing) { node.changedWhileExecuting = true; return; }
         if (node.work.terminal()) {
             unqueue(node); unlink(node); deadlines.remove(node.due); pause(node); removeAssignment(node);
@@ -173,14 +177,14 @@ public final class SimulationScheduler {
             if (waiting != null) wakeDependents(id);
         }
         else { if (!eligible(node)) pause(node); link(node); }
-        if (movement != null && WorkOrder.MOVE.equals(node.work.typeId()) && node.assignedCitizen != null && !node.assignedCitizen.equals(node.work.assignee())) movement.cancel(id);
+        if (node.assignedCitizen != null && !node.assignedCitizen.equals(node.work.assignee())) cancelPhysical(node.work);
     }
     private void citizenChanged(UUID id) {
         CitizenRecord citizen = board.registry().citizen(id);
         unindexCitizen(id); indexCitizen(citizen);
         Node assigned = assignments.get(id);
         if (assigned != null && assigned != executing) { if (!eligible(assigned)) pause(assigned); link(assigned); }
-        if (assigned != null && movement != null && WorkOrder.MOVE.equals(assigned.work.typeId()) && !eligible(assigned)) movement.cancel(assigned.work.id());
+        if (assigned != null && !eligible(assigned)) cancelPhysical(assigned.work);
         ColonyQueue colony = colonyIndex.get(citizen.colonyId());
         if (colony != null) { if (!colony.wakePending) colony.wakeCursor = 0; colony.wakePending = true; }
     }
@@ -207,7 +211,7 @@ public final class SimulationScheduler {
     }
     private void retired(UUID id) {
         Node node = nodes.remove(id); if (node == null) return;
-        if (movement != null && WorkOrder.MOVE.equals(node.work.typeId())) movement.cancel(id);
+        cancelPhysical(node.work);
         unqueue(node); unlink(node); deadlines.remove(node.due); removeAssignment(node);
         node.colony.roots.remove(node);
         for (int i=0;i<node.work.dependencies().size();i++) {
@@ -340,14 +344,14 @@ public final class SimulationScheduler {
             if (work.revision() != revision) { link(node); return; }
             if (work.terminal()) return;
             ColonyRuntime colony = board.registry().colony(work.colonyId());
-            Reason blocked = colony.recoveryBlocked() ? Reason.RECOVERY_AMBIGUOUS : colony.contentBlocked() || !(WorkOrder.ACTIVE_WAIT.equals(work.typeId()) || WorkOrder.MOVE.equals(work.typeId()) && movement != null) ? Reason.CONTENT_UNAVAILABLE : Reason.NONE;
+            Reason blocked = colony.recoveryBlocked() ? Reason.RECOVERY_AMBIGUOUS : colony.contentBlocked() || !(WorkOrder.ACTIVE_WAIT.equals(work.typeId()) || physical.containsKey(work.typeId())) ? Reason.CONTENT_UNAVAILABLE : Reason.NONE;
             if (blocked != Reason.NONE) { park(node,blocked); return; }
             for (UUID dependency : work.dependencies()) {
                 WorkOrder required = board.work(dependency);
                 if (required.state() != State.COMPLETED) { park(node,Reason.RECONCILING); return; }
             }
             if (work.assignee() != null && !eligible(node)) { pause(node); removeAssignment(node); board.transition(work.id(),State.WAITING,Reason.RECONCILING,work.stage()); park(node,Reason.RECONCILING); return; }
-            if (work.state() == State.WAITING && work.assignee() != null && WorkOrder.MOVE.equals(work.typeId())) board.resumeAssigned(work.id(), "move");
+            if (work.state() == State.WAITING && work.assignee() != null && physical.containsKey(work.typeId())) board.resumeAssigned(work.id(),work.stage());
             if (work.state() == State.PLANNED || work.state() == State.WAITING) board.transition(work.id(),State.READY,Reason.NONE,work.stage());
             if (work.state() == State.READY) {
                 UUID winner = candidate(work);
@@ -356,8 +360,8 @@ public final class SimulationScheduler {
                 assignments.put(winner,node); node.assignedCitizen = winner;
             }
             if (work.state() == State.ASSIGNED) { board.transition(work.id(),State.RUNNING,Reason.NONE,work.stage()); node.activeSince = WorkOrder.ACTIVE_WAIT.equals(work.typeId()) ? node.colony.activeClock : -1; }
-            if (WorkOrder.MOVE.equals(work.typeId()) && work.state() == State.RUNNING) {
-                movement.step(work, tick);
+            if (physical.containsKey(work.typeId()) && work.state() == State.RUNNING) {
+                physical.get(work.typeId()).step(work, tick);
                 if (!work.terminal()) deadlines.schedule(node.due, tick + 1);
                 else { removeAssignment(node); wakeDependents(work.id()); }
                 return;

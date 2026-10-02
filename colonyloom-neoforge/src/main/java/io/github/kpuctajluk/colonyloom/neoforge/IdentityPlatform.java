@@ -26,7 +26,7 @@ final class IdentityPlatform {
     private final MinecraftServer server;
     private final MinecraftServerRuntime bridge;
     private final Map<UUID,CitizenEntity> loaded = new HashMap<>();
-    private record Inspection(ColonyCommands.RecoveryInspection state, Map<UUID, net.minecraft.nbt.CompoundTag> inventories) {}
+    private record Inspection(ColonyCommands.RecoveryInspection state, Map<UUID, net.minecraft.nbt.CompoundTag> inventories,Map<UUID,String> physicalSites,Map<UUID,String> physicalEffects) {}
     private final Map<UUID,Inspection> inspections = new HashMap<>();
     private String identityFailure;
     private UUID provisioningEntity;
@@ -86,16 +86,37 @@ final class IdentityPlatform {
         inspections.clear();
     }
     void death(LivingDeathEvent event) {
-        if (!(event.getEntity() instanceof CitizenEntity citizen) || citizen.citizenId()==null || !bridge.persistence().isAvailable()) return;
+        if (event.isCanceled() || !(event.getEntity() instanceof CitizenEntity citizen) || citizen.citizenId()==null || !bridge.persistence().isAvailable()) return;
         var record=bridge.core().registry().findCitizen(citizen.citizenId()).orElse(null);
         if (record==null || record.lifecycle()!=CitizenRecord.Lifecycle.ALIVE || !record.entityId().equals(citizen.getUUID()) || record.bindingEpoch()!=citizen.bindingEpoch()) return;
         try {
             bridge.persistence().ensureSessionDirty();
+            int before=0; for(int slot=0;slot<CitizenEntity.INVENTORY_SIZE;slot++) before+=citizen.inventory().getItem(slot).getCount();
+            var inventory=new net.minecraft.nbt.CompoundTag(); net.minecraft.world.ContainerHelper.saveAllItems(inventory,citizen.inventory().getItems(),server.registryAccess());
+            var effect=new io.github.kpuctajluk.colonyloom.core.action.EffectRecord(UUID.randomUUID(),record.colonyId(),record.assignedWorkId(),record.citizenId(),record.bindingEpoch(),
+                    io.github.kpuctajluk.colonyloom.core.action.ActionContext.Kind.DEATH,position((ServerLevel)citizen.level(),citizen.blockPosition()),"inventoryHash:"+Integer.toHexString(inventory.hashCode()),"colonyloom:inventory",before,before,
+                    io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.PREPARED,0);
+            bridge.core().registry().effects().prepare(effect,io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);
+            citizen.observeDeathInventory(remaining -> {
+                try {
+                    bridge.core().registry().effects().update(effect.observed(remaining,remaining!=0));
+                    if(remaining!=0) bridge.core().registry().markRecoveryBlocked(record.colonyId(),bridge.persistence().checkpointId());
+                    bridge.persistence().capture();
+                } catch(RuntimeException error) {
+                    bridge.core().registry().markRecoveryBlocked(record.colonyId(),bridge.persistence().checkpointId());
+                    LogUtils.getLogger().error("Death inventory observation blocked; actual drops are not compensated",error);
+                }
+            });
             bridge.core().commands().markDeath(citizen.citizenId());
             citizen.setQuarantined(true);
             bridge.persistence().capture();
         } catch (RuntimeException error) {
             citizen.setQuarantined(true);
+            try {
+                bridge.core().commands().markDeath(citizen.citizenId());
+                bridge.core().registry().markRecoveryBlocked(record.colonyId(),bridge.persistence().checkpointId());
+                bridge.persistence().capture();
+            } catch(RuntimeException blockingFailure) { error.addSuppressed(blockingFailure); }
             LogUtils.getLogger().error("Colonyloom cannot persist observed citizen death; physical Minecraft death is not cancelled",error);
         }
     }
@@ -164,6 +185,10 @@ final class IdentityPlatform {
         bridge.persistence().capture();
         return "work=" + work.id() + " state=" + work.state();
     }
+    String build(CommandSourceStack source,UUID colony,String blueprint,BlockPos origin,int rotation) throws CommandSyntaxException {
+        var work=bridge.core().commands().build(context(source),UUID.randomUUID(),colony,blueprint,position(source.getLevel(),origin),rotation);
+        bridge.persistence().capture(); return "work="+work.id()+" state="+work.state()+" blueprint="+blueprint;
+    }
     String cancelWork(CommandSourceStack source,UUID workId) throws CommandSyntaxException {
         var work=bridge.core().commands().cancelWork(context(source),workId);
         bridge.persistence().capture(); return "work="+work.id()+" state="+work.state();
@@ -199,7 +224,7 @@ final class IdentityPlatform {
     }
     String inspect(CommandSourceStack source,UUID colony) throws CommandSyntaxException {
         var inspection=bridge.core().commands().inspect(context(source),colony);
-        inspections.put(colony,new Inspection(inspection,inventorySnapshot(inspection)));
+        inspections.put(colony,new Inspection(inspection,inventorySnapshot(inspection),siteSnapshot(inspection),effectSnapshot(inspection)));
         StringBuilder result=new StringBuilder(inspection.toString());
         for(CitizenEntity entity:loaded.values()) {
             if(entity.citizenId()==null)continue;
@@ -208,6 +233,8 @@ final class IdentityPlatform {
             result.append("\nentity=").append(entity.getUUID()).append(" epoch=").append(entity.bindingEpoch()).append(" quarantine=").append(entity.isQuarantined());
             for(int slot=0;slot<9;slot++)result.append(" slot").append(slot).append('=').append(entity.inventory().getItem(slot));
         }
+        for(var effect:inspection.effects()) result.append("\neffect=").append(effect.operationId()).append(" state=").append(effect.state()).append(" actualBlock=").append(inspections.get(colony).physicalEffects().get(effect.operationId()));
+        for(var site:inspection.constructionSites()) result.append("\nsite=").append(site.workId()).append(" cursor=").append(site.cursor()).append(" actualWorldDigest=").append(inspections.get(colony).physicalSites().get(site.workId()));
         return result.toString();
     }
     String accept(CommandSourceStack source,UUID colony,UUID checkpoint) throws CommandSyntaxException {
@@ -216,6 +243,9 @@ final class IdentityPlatform {
         if (!inspected.inventories().equals(inventorySnapshot(inspected.state()))) {
             inspections.remove(colony);
             throw new IllegalStateException("Physical inventory changed; inspect again");
+        }
+        if(!inspected.physicalSites().equals(siteSnapshot(inspected.state())) || !inspected.physicalEffects().equals(effectSnapshot(inspected.state()))) {
+            inspections.remove(colony); throw new IllegalStateException("Physical blocks changed; inspect again");
         }
         bridge.core().commands().acceptWorld(context(source),colony,checkpoint,inspected.state());
         bridge.persistence().persistSnapshot(); inspections.remove(colony);
@@ -239,6 +269,29 @@ final class IdentityPlatform {
             inventories.put(entity.getUUID(),inventory);
         }
         return Map.copyOf(inventories);
+    }
+    private String observedBlock(WorldPosition target) {
+        var level=level(target.dimension()); var pos=new BlockPos(target.x(),target.y(),target.z());
+        if(level==null || level.getChunkSource().getChunkNow(pos.getX()>>4,pos.getZ()>>4)==null || !level.isPositionEntityTicking(pos)) throw new IllegalStateException("Recovery target CHUNK_NOT_READY: "+target);
+        return level.getBlockState(pos).toString();
+    }
+    private Map<UUID,String> effectSnapshot(ColonyCommands.RecoveryInspection inspection) {
+        Map<UUID,String> result=new LinkedHashMap<>();
+        for(var effect:inspection.effects()) result.put(effect.operationId(),observedBlock(effect.target()));
+        return Map.copyOf(result);
+    }
+    private Map<UUID,String> siteSnapshot(ColonyCommands.RecoveryInspection inspection) {
+        Map<UUID,String> result=new LinkedHashMap<>();
+        var geometry=new io.github.kpuctajluk.colonyloom.minecraft.construction.MinecraftConstructionGeometry(server);
+        for(var site:inspection.constructionSites()) {
+            var layout=geometry.layout(site.workId(),site.colonyId(),bridge.core().registry().construction().definition(site.blueprintDigest()),site.origin(),site.rotation());
+            try {
+                var digest=java.security.MessageDigest.getInstance("SHA-256");
+                for(var target:layout.targets()) { var bytes=observedBlock(target.position()).getBytes(java.nio.charset.StandardCharsets.UTF_8); digest.update((byte)(bytes.length>>8)); digest.update((byte)bytes.length); digest.update(bytes); }
+                result.put(site.workId(),java.util.HexFormat.of().formatHex(digest.digest()));
+            } catch(java.security.NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
+        }
+        return Map.copyOf(result);
     }
     private void requireAvailable(){
         if(identityFailure!=null)throw new IllegalStateException(identityFailure);

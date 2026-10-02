@@ -14,6 +14,7 @@ import net.minecraft.world.level.storage.LevelResource;
 public final class ColonyPersistence {
     private final MinecraftServer server;
     private final ServerRuntime runtime;
+    private final Runnable flushPendingIo;
     private final Path statePath;
     private final Path markerPath;
     private ColonySavedData data;
@@ -21,16 +22,17 @@ public final class ColonyPersistence {
     private boolean sessionDirty;
     private boolean checkpointFinished;
 
-    private ColonyPersistence(MinecraftServer server, ServerRuntime runtime) {
+    private ColonyPersistence(MinecraftServer server, ServerRuntime runtime,Runnable flushPendingIo) {
         this.server = Objects.requireNonNull(server);
         this.runtime = Objects.requireNonNull(runtime);
+        this.flushPendingIo=Objects.requireNonNull(flushPendingIo);
         Path directory = server.getWorldPath(LevelResource.ROOT).resolve("data");
         this.statePath = directory.resolve("colonyloom.dat");
         this.markerPath = directory.resolve("colonyloom-session.nbt");
     }
 
-    public static ColonyPersistence open(MinecraftServer server, ServerRuntime runtime) {
-        ColonyPersistence persistence = new ColonyPersistence(server, runtime);
+    public static ColonyPersistence open(MinecraftServer server, ServerRuntime runtime,Runnable flushPendingIo) {
+        ColonyPersistence persistence = new ColonyPersistence(server, runtime,flushPendingIo);
         persistence.requireThread();
         try {
             boolean existing = DurableNbt.exists(persistence.statePath);
@@ -117,6 +119,20 @@ public final class ColonyPersistence {
         }
     }
 
+    /** Stops on the server thread between steps; unlike shutdown this never marks the session clean. */
+    public boolean checkpointForCompaction() {
+        requireAvailable(); ensureSessionDirty();
+        UUID checkpoint=UUID.randomUUID(); data.beginCheckpoint(checkpoint,runtime.registry().snapshot());
+        CompoundTag expected=data.diskEnvelope(server.registryAccess());
+        try {
+            if(!server.saveEverything(true,true,true)) throw new IOException("Minecraft did not save any level");
+            flushPendingIo.run();
+            DurableNbt.verifyForced(statePath,expected,DurableNbt.STATE_LIMIT);
+            DurableNbt.writeVerified(markerPath,marker(false,checkpoint),DurableNbt.MARKER_LIMIT);
+            return true;
+        } catch(IOException | RuntimeException error) { data.setDirty(); fail(error); return false; }
+    }
+
     /** Call after the parent has stopped command admission and finished the bounded server step. */
     public void checkpointAndClean() {
         requireAvailable();
@@ -128,6 +144,7 @@ public final class ColonyPersistence {
             if (!server.saveEverything(true, true, true)) {
                 throw new IOException("Minecraft did not save any level");
             }
+            flushPendingIo.run();
             // SavedData.save catches IOException and even clears its dirty flag on failure.
             // saveEverything's boolean only reports that levels were visited, not DTO durability.
             DurableNbt.verifyForced(statePath, expected, DurableNbt.STATE_LIMIT);
@@ -169,6 +186,7 @@ public final class ColonyPersistence {
     }
 
     private void writeSnapshot() throws IOException {
+        flushPendingIo.run();
         DurableNbt.writeVerified(statePath, data.diskEnvelope(server.registryAccess()), DurableNbt.STATE_LIMIT);
         data.setDirty(false);
     }

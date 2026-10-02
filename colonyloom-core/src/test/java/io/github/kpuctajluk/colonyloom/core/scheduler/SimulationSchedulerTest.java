@@ -43,7 +43,7 @@ final class SimulationSchedulerTest {
     @Test void physicalBackoffRetainsExactWorkerAndCancellationStopsImmediately() {
         Fixture f = new Fixture(); UUID colony = f.colony(1,0); UUID citizen = f.citizen(11,colony); f.citizen(12,colony);
         UUID[] held = {null}; int[] steps = {0}, stops = {0};
-        f.scheduler.movementExecutor(new SimulationScheduler.MovementExecutor() {
+        f.scheduler.physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.MOVE, new SimulationScheduler.PhysicalExecutor() {
             public void step(WorkOrder work,long tick) {
                 if (held[0] == null) held[0] = work.assignee();
                 assertEquals(held[0],work.assignee()); steps[0]++;

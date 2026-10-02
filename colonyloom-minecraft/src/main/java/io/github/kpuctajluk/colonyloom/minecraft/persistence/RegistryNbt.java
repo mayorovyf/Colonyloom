@@ -48,6 +48,7 @@ final class RegistryNbt {
         keys.add("bindingObservations");
         for (String key : keys) {
             ListTag entries = list(root, key);
+            if (key.equals("pinnedDefinitions")) ConstructionNbt.validatePinnedEnvelope(entries);
             int limit = switch (key) {
                 case "colonies" -> 3;
                 case "citizens" -> 300;
@@ -67,7 +68,15 @@ final class RegistryNbt {
             for (Tag element : entries) {
                 CompoundTag entry = (CompoundTag) element;
                 String type = string(entry, "typeId");
-                if (type.equals(KNOWN_TYPES.get(key)) || key.equals("works") && type.equals(WorkOrder.MOVE)) {
+                if (type.equals(KNOWN_TYPES.get(key)) || key.equals("works") && (type.equals(WorkOrder.MOVE) || type.equals(WorkOrder.CONSTRUCTION))
+                        || key.equals("evidence") && (type.equals(ConstructionNbt.SITE) || type.equals(ConstructionNbt.EFFECT))
+                        || key.equals("pinnedDefinitions") && type.equals(ConstructionNbt.PIN)) {
+                    if (key.equals("pinnedDefinitions") && type.equals(ConstructionNbt.PIN) && !ConstructionNbt.knownBlueprintSchema(entry)
+                            || key.equals("evidence") && type.equals(ConstructionNbt.EFFECT) && !ConstructionNbt.knownEffect(entry)) {
+                        opaque.add(entry.copy());
+                        if (entry.hasUUID("colonyId")) blocked.add(entry.getUUID("colonyId"));
+                        continue;
+                    }
                     decoded.add(entry);
                 } else {
                     opaque.add(entry.copy());
@@ -100,20 +109,53 @@ final class RegistryNbt {
             if (!colonyIds.contains(building.colonyId())) {
                 if (!unknownColonies.contains(building.colonyId())) throw invalid("Building references missing colony");
                 retained.get("buildings").add(entry.copy());
+                unknownBuildings.add(building.buildingId());
                 continue;
             }
             buildingIds.add(building.buildingId());
             buildings.add(building);
+        }
+        Map<String, CompoundTag> originalPins = new LinkedHashMap<>();
+        Map<String, io.github.kpuctajluk.colonyloom.core.content.BlueprintDefinition> decodedPins = new LinkedHashMap<>();
+        Set<String> opaquePins = new HashSet<>();
+        for (var entry : retained.get("pinnedDefinitions")) if (entry.contains("digest", Tag.TAG_STRING)) {
+            if (!opaquePins.add(string(entry,"digest"))) throw invalid("Duplicate opaque pinned digest");
+        }
+        for (var entry : known.get("pinnedDefinitions")) {
+            var pin = ConstructionNbt.blueprint(entry);
+            if (opaquePins.contains(pin.digest()) || decodedPins.putIfAbsent(pin.digest(), pin) != null) throw invalid("Duplicate pinned blueprint");
+            originalPins.put(pin.digest(), entry);
+        }
+        Map<UUID, CompoundTag> originalSites = new LinkedHashMap<>();
+        Map<UUID, io.github.kpuctajluk.colonyloom.core.construction.ConstructionSnapshot> decodedSites = new LinkedHashMap<>();
+        Set<UUID> opaqueSiteWorks = new HashSet<>();
+        Set<UUID> opaqueSiteIds = new HashSet<>();
+        for (var entry : retained.get("evidence")) {
+            if (entry.hasUUID("workId")) opaqueSiteWorks.add(uuid(entry,"workId"));
+            if (entry.hasUUID("ownerId")) opaqueSiteWorks.add(uuid(entry,"ownerId"));
+            if (entry.contains("blueprintDigest", Tag.TAG_STRING)) {
+                if (entry.hasUUID("workId") && !opaqueSiteIds.add(uuid(entry,"workId"))) throw invalid("Duplicate opaque construction site");
+                String digest=string(entry,"blueprintDigest");
+                if (!opaquePins.contains(digest) && !decodedPins.containsKey(digest)) throw invalid("Opaque construction references missing pinned blueprint");
+                opaquePins.add(digest);
+            }
+        }
+        for (var entry : known.get("evidence")) if (string(entry,"typeId").equals(ConstructionNbt.SITE)) {
+            var site = ConstructionNbt.site(entry);
+            if (decodedSites.putIfAbsent(site.workId(),site)!=null || opaqueSiteIds.contains(site.workId())) throw invalid("Duplicate construction site");
+            var definition=decodedPins.get(site.blueprintDigest());
+            if (definition!=null && site.cursor()>definition.blocks().size()) throw invalid("Construction cursor exceeds pinned blueprint");
+            originalSites.put(site.workId(),entry);
         }
         List<WorkOrder.Snapshot> works = new ArrayList<>();
         Set<UUID> workIds = new HashSet<>();
         for (CompoundTag entry : known.get("works")) {
             WorkOrder.Snapshot work = work(entry);
             if (!objectIds.add(work.id())) throw invalid("Duplicate work identity");
-            if (!colonyIds.contains(work.colonyId())) {
-                if (!unknownColonies.contains(work.colonyId())) throw invalid("Work references missing colony");
+            if (!colonyIds.contains(work.colonyId()) || opaqueSiteWorks.contains(work.id())) {
+                if (!colonyIds.contains(work.colonyId()) && !unknownColonies.contains(work.colonyId())) throw invalid("Work references missing colony");
                 retained.get("works").add(entry.copy());
-                unknownWorks.add(work.id());
+                unknownWorks.add(work.id()); blocked.add(work.colonyId());
             } else { works.add(work); workIds.add(work.id()); }
         }
         List<CitizenRecord> citizens = new ArrayList<>();
@@ -142,9 +184,32 @@ final class RegistryNbt {
         Set<UUID> unknownCitizens = referencedIds(retained.get("citizens"), "citizenId");
         Set<UUID> knownCitizenIds = new HashSet<>();
         for (CitizenRecord citizen : citizens) knownCitizenIds.add(citizen.citizenId());
+        Set<UUID> allWorkIds = new HashSet<>(workIds); allWorkIds.addAll(unknownWorks);
+        for (var entry : known.get("works")) {
+            var value = work(entry);
+            for (var dependency : value.dependencies()) if (!allWorkIds.contains(dependency)) throw invalid("Work references missing dependency");
+            if (value.assignee()!=null && !knownCitizenIds.contains(value.assignee()) && !unknownCitizens.contains(value.assignee())) throw invalid("Work references missing citizen");
+        }
         boolean changed;
         do {
             changed = false;
+            for (var iterator = decodedSites.entrySet().iterator(); iterator.hasNext();) {
+                var site = iterator.next().getValue();
+                if (!colonyIds.contains(site.colonyId()) && !unknownColonies.contains(site.colonyId())) throw invalid("Construction references missing colony");
+                if (!workIds.contains(site.workId()) && !unknownWorks.contains(site.workId())) throw invalid("Construction references missing work");
+                if (!decodedPins.containsKey(site.blueprintDigest()) && !opaquePins.contains(site.blueprintDigest())) throw invalid("Construction references missing pinned blueprint");
+                if (!colonyIds.contains(site.colonyId()) || unknownWorks.contains(site.workId()) || opaquePins.contains(site.blueprintDigest())) {
+                    retained.get("evidence").add(originalSites.get(site.workId()).copy());
+                    opaqueSiteWorks.add(site.workId()); opaquePins.add(site.blueprintDigest());
+                    iterator.remove(); blocked.add(site.colonyId()); changed=true;
+                }
+            }
+            for (var iterator = decodedPins.entrySet().iterator(); iterator.hasNext();) {
+                var pin = iterator.next();
+                if (opaquePins.contains(pin.getKey())) {
+                    retained.get("pinnedDefinitions").add(originalPins.get(pin.getKey()).copy()); iterator.remove(); changed=true;
+                }
+            }
             for (var iterator = works.iterator(); iterator.hasNext();) {
                 WorkOrder.Snapshot work = iterator.next();
                 boolean opaqueDependency = false;
@@ -153,7 +218,7 @@ final class RegistryNbt {
                     opaqueDependency |= unknownWorks.contains(dependency);
                 }
                 if (work.assignee() != null && !knownCitizenIds.contains(work.assignee()) && !unknownCitizens.contains(work.assignee())) throw invalid("Work references missing citizen");
-                if (opaqueDependency || work.assignee() != null && unknownCitizens.contains(work.assignee())) {
+                if (opaqueDependency || opaqueSiteWorks.contains(work.id()) || work.assignee() != null && unknownCitizens.contains(work.assignee())) {
                     retained.get("works").add(originalWorks.get(work.id()).copy()); unknownWorks.add(work.id());
                     workIds.remove(work.id()); iterator.remove(); blocked.add(work.colonyId()); changed = true;
                 }
@@ -192,6 +257,7 @@ final class RegistryNbt {
         List<io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot> claims = new ArrayList<>();
         Set<UUID> claimIds = new HashSet<>();
         for (CompoundTag entry : known.get("evidence")) {
+            if (!string(entry,"typeId").equals("colonyloom:target_claim")) continue;
             var claim = targetClaim(entry);
             if (!claimIds.add(claim.ownerId())) throw invalid("Duplicate target owner");
             if (!colonyIds.contains(claim.colonyId()) || claim.buildingId() != null && !buildingIds.contains(claim.buildingId())) {
@@ -201,8 +267,28 @@ final class RegistryNbt {
             } else claims.add(claim);
         }
         if (claims.size() > 512) throw invalid("Too many physical target claims");
+        for (var entry : retained.get("evidence")) {
+            if (entry.hasUUID("operationId") && !objectIds.add(uuid(entry,"operationId"))) throw invalid("Duplicate opaque effect identity");
+            if (entry.hasUUID("colonyId") && !colonyIds.contains(uuid(entry,"colonyId")) && !unknownColonies.contains(uuid(entry,"colonyId"))) throw invalid("Opaque evidence references missing colony");
+            if (entry.hasUUID("workId") && !workIds.contains(uuid(entry,"workId")) && !unknownWorks.contains(uuid(entry,"workId"))) throw invalid("Opaque evidence references missing work");
+            if (entry.hasUUID("citizenId") && !knownCitizenIds.contains(uuid(entry,"citizenId")) && !unknownCitizens.contains(uuid(entry,"citizenId"))) throw invalid("Opaque evidence references missing citizen");
+        }
+        List<io.github.kpuctajluk.colonyloom.core.content.BlueprintDefinition> pins = new ArrayList<>(decodedPins.values());
+        List<io.github.kpuctajluk.colonyloom.core.construction.ConstructionSnapshot> sites = new ArrayList<>(decodedSites.values());
+        for (var work : works) if (work.typeId().equals(WorkOrder.CONSTRUCTION) && !decodedSites.containsKey(work.id())) throw invalid("Construction work references missing site");
+        List<io.github.kpuctajluk.colonyloom.core.action.EffectRecord> effects = new ArrayList<>();
+        for (var entry : known.get("evidence")) if (string(entry,"typeId").equals(ConstructionNbt.EFFECT)) {
+            var effect=ConstructionNbt.effect(entry);
+            if (!objectIds.add(effect.operationId())) throw invalid("Duplicate effect identity");
+            if (!colonyIds.contains(effect.colonyId()) && !unknownColonies.contains(effect.colonyId())) throw invalid("Effect references missing colony");
+            if (!knownCitizenIds.contains(effect.citizenId()) && !unknownCitizens.contains(effect.citizenId())) throw invalid("Effect references missing citizen");
+            if (effect.workId()!=null && !workIds.contains(effect.workId()) && !unknownWorks.contains(effect.workId())) throw invalid("Effect references missing work");
+            if (!colonyIds.contains(effect.colonyId()) || !knownCitizenIds.contains(effect.citizenId()) || effect.workId()!=null && !workIds.contains(effect.workId())) {
+                retained.get("evidence").add(entry.copy()); blocked.add(effect.colonyId());
+            } else effects.add(effect);
+        }
         blocked.retainAll(colonyIds);
-        return new Decoded(new RegistrySnapshot(colonies, citizens, buildings, tombstones, observations, works, claims), retained, blocked);
+        return new Decoded(new RegistrySnapshot(colonies, citizens, buildings, tombstones, observations, works, claims, effects, sites, pins), retained, blocked);
     }
 
     static CompoundTag encode(RegistrySnapshot snapshot, UUID checkpoint, Map<String, List<CompoundTag>> retained) {
@@ -215,6 +301,9 @@ final class RegistryNbt {
         for (CitizenRecord value : snapshot.citizens()) root.getList("citizens", Tag.TAG_COMPOUND).add(citizen(value));
         for (WorkOrder.Snapshot value : snapshot.works()) root.getList("works", Tag.TAG_COMPOUND).add(work(value));
         for (var claim : snapshot.targetClaims()) root.getList("evidence", Tag.TAG_COMPOUND).add(targetClaim(claim));
+        for (var effect : snapshot.effects()) root.getList("evidence",Tag.TAG_COMPOUND).add(ConstructionNbt.effect(effect));
+        for (var site : snapshot.constructionSites()) root.getList("evidence",Tag.TAG_COMPOUND).add(ConstructionNbt.site(site));
+        for (var pin : snapshot.pinnedBlueprints()) root.getList("pinnedDefinitions",Tag.TAG_COMPOUND).add(ConstructionNbt.blueprint(pin));
         for (BuildingRecord value : snapshot.buildings()) {
             CompoundTag entry = typed("colonyloom:building");
             entry.putUUID("buildingId", value.buildingId());
@@ -243,6 +332,7 @@ final class RegistryNbt {
             root.getList("bindingObservations", Tag.TAG_COMPOUND).add(entry);
         }
         retained.forEach((key, entries) -> entries.forEach(entry -> root.getList(key, Tag.TAG_COMPOUND).add(entry.copy())));
+        ConstructionNbt.validatePinnedEnvelope(root.getList("pinnedDefinitions", Tag.TAG_COMPOUND));
         return root;
     }
 
@@ -446,7 +536,7 @@ final class RegistryNbt {
         return tag.getCompound(key);
     }
 
-    private static ListTag list(CompoundTag tag, String key) {
+    static ListTag list(CompoundTag tag, String key) {
         require(tag, key, Tag.TAG_LIST);
         ListTag value = (ListTag) tag.get(key);
         if (!value.isEmpty() && value.getElementType() != Tag.TAG_COMPOUND) throw invalid("Invalid list: " + key);

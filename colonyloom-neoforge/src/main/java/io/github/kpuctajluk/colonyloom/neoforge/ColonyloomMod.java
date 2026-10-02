@@ -45,7 +45,7 @@ public final class ColonyloomMod {
         NeoForge.EVENT_BUS.addListener(this::onCommands);
         NeoForge.EVENT_BUS.addListener(this::onEntityJoin);
         NeoForge.EVENT_BUS.addListener(this::onEntityLeave);
-        NeoForge.EVENT_BUS.addListener(this::onDeath);
+        NeoForge.EVENT_BUS.addListener(net.neoforged.bus.api.EventPriority.LOWEST,false,this::onDeath);
         NeoForge.EVENT_BUS.addListener(this::onInteract);
         NeoForge.EVENT_BUS.addListener(this::onServerStarting);
         NeoForge.EVENT_BUS.addListener(this::onServerPostTick);
@@ -59,14 +59,15 @@ public final class ColonyloomMod {
         if (runtimes.containsKey(server)) {
             throw new IllegalStateException("Duplicate Colonyloom server-starting event");
         }
-        MinecraftServerRuntime runtime = MinecraftServerRuntime.start(server);
+        MinecraftServerRuntime runtime = MinecraftServerRuntime.start(server,net.neoforged.neoforge.common.IOUtilities::waitUntilIOWorkerComplete);
         runtimes.put(server, runtime);
-        runtime.configureProfessions(ContentLoader.load(server.getResourceManager()).values());
+        runtime.configureContent(ContentLoader.load(server.getResourceManager()));
         var limits = simulationConfig.snapshot();
         runtime.core().updateLimits(limits);
         configuredLimits.put(server, limits);
         contentManagers.put(server,server.getResourceManager());
-        runtime.configurePhysical(new NeoForgeChunkAccess(server, tickets));
+        var executorEvent=NeoForge.EVENT_BUS.post(new ConstructionExecutorEvent(server,runtime));
+        runtime.configurePhysical(new NeoForgeChunkAccess(server, tickets),new NeoForgeItemInteraction(),executorEvent.observer());
         IdentityPlatform identity = new IdentityPlatform(server, runtime);
         identities.put(server, identity);
         identity.reconcileLoaded();
@@ -87,7 +88,7 @@ public final class ColonyloomMod {
         }
         var manager=event.getServer().getResourceManager();
         if (contentManagers.get(event.getServer())!=manager) {
-            runtime.configureProfessions(ContentLoader.load(manager).values());
+            runtime.configureContent(ContentLoader.load(manager));
             contentManagers.put(event.getServer(),manager);
         }
         runtime.postTick(event.getServer());

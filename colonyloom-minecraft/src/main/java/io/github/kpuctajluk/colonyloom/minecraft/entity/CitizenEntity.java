@@ -28,6 +28,8 @@ public final class CitizenEntity extends PathfinderMob {
     private long bindingEpoch;
     private boolean quarantined = true;
     private Runnable managedMovementGuard;
+    private java.util.function.IntConsumer deathInventoryObserver;
+    public void observeDeathInventory(java.util.function.IntConsumer observer) { requireServerThread(); deathInventoryObserver=Objects.requireNonNull(observer); }
 
     public CitizenEntity(EntityType<? extends CitizenEntity> type, Level level) {
         super(type, level);
@@ -171,6 +173,8 @@ public final class CitizenEntity extends PathfinderMob {
             }
         }
         inventory.setChanged();
+        var observer=deathInventoryObserver; deathInventoryObserver=null;
+        if(observer!=null) { int remaining=0; for(int slot=0;slot<INVENTORY_SIZE;slot++) remaining+=inventory.getItem(slot).getCount(); observer.accept(remaining); }
     }
 
     private void requireServerThread() {

@@ -42,9 +42,7 @@ final class TargetClaimRegistryTest {
         void ticks(int count) { for (int i = 0; i < count; i++) { budgets.beginTick(++tick); claims.tick(); } }
         void building() {
             RegistrySnapshot old = registry.snapshot();
-            registry.restore(new RegistrySnapshot(old.colonies(), old.citizens(),
-                    List.of(new BuildingRecord(BUILDING, A, "colonyloom:workshop", new WorldPosition(OVERWORLD, 0, 64, 0), 0)),
-                    old.tombstones(), old.observations(), old.works(), old.targetClaims()));
+            registry.restore(new RegistrySnapshot(old.colonies(), old.citizens(), List.of(new BuildingRecord(BUILDING, A, "colonyloom:workshop", new WorldPosition(OVERWORLD, 0, 64, 0), 0)), old.tombstones(), old.observations(), old.works(), old.targetClaims(), java.util.List.of(), java.util.List.of(), java.util.List.of()));
         }
     }
 

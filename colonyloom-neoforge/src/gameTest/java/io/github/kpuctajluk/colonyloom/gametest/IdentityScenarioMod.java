@@ -64,11 +64,12 @@ public final class IdentityScenarioMod {
         NeoForge.EVENT_BUS.addListener(this::register);
         NeoForge.EVENT_BUS.addListener(this::automatic);
         NeoForge.EVENT_BUS.addListener(this::stopped);
+        new ConstructionScenario();
     }
 
     private void register(RegisterCommandsEvent event) {
         var identity = literal("identity");
-        for (String action : List.of("setup", "verify", "conflict", "recovery-check", "isolation", "timer-start", "timer-save", "timer-resume", "timer-complete", "config-observe", "move-start", "move-complete")) {
+        for (String action : List.of("setup", "verify", "conflict", "recovery-check", "isolation", "timer-start", "timer-save", "timer-resume", "timer-complete", "config-observe", "move-start", "move-complete", "build-start", "build-partial")) {
             identity.then(literal(action).executes(context -> run(context.getSource(), action)));
         }
         event.getDispatcher().register(literal("colonyloomtest")
@@ -110,7 +111,7 @@ public final class IdentityScenarioMod {
                 BlockPos position = origin.offset(offset, 0, 4);
                 if (!level.hasChunkAt(position) || !level.isPositionEntityTicking(position)) return false;
             }
-        } else if (action.equals("verify") || action.startsWith("timer-") || action.startsWith("move-")) {
+        } else if (action.equals("verify") || action.startsWith("timer-") || action.startsWith("move-") || action.startsWith("build-")) {
             CompoundTag manifest = readManifest(source);
             for (Tag value : manifest.getList("citizens", Tag.TAG_COMPOUND)) {
                 int[] position = ((CompoundTag) value).getIntArray("position");
@@ -145,6 +146,7 @@ public final class IdentityScenarioMod {
                     case "recovery-check" -> recovery(source, manifest);
                     case "timer-start", "timer-save", "timer-resume", "timer-complete" -> timer(source, manifest, action);
                     case "move-start", "move-complete" -> move(source, manifest, action);
+                    case "build-start", "build-partial" -> build(source,manifest,action);
                     case "config-observe" -> {
                         for (Tag tag : manifest.getList("colonies", Tag.TAG_COMPOUND)) {
                             UUID colony = ((CompoundTag) tag).getUUID("id");
@@ -166,6 +168,29 @@ public final class IdentityScenarioMod {
             LOGGER.error("Colonyloom identity scenario {} failed", action, error);
             source.sendFailure(Component.literal("Identity scenario " + action + " FAIL: " + error.getMessage()));
             return 0;
+        }
+    }
+
+    private static void build(CommandSourceStack source,CompoundTag manifest,String action) throws Exception {
+        var expected=manifest.getList("citizens",Tag.TAG_COMPOUND).getCompound(0);
+        var physical=entity(source,expected.getUUID("entity"));
+        if(action.equals("build-start")) {
+            require(source,!manifest.contains("buildWork"),"build_fixture_once",action);
+            var colony=manifest.getList("colonies",Tag.TAG_COMPOUND).getCompound(0); int[] from=colony.getIntArray("from");
+            var origin=new BlockPos(from[0]+4,physical.blockPosition().getY(),from[2]+7);
+            for(int x=-2;x<=17;x++) for(int z=-1;z<=2;z++) { var pos=origin.offset(x,0,z); validateSite(source,pos); prepareFloor(source.getLevel(),pos); }
+            for(int x=0;x<16;x++) require(source,source.getLevel().getBlockState(origin.offset(x,0,0)).isAir(),"build_fixture_target_clear",coordinates(origin.offset(x,0,0)));
+            var build=new CompoundTag(); build.putUUID("colony",expected.getUUID("colony")); build.putIntArray("origin",new int[]{origin.getX(),origin.getY(),origin.getZ()});
+            var work=uuid(success(source,"colonyloom build "+expected.getUUID("colony")+" colonyloom:stair_strip "+coordinates(origin)+" 0"),"work");
+            build.putUUID("work",work); manifest.put("buildWork",build); writeManifest(source,manifest);
+        } else {
+            var build=manifest.getCompound("buildWork"); int[] p=build.getIntArray("origin"); require(source,p.length==3,"build_fixture_exists",action);
+            var origin=new BlockPos(p[0],p[1],p[2]); var status=success(source,"colonyloom status "+build.getUUID("colony"));
+            require(source,status.contains("work="+build.getUUID("work")+" state=WAITING reason=MATERIALS"),"production_build_waits_materials",status);
+            for(int x=0;x<16;x++) require(source,x<4?source.getLevel().getBlockState(origin.offset(x,0,0)).is(Blocks.OAK_STAIRS):source.getLevel().getBlockState(origin.offset(x,0,0)).isAir(),"production_build_partial_blocks",Integer.toString(x));
+            for(int slot=0;slot<CitizenEntity.INVENTORY_SIZE;slot++) require(source,physical.inventory().getItem(slot).isEmpty(),"production_build_exact_real_expense",Integer.toString(slot));
+            success(source,"colonyloom work cancel "+build.getUUID("work"));
+            fact(source,"production_build_cancel_preserves_physical_blocks",true,"four stairs, zero materials, public sixteen-block goal cancelled");
         }
     }
 

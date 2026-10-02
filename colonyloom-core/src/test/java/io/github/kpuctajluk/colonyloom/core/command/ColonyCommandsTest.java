@@ -193,6 +193,19 @@ final class ColonyCommandsTest {
         assertEquals(CitizenRecord.Readiness.READY, restored.registry().citizen(citizen.citizenId()).readiness());
     }
 
+    @Test void deathReleasesAssignedPhysicalWorkWithoutReclassifyingItsStage() {
+        ServerRuntime runtime=runtime(); ColonyRuntime colony=colony(runtime,0); CitizenRecord citizen=citizen(runtime,colony);
+        runtime.commands().updateCitizenReadiness(citizen.citizenId(),CitizenRecord.Readiness.READY);
+        var work=runtime.commands().createMoveWork(context(owner,false),UUID.randomUUID(),colony.colonyId(),new WorldPosition("minecraft:overworld",4,64,0));
+        runtime.workBoard().transition(work.id(),io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.READY,io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.NONE,"move");
+        assertTrue(runtime.workBoard().assign(work.id(),citizen.citizenId()));
+        runtime.commands().markDeath(citizen.citizenId());
+        assertNull(work.assignee()); assertNull(runtime.registry().citizen(citizen.citizenId()).assignedWorkId());
+        assertEquals("move",work.stage()); assertEquals(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.WAITING,work.state());
+        assertEquals(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.RECONCILING,work.waitingReason());
+        assertTrue(runtime.bindings().activeEntity(citizen.citizenId()).isEmpty());
+    }
+
     @Test
     void persistedTombstoneRejectsLateIncarnationAndRestoreIsAllOrNothing() {
         ServerRuntime runtime = runtime(); ColonyRuntime colony = colony(runtime, 0); CitizenRecord citizen = citizen(runtime, colony);
@@ -204,7 +217,7 @@ final class ColonyCommandsTest {
         assertTrue(restored.bindings().activeEntity(citizen.citizenId()).isEmpty());
         assertThrows(IllegalStateException.class, () -> restored.commands().bind(context(owner, true), citizen.citizenId(), citizen.entityId()));
         RegistrySnapshot before = restored.registry().snapshot();
-        RegistrySnapshot invalid = new RegistrySnapshot(before.colonies(), List.of(citizen, citizen), before.buildings(), before.tombstones(), before.observations(), before.works(), before.targetClaims());
+        RegistrySnapshot invalid = new RegistrySnapshot(before.colonies(), List.of(citizen, citizen), before.buildings(), before.tombstones(), before.observations(), before.works(), before.targetClaims(), java.util.List.of(), java.util.List.of(), java.util.List.of());
         assertThrows(IllegalArgumentException.class, () -> restored.registry().restore(invalid));
         assertEquals(before, restored.registry().snapshot());
     }

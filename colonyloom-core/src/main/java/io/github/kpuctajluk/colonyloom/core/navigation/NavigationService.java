@@ -42,6 +42,10 @@ public final class NavigationService implements AutoCloseable {
         Motion poll(Request request);
         void stop(Request request);
     }
+    public interface GoalAuthority { boolean current(WorkOrder work,Request request); }
+    public static boolean moveGoalCurrent(WorkOrder work,Request request) {
+        return request.target().equals(work.target());
+    }
     /** Shared with the backend so the transient vanilla search pool is admitted before search. */
     public static final int SEARCH_NODES=1024;
     private static final int[] RETRY = {20, 40, 80, 160, 200};
@@ -51,6 +55,7 @@ public final class NavigationService implements AutoCloseable {
     private final GlobalWorkBudgets budgets;
     private final ChunkDemandManager chunks;
     private final Backend backend;
+    private final GoalAuthority goals;
     private final Map<UUID, Entry> requests = new HashMap<>();
     private final Map<ChunkKey, Bucket> index = new HashMap<>();
     private final List<TreeSet<Entry>> starts = List.of(new TreeSet<>(ORDER), new TreeSet<>(ORDER), new TreeSet<>(ORDER));
@@ -81,8 +86,11 @@ public final class NavigationService implements AutoCloseable {
         }
     }
     public NavigationService(ColonyRegistry registry, GlobalWorkBudgets budgets, ChunkDemandManager chunks, Backend backend) {
+        this(registry,budgets,chunks,backend,NavigationService::moveGoalCurrent);
+    }
+    public NavigationService(ColonyRegistry registry,GlobalWorkBudgets budgets,ChunkDemandManager chunks,Backend backend,GoalAuthority goals) {
         this.registry=Objects.requireNonNull(registry); this.budgets=Objects.requireNonNull(budgets);
-        this.chunks=Objects.requireNonNull(chunks); this.backend=Objects.requireNonNull(backend);
+        this.chunks=Objects.requireNonNull(chunks); this.backend=Objects.requireNonNull(backend); this.goals=Objects.requireNonNull(goals);
     }
     public UUID request(UUID workId, UUID colonyId, UUID citizenId, long epoch, long goalRevision,
             WorldPosition target, Lane lane, int priority) {
@@ -151,7 +159,7 @@ public final class NavigationService implements AutoCloseable {
                 || !registry.colony(request.colonyId()).available()
                 || !registry.bindings().activeEntity(citizen.citizenId()).filter(citizen.entityId()::equals).isPresent()) return false;
         WorkOrder work=registry.workBoard().work(request.workId());
-        return !work.terminal() && request.citizenId().equals(work.assignee()) && request.target().equals(work.target())
+        return !work.terminal() && request.citizenId().equals(work.assignee()) && goals.current(work,request)
                 && request.colonyId().equals(work.colonyId());
     }
     public void tick(long tick) {
