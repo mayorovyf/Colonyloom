@@ -1,0 +1,242 @@
+package io.github.kpuctajluk.colonyloom.neoforge;
+
+import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import com.mojang.logging.LogUtils;
+import io.github.kpuctajluk.colonyloom.core.colony.*;
+import io.github.kpuctajluk.colonyloom.core.citizen.*;
+import io.github.kpuctajluk.colonyloom.core.command.ColonyCommands;
+import io.github.kpuctajluk.colonyloom.minecraft.entity.CitizenEntity;
+import io.github.kpuctajluk.colonyloom.minecraft.runtime.MinecraftServerRuntime;
+import java.util.*;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.entity.Entity;
+import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
+
+/** Server-scoped Minecraft observations and validations around the shared mutation owner. */
+final class IdentityPlatform {
+    private final MinecraftServer server;
+    private final MinecraftServerRuntime bridge;
+    private final Map<UUID,CitizenEntity> loaded = new HashMap<>();
+    private record Inspection(ColonyCommands.RecoveryInspection state, Map<UUID, net.minecraft.nbt.CompoundTag> inventories) {}
+    private final Map<UUID,Inspection> inspections = new HashMap<>();
+    private String identityFailure;
+    private UUID provisioningEntity;
+
+    IdentityPlatform(MinecraftServer server,MinecraftServerRuntime bridge) { this.server=server; this.bridge=bridge; }
+
+    void reconcileLoaded() {
+        for (ServerLevel level : server.getAllLevels()) for (Entity entity : level.getAllEntities()) join(entity);
+    }
+    void join(Entity entity) {
+        if (!(entity instanceof CitizenEntity citizen)) return;
+        if (citizen.getUUID().equals(provisioningEntity)) return;
+        citizen.setQuarantined(true);
+        if (!bridge.persistence().isAvailable() || bridge.core().lifecycle()!=io.github.kpuctajluk.colonyloom.core.runtime.ServerRuntime.Lifecycle.RUNNING || citizen.citizenId()==null) return;
+        if (identityFailure!=null) return;
+        try {
+            bridge.persistence().ensureSessionDirty();
+            bridge.core().bindings().observe(citizen.citizenId(),citizen.getUUID(),citizen.bindingEpoch());
+            loaded.put(citizen.getUUID(),citizen);
+            refresh(citizen.citizenId());
+            bridge.persistence().capture();
+        } catch (RuntimeException error) {
+            identityFailure="Identity reconciliation blocked: "+error.getMessage();
+            for (CitizenEntity observed:loaded.values()) observed.setQuarantined(true);
+            inspections.clear();
+            LogUtils.getLogger().error(identityFailure,error);
+        }
+    }
+    void leave(Entity entity) {
+        if (!(entity instanceof CitizenEntity citizen) || citizen.citizenId()==null || !bridge.persistence().isAvailable()) return;
+        loaded.remove(citizen.getUUID());
+        if (identityFailure!=null || bridge.core().lifecycle()!=io.github.kpuctajluk.colonyloom.core.runtime.ServerRuntime.Lifecycle.RUNNING) return;
+        try {
+            bridge.core().bindings().unload(citizen.getUUID());
+            refresh(citizen.citizenId());
+            bridge.persistence().capture();
+        } catch (RuntimeException error) {
+            identityFailure="Identity reconciliation blocked: "+error.getMessage();
+            for (CitizenEntity observed:loaded.values()) observed.setQuarantined(true);
+            inspections.clear();
+            LogUtils.getLogger().error(identityFailure,error);
+        }
+    }
+    private void refresh(UUID citizenId) {
+        var active=bridge.core().bindings().activeEntity(citizenId);
+        for (CitizenEntity entity:loaded.values()) if (citizenId.equals(entity.citizenId())) {
+            entity.setQuarantined(!entity.isAlive() || !active.filter(entity.getUUID()::equals).isPresent());
+        }
+        bridge.core().registry().findCitizen(citizenId).ifPresent(record -> {
+            boolean blocked = record.lifecycle()!=CitizenRecord.Lifecycle.ALIVE
+                    || !bridge.core().registry().colony(record.colonyId()).available()
+                    || bridge.core().bindings().observations(citizenId).stream().anyMatch(observation -> observation.quarantined() && !observation.retired());
+            bridge.core().commands().updateCitizenReadiness(citizenId, active.isPresent()
+                    ? CitizenRecord.Readiness.READY : blocked ? CitizenRecord.Readiness.BLOCKED : CitizenRecord.Readiness.UNKNOWN);
+        });
+        inspections.clear();
+    }
+    void death(LivingDeathEvent event) {
+        if (!(event.getEntity() instanceof CitizenEntity citizen) || citizen.citizenId()==null || !bridge.persistence().isAvailable()) return;
+        var record=bridge.core().registry().findCitizen(citizen.citizenId()).orElse(null);
+        if (record==null || record.lifecycle()!=CitizenRecord.Lifecycle.ALIVE || !record.entityId().equals(citizen.getUUID()) || record.bindingEpoch()!=citizen.bindingEpoch()) return;
+        try {
+            bridge.persistence().ensureSessionDirty();
+            bridge.core().commands().markDeath(citizen.citizenId());
+            citizen.setQuarantined(true);
+            bridge.persistence().capture();
+        } catch (RuntimeException error) {
+            citizen.setQuarantined(true);
+            LogUtils.getLogger().error("Colonyloom cannot persist observed citizen death; physical Minecraft death is not cancelled",error);
+        }
+    }
+    void interact(PlayerInteractEvent.EntityInteract event) {
+        if (!(event.getTarget() instanceof CitizenEntity citizen) || !(event.getEntity() instanceof ServerPlayer player)) return;
+        if (mayOpen(player,citizen)) {
+            bridge.persistence().ensureSessionDirty();
+            if (citizen.openInventory(player,p -> mayOpen(p,citizen))) {
+                event.setCancellationResult(InteractionResult.SUCCESS);
+                event.setCanceled(true);
+            }
+        }
+    }
+    private boolean mayOpen(ServerPlayer player,CitizenEntity entity) {
+        if (identityFailure!=null || !bridge.persistence().isAvailable() || entity.citizenId()==null || entity.isQuarantined()) return false;
+        var citizen=bridge.core().registry().citizen(entity.citizenId());
+        var colony=bridge.core().registry().colony(citizen.colonyId());
+        MemberRank rank=colony.rank(player.getUUID());
+        return colony.available() && (rank==MemberRank.OWNER || rank==MemberRank.MANAGER)
+                && bridge.core().bindings().activeEntity(citizen.citizenId()).filter(entity.getUUID()::equals).isPresent();
+    }
+
+    String createColony(CommandSourceStack source,String name,BlockPos from,BlockPos to) throws CommandSyntaxException {
+        Territory territory=new Territory(source.getLevel().dimension().location().toString(),Math.min(from.getX(),to.getX()),Math.min(from.getZ(),to.getZ()),Math.max(from.getX(),to.getX()),Math.max(from.getZ(),to.getZ()));
+        var colony=bridge.core().commands().createColony(context(source),UUID.randomUUID(),name,territory);
+        bridge.persistence().capture();
+        return "colony="+colony.colonyId()+" revision="+colony.revision();
+    }
+    String setMember(CommandSourceStack source,UUID colony,UUID player,String rank) throws CommandSyntaxException {
+        MemberRank member=switch(rank){case "manager"->MemberRank.MANAGER;case "viewer"->MemberRank.VIEWER;case "none"->null;default->throw new IllegalArgumentException("Rank must be manager|viewer|none");};
+        bridge.core().commands().setMember(context(source),colony,player,member); bridge.persistence().capture(); inspections.clear(); return "membership updated colony="+colony;
+    }
+    String setOwner(CommandSourceStack source,UUID colony,UUID player) throws CommandSyntaxException {
+        bridge.core().commands().setOwner(context(source),colony,player); bridge.persistence().capture(); inspections.clear(); return "owner updated colony="+colony;
+    }
+    String createCitizen(CommandSourceStack source,UUID colony,BlockPos pos) throws CommandSyntaxException {
+        requireAvailable();
+        CitizenEntity entity=CitizenRegistration.CITIZEN.get().create(source.getLevel());
+        if(entity==null)throw new IllegalStateException("Citizen entity factory unavailable");
+        entity.moveTo(pos.getX()+0.5,pos.getY(),pos.getZ()+0.5,0,0);
+        if(!source.getLevel().noCollision(entity))throw new IllegalArgumentException("Citizen position is obstructed");
+        UUID citizenId=UUID.randomUUID();
+        var record=bridge.core().commands().createCitizen(context(source),colony,citizenId,entity.getUUID(),position(source.getLevel(),pos), proposed -> {
+            entity.initializeIdentity(citizenId,proposed.bindingEpoch());
+            provisioningEntity=entity.getUUID();
+            try {
+                if(!source.getLevel().addFreshEntity(entity))throw new IllegalStateException("Citizen spawn refused without identity mutation");
+            } finally {
+                provisioningEntity=null;
+            }
+        });
+        join(entity);
+        bridge.persistence().capture(); return "citizen="+citizenId+" entity="+entity.getUUID()+" epoch="+record.bindingEpoch();
+    }
+    String assign(CommandSourceStack source,UUID citizen,String profession) throws CommandSyntaxException {
+        bridge.core().commands().assignProfession(context(source),citizen,profession); bridge.persistence().capture(); return "citizen="+citizen+" profession="+profession;
+    }
+    String status(CommandSourceStack source,UUID colony) throws CommandSyntaxException {
+        var state=bridge.core().commands().status(context(source),colony);
+        StringBuilder result=new StringBuilder(state.toString());
+        for (var citizen : bridge.core().registry().citizens(colony)) {
+            result.append("\ncitizen=").append(citizen.citizenId()).append(" entity=").append(citizen.entityId())
+                    .append(" epoch=").append(citizen.bindingEpoch()).append(" lifecycle=").append(citizen.lifecycle())
+                    .append(" readiness=").append(citizen.readiness()).append(" profession=").append(citizen.professionId())
+                    .append(" food=").append(citizen.needs().get("food"));
+        }
+        return result.toString();
+    }
+    String inspect(CommandSourceStack source,UUID colony) throws CommandSyntaxException {
+        var inspection=bridge.core().commands().inspect(context(source),colony);
+        inspections.put(colony,new Inspection(inspection,inventorySnapshot(inspection)));
+        StringBuilder result=new StringBuilder(inspection.toString());
+        for(CitizenEntity entity:loaded.values()) {
+            if(entity.citizenId()==null)continue;
+            var record=bridge.core().registry().findCitizen(entity.citizenId()).orElse(null);
+            if(record==null || !record.colonyId().equals(colony))continue;
+            result.append("\nentity=").append(entity.getUUID()).append(" epoch=").append(entity.bindingEpoch()).append(" quarantine=").append(entity.isQuarantined());
+            for(int slot=0;slot<9;slot++)result.append(" slot").append(slot).append('=').append(entity.inventory().getItem(slot));
+        }
+        return result.toString();
+    }
+    String accept(CommandSourceStack source,UUID colony,UUID checkpoint) throws CommandSyntaxException {
+        var inspected=inspections.get(colony);
+        if(inspected==null)throw new IllegalStateException("Run recovery inspect before accepting world");
+        if (!inspected.inventories().equals(inventorySnapshot(inspected.state()))) {
+            inspections.remove(colony);
+            throw new IllegalStateException("Physical inventory changed; inspect again");
+        }
+        bridge.core().commands().acceptWorld(context(source),colony,checkpoint,inspected.state());
+        bridge.persistence().persistSnapshot(); inspections.remove(colony);
+        for(CitizenEntity entity:loaded.values()) if(entity.citizenId()!=null)refresh(entity.citizenId());
+        return "Physical world accepted without item creation/removal/compensation colony="+colony;
+    }
+    String bind(CommandSourceStack source,UUID citizen,UUID entityId) throws CommandSyntaxException {
+        CitizenEntity selected=loaded.get(entityId);
+        if(selected==null || !citizen.equals(selected.citizenId()) || !selected.isAlive())throw new IllegalStateException("Selected citizen embodiment is not ready");
+        var record=bridge.core().commands().bind(context(source),citizen,entityId);
+        selected.initializeIdentity(citizen,record.bindingEpoch());
+        refresh(citizen); bridge.persistence().capture(); return "citizen="+citizen+" entity="+entityId+" epoch="+record.bindingEpoch();
+    }
+    private Map<UUID,net.minecraft.nbt.CompoundTag> inventorySnapshot(ColonyCommands.RecoveryInspection inspection) {
+        Map<UUID,net.minecraft.nbt.CompoundTag> inventories=new HashMap<>();
+        for (var observation:inspection.observations()) {
+            CitizenEntity entity=loaded.get(observation.entityId());
+            if (entity==null) continue;
+            var inventory=new net.minecraft.nbt.CompoundTag();
+            net.minecraft.world.ContainerHelper.saveAllItems(inventory,entity.inventory().getItems(),server.registryAccess());
+            inventories.put(entity.getUUID(),inventory);
+        }
+        return Map.copyOf(inventories);
+    }
+    private void requireAvailable(){
+        if(identityFailure!=null)throw new IllegalStateException(identityFailure);
+        if(!bridge.persistence().isAvailable())throw new IllegalStateException(bridge.persistence().failureReason());
+    }
+    private ColonyCommands.CommandContext context(CommandSourceStack source) throws CommandSyntaxException {
+        requireAvailable();
+        UUID actor=source.getEntity() instanceof ServerPlayer player?player.getUUID():null;
+        return new ColonyCommands.CommandContext(actor,source.hasPermission(2),new ColonyCommands.PhysicalChecks(){
+            public void validateTerritory(Territory territory){
+                if(!(source.getEntity() instanceof ServerPlayer player))throw new SecurityException("Colony founding requires a real player");
+                ServerLevel level=source.getLevel();
+                for(int x=territory.minX();x<=territory.maxX();x++)for(int z=territory.minZ();z<=territory.maxZ();z++){
+                    BlockPos pos=new BlockPos(x,player.blockPosition().getY(),z);
+                    if(!level.getWorldBorder().isWithinBounds(pos)||!level.mayInteract(player,pos))throw new SecurityException("Territory permission/world border denied");
+                }
+            }
+            public void validateCitizenPosition(ColonyRuntime colony,WorldPosition position){
+                ServerLevel level=level(position.dimension()); BlockPos pos=new BlockPos(position.x(),position.y(),position.z());
+                if(level==null||!level.hasChunkAt(pos)||!level.isPositionEntityTicking(pos)||!level.getWorldBorder().isWithinBounds(pos))throw new IllegalStateException("CHUNK_NOT_READY or outside world border");
+                if(position.y()<level.getMinBuildHeight()||position.y()+2>=level.getMaxBuildHeight())throw new IllegalArgumentException("Citizen position outside build height");
+            }
+            public void validateRecovery(ColonyRuntime colony,List<CitizenRecord> citizens,List<BindingRegistry.Observation> observations){
+                for(CitizenRecord record:citizens){
+                    if(record.lifecycle()!=CitizenRecord.Lifecycle.ALIVE)continue;
+                    CitizenEntity entity=loaded.get(record.entityId());
+                    if(entity==null||!entity.isAlive()||!record.citizenId().equals(entity.citizenId())||record.bindingEpoch()!=entity.bindingEpoch())throw new IllegalStateException("Recovery identity is not fully loaded and alive");
+                }
+                for(var observation:observations)if(!loaded.containsKey(observation.entityId()))throw new IllegalStateException("Known competing embodiment is not loaded");
+            }
+        });
+    }
+    private ServerLevel level(String dimension){return server.getLevel(ResourceKey.create(Registries.DIMENSION,ResourceLocation.parse(dimension)));}
+    private static WorldPosition position(ServerLevel level,BlockPos pos){return new WorldPosition(level.dimension().location().toString(),pos.getX(),pos.getY(),pos.getZ());}
+}

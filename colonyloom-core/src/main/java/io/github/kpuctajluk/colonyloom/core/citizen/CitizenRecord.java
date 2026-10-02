@@ -1,0 +1,44 @@
+package io.github.kpuctajluk.colonyloom.core.citizen;
+
+import io.github.kpuctajluk.colonyloom.core.colony.WorldPosition;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+
+public record CitizenRecord(UUID citizenId, UUID colonyId, UUID entityId, long bindingEpoch,
+        UUID homeId, UUID workplaceId, UUID assignedWorkId, String professionId,
+        Map<String, Integer> skills, Map<String, Integer> needs, Lifecycle lifecycle,
+        Admission admission, Readiness readiness, long activeTimeTicks,
+        Map<String, Long> remainingTimers, WorldPosition lastKnownPosition, long revision) {
+    public enum Lifecycle { ALIVE, DEAD, REMOVED }
+    public enum Admission { ACTIVE, INACTIVE }
+    public enum Readiness { UNKNOWN, RECONCILING, READY, BLOCKED }
+    public CitizenRecord {
+        Objects.requireNonNull(citizenId, "citizenId");
+        Objects.requireNonNull(colonyId, "colonyId");
+        Objects.requireNonNull(entityId, "entityId");
+        Objects.requireNonNull(lifecycle, "lifecycle");
+        Objects.requireNonNull(admission, "admission");
+        Objects.requireNonNull(readiness, "readiness");
+        Objects.requireNonNull(lastKnownPosition, "lastKnownPosition");
+        if (bindingEpoch < 1 || activeTimeTicks < 0 || revision < 0) throw new IllegalArgumentException("Invalid citizen epoch/time/revision");
+        if (professionId != null) ProfessionDefinition.validateId(professionId);
+        skills = Map.copyOf(skills);
+        needs = Map.copyOf(needs);
+        remainingTimers = Map.copyOf(remainingTimers);
+        if (skills.values().stream().anyMatch(value -> value < 0) || needs.values().stream().anyMatch(value -> value < 0) || remainingTimers.values().stream().anyMatch(value -> value < 0)) throw new IllegalArgumentException("Negative citizen state");
+        if (!needs.containsKey("food") || needs.get("food") > 20) throw new IllegalArgumentException("Citizen food must be 0..20");
+    }
+    public CitizenRecord withProfession(String id) {
+        return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, id, skills, needs, lifecycle, admission, readiness, activeTimeTicks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));
+    }
+    public CitizenRecord withBinding(UUID entity, long epoch) {
+        return new CitizenRecord(citizenId, colonyId, entity, epoch, homeId, workplaceId, null, professionId, skills, needs, lifecycle, admission, Readiness.UNKNOWN, activeTimeTicks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));
+    }
+    public CitizenRecord reconciled() {
+        return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, null, professionId, skills, needs, lifecycle, admission, lifecycle == Lifecycle.ALIVE ? Readiness.READY : Readiness.BLOCKED, activeTimeTicks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));
+    }
+    public CitizenRecord withLifecycle(Lifecycle state) {
+        return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, null, professionId, skills, needs, state, Admission.INACTIVE, Readiness.BLOCKED, activeTimeTicks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));
+    }
+}

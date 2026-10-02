@@ -2,6 +2,14 @@ package io.github.kpuctajluk.colonyloom.neoforge;
 
 import com.mojang.logging.LogUtils;
 import io.github.kpuctajluk.colonyloom.minecraft.runtime.MinecraftServerRuntime;
+import io.github.kpuctajluk.colonyloom.minecraft.content.ContentLoader;
+import net.neoforged.bus.api.IEventBus;
+import net.neoforged.neoforge.event.AddReloadListenerEvent;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
+import net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent;
+import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import net.minecraft.server.MinecraftServer;
@@ -21,8 +29,17 @@ public final class ColonyloomMod {
     // Instance-owned, identity-keyed sessions; stopped servers are never retained.
     // The monitor also publishes state between successive integrated-server threads.
     private final Map<MinecraftServer, MinecraftServerRuntime> runtimes = new IdentityHashMap<>();
+    private final Map<MinecraftServer, IdentityPlatform> identities = new IdentityHashMap<>();
+    private final Map<MinecraftServer, net.minecraft.server.packs.resources.ResourceManager> contentManagers = new IdentityHashMap<>();
 
-    public ColonyloomMod() {
+    public ColonyloomMod(IEventBus modBus) {
+        CitizenRegistration.register(modBus);
+        NeoForge.EVENT_BUS.addListener(this::onReload);
+        NeoForge.EVENT_BUS.addListener(this::onCommands);
+        NeoForge.EVENT_BUS.addListener(this::onEntityJoin);
+        NeoForge.EVENT_BUS.addListener(this::onEntityLeave);
+        NeoForge.EVENT_BUS.addListener(this::onDeath);
+        NeoForge.EVENT_BUS.addListener(this::onInteract);
         NeoForge.EVENT_BUS.addListener(this::onServerStarting);
         NeoForge.EVENT_BUS.addListener(this::onServerPostTick);
         NeoForge.EVENT_BUS.addListener(this::onServerStopping);
@@ -37,12 +54,26 @@ public final class ColonyloomMod {
         }
         MinecraftServerRuntime runtime = MinecraftServerRuntime.start(server);
         runtimes.put(server, runtime);
+        runtime.configureProfessions(ContentLoader.load(server.getResourceManager()).values());
+        contentManagers.put(server,server.getResourceManager());
+        IdentityPlatform identity = new IdentityPlatform(server, runtime);
+        identities.put(server, identity);
+        identity.reconcileLoaded();
+        if (!runtime.persistence().isAvailable()) {
+            LOGGER.error("{}; Colonyloom mutations are disabled; existing save is not replaced", runtime.persistence().failureReason());
+        }
         LOGGER.info("Colonyloom runtime started: session={}, world={}, activeRuntimes={}",
                 runtime.sessionId(), runtime.worldPath(), runtimes.size());
     }
 
     private synchronized void onServerPostTick(ServerTickEvent.Post event) {
-        requireRuntime(event.getServer()).postTick(event.getServer());
+        MinecraftServerRuntime runtime=requireRuntime(event.getServer());
+        var manager=event.getServer().getResourceManager();
+        if (contentManagers.get(event.getServer())!=manager) {
+            runtime.configureProfessions(ContentLoader.load(manager).values());
+            contentManagers.put(event.getServer(),manager);
+        }
+        runtime.postTick(event.getServer());
     }
 
     private synchronized void onServerStopping(ServerStoppingEvent event) {
@@ -60,6 +91,8 @@ public final class ColonyloomMod {
         } finally {
             // Even an invalid shutdown sequence must not retain an old integrated world.
             runtimes.remove(server);
+            identities.remove(server);
+            contentManagers.remove(server);
             LOGGER.info("Colonyloom runtime released: session={}, world={}, ticks={}, activeRuntimes={}",
                     runtime.sessionId(), runtime.worldPath(), runtime.serverTick(), runtimes.size());
         }
@@ -72,5 +105,47 @@ public final class ColonyloomMod {
             throw new IllegalStateException("Colonyloom lifecycle event has no runtime for this server");
         }
         return runtime;
+    }
+
+    private void onReload(AddReloadListenerEvent event) {
+        event.addListener(new ContentLoader());
+    }
+
+    private void onCommands(RegisterCommandsEvent event) {
+        ColonyloomBrigadier.register(event.getDispatcher(), server -> {
+            synchronized (this) {
+                IdentityPlatform identity = identities.get(server);
+                if (identity == null) throw new IllegalStateException("Colonyloom server is not ready");
+                return identity;
+            }
+        });
+    }
+
+    private synchronized void onEntityJoin(EntityJoinLevelEvent event) {
+        if (event.getLevel() instanceof net.minecraft.server.level.ServerLevel level) {
+            IdentityPlatform identity = identities.get(level.getServer());
+            if (identity != null) identity.join(event.getEntity());
+        }
+    }
+
+    private synchronized void onEntityLeave(EntityLeaveLevelEvent event) {
+        if (event.getLevel() instanceof net.minecraft.server.level.ServerLevel level) {
+            IdentityPlatform identity = identities.get(level.getServer());
+            if (identity != null) identity.leave(event.getEntity());
+        }
+    }
+
+    private synchronized void onDeath(LivingDeathEvent event) {
+        if (event.getEntity().level() instanceof net.minecraft.server.level.ServerLevel level) {
+            IdentityPlatform identity = identities.get(level.getServer());
+            if (identity != null) identity.death(event);
+        }
+    }
+
+    private synchronized void onInteract(PlayerInteractEvent.EntityInteract event) {
+        if (event.getEntity().level() instanceof net.minecraft.server.level.ServerLevel level) {
+            IdentityPlatform identity = identities.get(level.getServer());
+            if (identity != null) identity.interact(event);
+        }
     }
 }

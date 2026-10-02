@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "version": 1,
+  "allowedWorkTypes": [
+    "colonyloom:production"
+  ],
+  "equipment": [
+    "minecraft:crafting_table"
+  ]
+}
