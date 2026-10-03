@@ -59,6 +59,9 @@ public final class WorkBoard {
     public WorkOrder createConstruction(UUID id, UUID colony, WorldPosition target, int priority, Lane lane) {
         return create(id,colony,target,"colonyloom:builder",priority,lane,WorkOrder.CONSTRUCTION,"construction",0);
     }
+    public WorkOrder createDelivery(UUID id, UUID colony, WorldPosition target, int priority, Lane lane) {
+        return create(id, colony, target, "colonyloom:courier", priority, lane, WorkOrder.DELIVERY, "delivery", 0);
+    }
     private WorkOrder create(UUID id, UUID colony, WorldPosition target, String profession, int priority, Lane lane, String type, String stage, long duration) {
         registry.requireOwner();
         if (!registry.colony(colony).territory().contains(target) || works.containsKey(id) || registry.usedId(id)) throw new IllegalArgumentException("Invalid work identity or target");
@@ -108,6 +111,16 @@ public final class WorkBoard {
     }
     public void cancel(UUID id) {
         WorkOrder value = work(id); if (value.terminal()) return;
+        var delivery = registry.supply().deliveryForWork(id);
+        if (delivery != null) {
+            registry.supply().cancel(delivery.ownerDemandId());
+            if (registry.supply().hasCargo(delivery.id())) {
+                registry.supply().returnDelivery(delivery.id());
+                if (value.assignee() != null) waitAssigned(id, WorkOrder.Reason.RECONCILING, "returning");
+                else transition(id, WorkOrder.State.WAITING, WorkOrder.Reason.RECONCILING, "returning");
+                return;
+            }
+        }
         registry.beforeMutation(); releaseAssignmentInternal(value); value.transition(WorkOrder.State.CANCELLED,WorkOrder.Reason.NONE,"cancelled"); leases.get(id).finishRoot(); changed.accept(id);
     }
     public void priority(UUID id, int priority) {
@@ -121,6 +134,11 @@ public final class WorkBoard {
     public void transition(UUID id, WorkOrder.State state, WorkOrder.Reason reason, String stage) {
         WorkOrder value = work(id);
         if (value.state() == state && value.waitingReason() == reason && value.stage().equals(stage)) return;
+        if (state == WorkOrder.State.CANCELLED && registry.supply().deliveryForWork(id) != null
+                && registry.supply().hasCargo(registry.supply().deliveryForWork(id).id())) { cancel(id); return; }
+        if ((state == WorkOrder.State.COMPLETED || state == WorkOrder.State.FAILED)
+                && registry.supply().deliveryForWork(id) != null && registry.supply().hasCargo(registry.supply().deliveryForWork(id).id()))
+            throw new IllegalStateException("Delivery work retains physical cargo");
         registry.beforeMutation();
         if (state == WorkOrder.State.READY || state == WorkOrder.State.WAITING || state == WorkOrder.State.COMPLETED || state == WorkOrder.State.CANCELLED || state == WorkOrder.State.FAILED) releaseAssignmentInternal(value);
         value.transition(state,reason,stage); if (value.terminal()) leases.get(id).finishRoot(); changed.accept(id);
@@ -141,6 +159,8 @@ public final class WorkBoard {
     }
     public boolean assign(UUID id, UUID citizenId) {
         WorkOrder value = work(id); CitizenRecord citizen = registry.citizen(citizenId);
+        var delivery = registry.supply().deliveryForWork(id);
+        if (delivery != null && registry.supply().hasCargo(delivery.id()) && !citizenId.equals(delivery.citizenId())) return false;
         if (value.state() != WorkOrder.State.READY || citizen.assignedWorkId() != null || !citizen.colonyId().equals(value.colonyId()) || citizen.lifecycle() != CitizenRecord.Lifecycle.ALIVE || citizen.admission() != CitizenRecord.Admission.ACTIVE || citizen.readiness() != CitizenRecord.Readiness.READY) return false;
         if (value.professionId() != null && !value.professionId().equals(citizen.professionId())) return false;
         registry.beforeMutation(); value.assignment(citizenId); value.transition(WorkOrder.State.ASSIGNED,WorkOrder.Reason.NONE,value.stage());
@@ -176,7 +196,9 @@ public final class WorkBoard {
     /** Concrete obligations must have been checkpoint-compacted before their terminal work. */
     public void retire(UUID id) {
         WorkOrder value = work(id);
-        if (!value.terminal() || !(WorkOrder.ACTIVE_WAIT.equals(value.typeId()) || WorkOrder.MOVE.equals(value.typeId()) || WorkOrder.CONSTRUCTION.equals(value.typeId()) && registry.construction().site(id)==null)) throw new IllegalStateException("Work has retained obligations");
+        if (!value.terminal() || !(WorkOrder.ACTIVE_WAIT.equals(value.typeId()) || WorkOrder.MOVE.equals(value.typeId())
+                || WorkOrder.CONSTRUCTION.equals(value.typeId()) && registry.construction().site(id)==null
+                || WorkOrder.DELIVERY.equals(value.typeId()) && !registry.supply().hasDeliveryWork(id))) throw new IllegalStateException("Work has retained obligations");
         for (var effect : registry.effects().snapshots()) if (id.equals(effect.workId())) throw new IllegalStateException("Work has retained witness");
         for (var citizen : registry.citizensView()) if (id.equals(citizen.assignedWorkId())) throw new IllegalStateException("Work has retained assignment");
         for (var claim : registry.targetClaims().snapshots()) if (id.equals(claim.ownerId())) throw new IllegalStateException("Work has retained target");

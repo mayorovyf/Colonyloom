@@ -35,6 +35,9 @@ public final class ChunkGameTests {
         helper.onEachTick(() -> {
             budgets.beginTick(++tick[0]); chunks.tick(tick[0]);
             if (releaseTick[0]<0 && chunks.ready(first) && chunks.ready(second)) {
+                // Native neighbour readiness publishes independently from the centre's entity-ticking state.
+                for(int x=-2;x<=2;x++)for(int z=-2;z<=2;z++) if(!access.ready(new ChunkKey(dimension,center.x()+x,center.z()+z),ChunkDemandManager.Readiness.LOADED))return;
+                for(int x=-1;x<=1;x++)for(int z=-1;z<=1;z++) if(!access.ready(new ChunkKey(dimension,center.x()+x,center.z()+z),ChunkDemandManager.Readiness.BLOCK_TICKING))return;
                 for(int x=-2;x<=2;x++)for(int z=-2;z<=2;z++) helper.assertTrue(access.ready(new ChunkKey(dimension,center.x()+x,center.z()+z),ChunkDemandManager.Readiness.LOADED),"5x5 loaded footprint missing "+x+","+z);
                 for(int x=-1;x<=1;x++)for(int z=-1;z<=1;z++) helper.assertTrue(access.ready(new ChunkKey(dimension,center.x()+x,center.z()+z),ChunkDemandManager.Readiness.BLOCK_TICKING),"3x3 block ring missing "+x+","+z);
                 helper.assertTrue(!access.ready(new ChunkKey(dimension,center.x()+1,center.z()),ChunkDemandManager.Readiness.ENTITY_TICKING),"Entity ticking expanded beyond center");

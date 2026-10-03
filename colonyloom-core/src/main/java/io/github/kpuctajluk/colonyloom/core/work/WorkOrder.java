@@ -12,11 +12,12 @@ public final class WorkOrder {
     public static final String ACTIVE_WAIT = "colonyloom:active_wait";
     public static final String MOVE = "colonyloom:move";
     public static final String CONSTRUCTION = "colonyloom:construction";
+    public static final String DELIVERY = "colonyloom:delivery";
     public static final int MAX_DEPENDENCIES = 16;
     public enum State { PLANNED, READY, ASSIGNED, RUNNING, WAITING, COMPLETED, CANCELLED, FAILED }
     public enum Reason { NONE, MATERIALS, TOOL, WORKER, CAPACITY, UNREACHABLE, CHUNK_NOT_READY,
         RECONCILING, STATE_LIMIT, WORKING_SET_LIMIT, BUDGET, PERMISSION_DENIED, UNSUPPORTED_STORAGE,
-        TARGET_CONFLICT, RECOVERY_AMBIGUOUS, CONTENT_UNAVAILABLE, CRITICAL_CAPACITY }
+        TARGET_CONFLICT, RECOVERY_AMBIGUOUS, CONTENT_UNAVAILABLE, CRITICAL_CAPACITY, CARGO_LOST }
     public enum StepResult { PROGRESS, COMPLETED, WAITING, INVALIDATED, FAILED }
     public record Snapshot(String typeId, UUID id, UUID colonyId, WorldPosition target,
             String professionId, int priority, Lane lane, State state, UUID assignee,

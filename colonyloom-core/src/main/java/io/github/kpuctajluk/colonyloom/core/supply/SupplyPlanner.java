@@ -11,7 +11,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
-/** Plans honest admitted obligations only; production/delivery execution belongs to later executors. */
+/** Plans admitted stock routes and production obligations; native execution belongs to consumers. */
 public final class SupplyPlanner implements AutoCloseable {
     @FunctionalInterface public interface RecipeProvider {
         List<RecipeDefinition> recipes(UUID colony, ItemMatcher target);
@@ -66,11 +66,23 @@ public final class SupplyPlanner implements AutoCloseable {
             if (current == null || !registry.colony(current.snapshot().colonyId()).available()
                     || current.snapshot().revision() != expectedRevision || current.deficit() == 0) closeCursor();
         }
+        if (cursor == null && finalizingStock && stockSearchRoot != null) {
+            Demand current = supply.demand(stockSearchRoot.id());
+            if (!registry.colony(current.snapshot().colonyId()).available() || current.snapshot().revision() != finalizingRevision
+                    || current.deficit() == 0 || current.snapshot().status() == Demand.Status.CANCELLED) closeCursor();
+        }
         while (budgets.timeAvailable()) {
             if (cursor == null) {
-                Demand demand = next();
+                Demand demand = finalizingStock && stockSearchRoot != null ? supply.demand(stockSearchRoot.id()) : next();
                 if (demand == null) return;
                 if (!budgets.tryConsume(Budget.GRAPH_EXPANSIONS, demand.snapshot().lane())) return;
+                if (demand != null && demand.snapshot().goalKind() == Demand.GoalKind.DELIVERY) {
+                    try {
+                        if (!reserveAvailableStock(demand, tick)) return;
+                        supply.status(demand.id(), Demand.Status.WAITING);
+                    } catch (IllegalStateException changed) { supply.status(demand.id(), Demand.Status.WAITING); }
+                    handoff(demand.id()); closeCursor(); continue;
+                }
                 try { cursor = new RecipeGraphCursor(demand.snapshot(), demand.deficit(), registry.admission(), recipes, physical, ancestors(demand)); }
                 catch (AdmissionLedger.AdmissionException full) { supply.status(demand.id(), Demand.Status.WAITING); handoff(demand.id()); return; }
             }
@@ -131,7 +143,7 @@ public final class SupplyPlanner implements AutoCloseable {
             }
             while (stockIndex < stockPage.candidates().size()) {
                 var candidate = stockPage.candidates().get(stockIndex);
-                if (!demand.snapshot().matcher().matches(candidate.item()) || candidate.available() == 0) { stockIndex++; continue; }
+                if (!demand.snapshot().acceptsSource(candidate.slot().storage()) || !demand.snapshot().matcher().matches(candidate.item()) || candidate.available() == 0) { stockIndex++; continue; }
                 if (!budgets.tryConsume(Budget.STORAGE_SLOT_CHECKS, demand.snapshot().lane())) return false;
                 stockIndex++;
                 var observed = physical.read(candidate.slot());

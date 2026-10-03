@@ -28,13 +28,16 @@ public final class MinecraftSupplyAccess implements SupplyPlanner.PhysicalAccess
     @Override public SupplyPlanner.CandidatePage candidates(Demand.Snapshot demand,ItemMatcher matcher,int offset,int limit) {
         registry.requireOwner();if(limit<1||limit>16||offset<0)throw new IllegalArgumentException("Candidate page bounds");
         if(offset==0||root==null||!root.id().equals(demand.id())||root.revision()!=demand.revision()||!matcher.equals(target)) {
-            root=demand;target=matcher;registrations=registry.storage().registrations(demand.colonyId());registrationIndex=slotIndex=0;selected.clear();after=null;
+            root=demand;target=matcher;registrations=registry.storage().registrations(demand.colonyId());
+            if(!demand.sourceStorages().isEmpty())registrations=registrations.stream().filter(value -> value.storages().stream().anyMatch(demand.sourceStorages()::contains)).toList();
+            registrationIndex=slotIndex=0;selected.clear();after=null;
         }
         int examined=0;
         while(registrationIndex<registrations.size()&&examined<16) {
             var registration=registrations.get(registrationIndex);
             if(slotIndex>=registration.slots().size()){registrationIndex++;slotIndex=0;continue;}
             StockRegion slot=registration.slots().get(slotIndex++);examined++;
+            if(!demand.sourceStorages().isEmpty()&&!demand.sourceStorages().contains(slot.storage()))continue;
             var observation=registry.storage().index().observation(slot);
             long available=registry.storage().index().free(slot,registry.budgets().tick());
             if(!observation.ready()||!matcher.matches(observation.item())||available==0)continue;

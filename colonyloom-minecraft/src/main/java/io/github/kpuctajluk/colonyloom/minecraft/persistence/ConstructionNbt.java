@@ -38,12 +38,27 @@ final class ConstructionNbt {
         var tag=typed(EFFECT); tag.putUUID("operationId",value.operationId()); tag.putUUID("colonyId",value.colonyId()); tag.putUUID("citizenId",value.citizenId());
         if(value.workId()!=null) tag.putUUID("workId",value.workId()); tag.putLong("bindingEpoch",value.bindingEpoch()); tag.putString("kind",value.kind().name());
         tag.put("target",position(value.target())); tag.putString("expectedBlock",value.expectedBlock()); tag.putString("itemId",value.itemId());
-        tag.putInt("countBefore",value.countBefore()); tag.putInt("countAfter",value.countAfter()); tag.putString("state",value.state().name()); tag.putLong("revision",value.revision()); return tag;
+        tag.putInt("countBefore",value.countBefore()); tag.putInt("countAfter",value.countAfter()); tag.putString("state",value.state().name()); tag.putLong("revision",value.revision());
+        if(value.transfer()!=null) tag.put("transfer",transfer(value.transfer())); return tag;
     }
     static EffectRecord effect(CompoundTag tag) {
         return new EffectRecord(uuid(tag,"operationId"),uuid(tag,"colonyId"),tag.contains("workId")?uuid(tag,"workId"):null,uuid(tag,"citizenId"),number(tag,"bindingEpoch"),
                 ActionContext.Kind.valueOf(text(tag,"kind",64)),position(compound(tag,"target")),boundedText(tag,"expectedBlock",1024),boundedText(tag,"itemId",256),
-                integer(tag,"countBefore"),integer(tag,"countAfter"),EffectRecord.State.valueOf(text(tag,"state",64)),number(tag,"revision"));
+                integer(tag,"countBefore"),integer(tag,"countAfter"),EffectRecord.State.valueOf(text(tag,"state",64)),number(tag,"revision"),
+                tag.contains("transfer")?transfer(compound(tag,"transfer")):null);
+    }
+    private static CompoundTag transfer(EffectRecord.Transfer value) {
+        var tag=new CompoundTag(); tag.putInt("schemaVersion",1);
+        tag.put("source",StorageNbt.slot(value.source())); tag.put("destination",StorageNbt.slot(value.destination())); tag.put("item",StorageNbt.item(value.item()));
+        tag.putInt("sourceBefore",value.sourceBefore()); tag.putInt("sourceAfter",value.sourceAfter());
+        tag.putInt("destinationBefore",value.destinationBefore()); tag.putInt("destinationAfter",value.destinationAfter());
+        tag.putInt("maximum",value.maximum()); tag.putInt("extracted",value.extracted()); tag.putInt("inserted",value.inserted()); tag.putInt("returned",value.returned()); return tag;
+    }
+    private static EffectRecord.Transfer transfer(CompoundTag tag) {
+        if(integer(tag,"schemaVersion")!=1) throw new IllegalArgumentException("Unsupported transfer evidence schema");
+        return new EffectRecord.Transfer(StorageNbt.slot(compound(tag,"source")),StorageNbt.slot(compound(tag,"destination")),StorageNbt.item(compound(tag,"item")),
+                integer(tag,"sourceBefore"),integer(tag,"sourceAfter"),integer(tag,"destinationBefore"),integer(tag,"destinationAfter"),
+                integer(tag,"maximum"),integer(tag,"extracted"),integer(tag,"inserted"),integer(tag,"returned"));
     }
     static final int MAX_PALETTE = 512;
     static CompoundTag blueprint(BlueprintDefinition definition) {
@@ -70,7 +85,7 @@ final class ConstructionNbt {
         boolean knownKind=false, knownState=false;
         for(var value:ActionContext.Kind.values()) knownKind |= value.name().equals(kind);
         for(var value:EffectRecord.State.values()) knownState |= value.name().equals(state);
-        return knownKind && knownState;
+        return knownKind && knownState && (!tag.contains("transfer") || integer(compound(tag,"transfer"),"schemaVersion")==1);
     }
     static BlueprintDefinition blueprint(CompoundTag tag) {
         if(!knownBlueprintSchema(tag)) throw new IllegalArgumentException("Unsupported pinned blueprint schema");

@@ -67,6 +67,7 @@ public final class IdentityScenarioMod {
         new ConstructionScenario();
         new PlatformScenario();
         new StorageScenario();
+        new DeliveryScenario();
     }
 
     private void register(RegisterCommandsEvent event) {

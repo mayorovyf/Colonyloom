@@ -53,8 +53,8 @@ final class StorageNbt {
     private static CompoundTag obligation(String type,java.util.UUID id,java.util.UUID colony,java.util.UUID owner,StockRegion slot,ItemDescriptor item,long count,long revision,io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane lane) {
         CompoundTag tag=typed(type);tag.putUUID("obligationId",id);tag.putUUID("colonyId",colony);tag.putUUID("ownerId",owner);tag.put("slot",slot(slot));tag.put("item",item(item));tag.putLong("count",count);tag.putLong("revision",revision);tag.putString("lane",lane.name());return tag;
     }
-    private static CompoundTag storage(StorageId value) {CompoundTag tag=new CompoundTag();tag.putString("dimension",value.dimension());tag.putUUID("identity",value.identity());tag.putLong("bindingEpoch",value.bindingEpoch());return tag;}
-    private static StorageId storage(CompoundTag tag) {return new StorageId(text(tag,"dimension"),RegistryNbt.uuid(tag,"identity"),number(tag,"bindingEpoch"));}
+    static CompoundTag storage(StorageId value) {CompoundTag tag=new CompoundTag();tag.putString("dimension",value.dimension());tag.putUUID("identity",value.identity());tag.putLong("bindingEpoch",value.bindingEpoch());return tag;}
+    static StorageId storage(CompoundTag tag) {return new StorageId(text(tag,"dimension"),RegistryNbt.uuid(tag,"identity"),number(tag,"bindingEpoch"));}
     static CompoundTag slot(StockRegion value) {CompoundTag tag=storage(value.storage());tag.putInt("slot",value.slot());return tag;}
     static StockRegion slot(CompoundTag tag) {require(tag,"slot",Tag.TAG_INT);return new StockRegion(storage(tag),tag.getInt("slot"));}
     static CompoundTag item(ItemDescriptor value) {CompoundTag tag=new CompoundTag();tag.putString("itemId",value.itemId());tag.putByteArray("components",value.canonicalComponents());return tag;}

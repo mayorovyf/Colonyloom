@@ -24,7 +24,8 @@ public final class EffectRegistry {
         registry.requireOwner(); registry.colony(effect.colonyId());
         if (records.size()>=MAX_RECORDS || records.containsKey(effect.operationId()) || registry.usedId(effect.operationId()))
             throw new IllegalArgumentException("Physical evidence identity or envelope unavailable");
-        if (effect.state()!=EffectRecord.State.PREPARED || effect.revision()!=0 || effect.countBefore()!=effect.countAfter()) throw new IllegalArgumentException("Effect must start prepared and unchanged");
+        if (effect.state()!=EffectRecord.State.PREPARED || effect.revision()!=0 || effect.countBefore()!=effect.countAfter()
+                || effect.transfer()!=null && !effect.transfer().unchanged()) throw new IllegalArgumentException("Effect must start prepared and unchanged");
         var citizen=registry.citizen(effect.citizenId());
         if (!citizen.colonyId().equals(effect.colonyId()) || citizen.bindingEpoch()!=effect.bindingEpoch()) throw new IllegalArgumentException("Effect binding mismatch");
         if (effect.workId()!=null && !registry.workBoard().work(effect.workId()).colonyId().equals(effect.colonyId())) throw new IllegalArgumentException("Effect work owner mismatch");
@@ -38,14 +39,16 @@ public final class EffectRegistry {
                 || !Objects.equals(old.workId(),effect.workId()) || old.bindingEpoch()!=effect.bindingEpoch()
                 || old.kind()!=effect.kind() || !old.target().equals(effect.target()) || old.revision()==Long.MAX_VALUE || old.revision()+1!=effect.revision()
                 || !old.expectedBlock().equals(effect.expectedBlock()) || !old.itemId().equals(effect.itemId()) || old.countBefore()!=effect.countBefore()
+                || (old.transfer()==null ? effect.transfer()!=null : !old.transfer().sameAttempt(effect.transfer()))
                 || !validTransition(old,effect))
             throw new IllegalArgumentException("Effect evidence changed identity or revision");
         registry.beforeMutation(); records.put(effect.operationId(),effect);
     }
     private static boolean validTransition(EffectRecord old,EffectRecord next) {
+        if (old.state()!=EffectRecord.State.PREPARED && !Objects.equals(old.transfer(),next.transfer())) return false;
         return switch(old.state()) {
             case PREPARED -> next.state()==EffectRecord.State.OBSERVED || next.state()==EffectRecord.State.AMBIGUOUS
-                    || next.state()==EffectRecord.State.ACCEPTED && old.countAfter()==next.countAfter();
+                    || next.state()==EffectRecord.State.ACCEPTED && old.countAfter()==next.countAfter() && Objects.equals(old.transfer(),next.transfer());
             case OBSERVED -> (next.state()==EffectRecord.State.AMBIGUOUS || next.state()==EffectRecord.State.ACCEPTED) && old.countAfter()==next.countAfter();
             case AMBIGUOUS -> next.state()==EffectRecord.State.ACCEPTED && old.countAfter()==next.countAfter();
             case ACCEPTED -> false;

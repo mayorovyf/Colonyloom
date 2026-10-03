@@ -170,7 +170,7 @@ public final class ColonyRegistry {
         Set<UUID> assignedCitizens = new HashSet<>();
         for (WorkOrder.Snapshot work : snapshot.works()) {
             ColonyRuntime colony = required(newColonies, work.colonyId(), "work colony");
-            if (!objectIds.add(work.id()) || !(WorkOrder.ACTIVE_WAIT.equals(work.typeId()) || WorkOrder.MOVE.equals(work.typeId()) || WorkOrder.CONSTRUCTION.equals(work.typeId())) || !colony.territory().contains(work.target())) throw new IllegalArgumentException("Invalid work identity/type/target");
+            if (!objectIds.add(work.id()) || !(WorkOrder.ACTIVE_WAIT.equals(work.typeId()) || WorkOrder.MOVE.equals(work.typeId()) || WorkOrder.CONSTRUCTION.equals(work.typeId()) || WorkOrder.DELIVERY.equals(work.typeId())) || !colony.territory().contains(work.target())) throw new IllegalArgumentException("Invalid work identity/type/target");
             newWorks.put(work.id(), work);
             if (work.assignee() != null) {
                 CitizenRecord citizen = required(newCitizens, work.assignee(), "work assignee");
@@ -230,9 +230,22 @@ public final class ColonyRegistry {
             if(order.workId()!=null&&!required(newWorks,order.workId(),"production work").colonyId().equals(order.colonyId()))throw new IllegalArgumentException("Foreign production work");
             if(order.citizenId()!=null&&!required(newCitizens,order.citizenId(),"producer").colonyId().equals(order.colonyId()))throw new IllegalArgumentException("Foreign producer");
         }
+        Set<UUID> deliveryWorks = new HashSet<>();
         for(var order:snapshot.supply().deliveries()) {
-            if(order.workId()!=null&&!required(newWorks,order.workId(),"delivery work").colonyId().equals(order.colonyId()))throw new IllegalArgumentException("Foreign delivery work");
+            if (order.workId() != null) {
+                if (!deliveryWorks.add(order.workId())) throw new IllegalArgumentException("Delivery work counted twice");
+                var work = required(newWorks, order.workId(), "delivery work");
+                if (!work.colonyId().equals(order.colonyId()) || !WorkOrder.DELIVERY.equals(work.typeId())
+                        || work.assignee() != null && !work.assignee().equals(order.citizenId())) throw new IllegalArgumentException("Invalid delivery work binding");
+            }
             if(order.citizenId()!=null&&!required(newCitizens,order.citizenId(),"courier").colonyId().equals(order.colonyId()))throw new IllegalArgumentException("Foreign courier");
+            for (var share : snapshot.supply().shares()) if (order.id().equals(share.sourceOrderId())
+                    && share.stage() == io.github.kpuctajluk.colonyloom.core.supply.CoverageShare.Stage.IN_TRANSIT) {
+                if (order.citizenId() == null || order.workId() == null) throw new IllegalArgumentException("Cargo lacks bound courier work");
+                var courier = required(newCitizens, order.citizenId(), "cargo courier");
+                if (!share.slot().storage().identity().equals(courier.citizenId()) || share.slot().storage().bindingEpoch() <= 0
+                        || share.slot().storage().bindingEpoch() > courier.bindingEpoch()) throw new IllegalArgumentException("Invalid canonical cargo identity/epoch");
+            }
         }
         // Restore already accepted state, then drain at the configured limits without eviction.
         int restorationRoots = Math.max(1, snapshot.works().size());

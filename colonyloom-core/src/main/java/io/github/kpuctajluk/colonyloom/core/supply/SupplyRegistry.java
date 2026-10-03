@@ -23,6 +23,10 @@ public final class SupplyRegistry {
     private final Map<UUID, AdmissionLedger.Lease> leases = new LinkedHashMap<>();
     private final Map<UUID, UUID> obligationShares = new HashMap<>();
     private final Map<UUID, Set<UUID>> kitShares = new HashMap<>();
+    private final Map<UUID, Set<UUID>> orderShares = new HashMap<>(), demandShares = new HashMap<>();
+    private final List<UUID> deliveryIds = new ArrayList<>();
+    private final Map<UUID, Integer> deliveryOffsets = new HashMap<>();
+    private final LinkedHashSet<UUID> unroutedShares = new LinkedHashSet<>();
     private final LinkedHashSet<UUID> dirtyObligations = new LinkedHashSet<>();
     public SupplyRegistry(ColonyRegistry registry) {
         this.registry = Objects.requireNonNull(registry);
@@ -31,21 +35,46 @@ public final class SupplyRegistry {
     private void putShare(UUID id, CoverageShare share) {
         CoverageShare previous = shares.put(id, share); if (previous != null) unindex(previous);
         if (share.obligationId() != null) obligationShares.put(share.obligationId(), id);
+        demandShares.computeIfAbsent(share.demandId(), ignored -> new LinkedHashSet<>()).add(id);
+        if (share.sourceOrderId() != null) orderShares.computeIfAbsent(share.sourceOrderId(), ignored -> new LinkedHashSet<>()).add(id);
+        if (share.stage() == CoverageShare.Stage.RESERVED_STOCK && share.sourceOrderId() == null) unroutedShares.add(id);
         UUID owner = demand(share.demandId()).snapshot().ownerId();
         if (productions.containsKey(owner) && share.stage() == CoverageShare.Stage.RESERVED_STOCK) kitShares.computeIfAbsent(owner, ignored -> new LinkedHashSet<>()).add(id);
     }
     private void unindex(CoverageShare share) {
         if (share.obligationId() != null) obligationShares.remove(share.obligationId());
+        unroutedShares.remove(share.id());
+        removeIndex(demandShares, share.demandId(), share.id());
+        if (share.sourceOrderId() != null) removeIndex(orderShares, share.sourceOrderId(), share.id());
         UUID owner = demand(share.demandId()).snapshot().ownerId(); Set<UUID> local = kitShares.get(owner);
         if (local != null) { local.remove(share.id()); if (local.isEmpty()) kitShares.remove(owner); }
     }
-    private void clearShares() { shares.clear(); obligationShares.clear(); kitShares.clear(); }
+    private static void removeIndex(Map<UUID, Set<UUID>> index, UUID key, UUID id) {
+        Set<UUID> values = index.get(key); if (values != null) { values.remove(id); if (values.isEmpty()) index.remove(key); }
+    }
+    private void clearShares() { shares.clear(); obligationShares.clear(); kitShares.clear(); orderShares.clear(); demandShares.clear(); unroutedShares.clear(); }
     private void putShares(Map<UUID, CoverageShare> values) { values.forEach(this::putShare); }
     public Demand demand(UUID id) { registry.requireOwner(); Demand d = demands.get(id); if (d == null) throw new IllegalArgumentException("Unknown demand"); return d; }
     public List<Demand> demands() { registry.requireOwner(); return List.copyOf(demands.values()); }
     public List<CoverageShare> shares() { registry.requireOwner(); return List.copyOf(shares.values()); }
     public List<ProductionOrder> productionOrders() { registry.requireOwner(); return List.copyOf(productions.values()); }
     public List<DeliveryOrder> deliveries() { registry.requireOwner(); return List.copyOf(deliveries.values()); }
+    public DeliveryOrder delivery(UUID id) { registry.requireOwner(); DeliveryOrder order = deliveries.get(id); if (order == null) throw new IllegalArgumentException("Unknown delivery"); return order; }
+    public List<CoverageShare> orderShares(UUID orderId) { registry.requireOwner(); return orderShares.getOrDefault(orderId, Set.of()).stream().map(shares::get).toList(); }
+    public List<CoverageShare> demandShares(UUID demandId) { registry.requireOwner(); return demandShares.getOrDefault(demandId, Set.of()).stream().map(shares::get).toList(); }
+    public DeliveryOrder deliveryForWork(UUID workId) { registry.requireOwner(); for (var order : deliveries.values()) if (workId.equals(order.workId())) return order; return null; }
+    public boolean hasCargo(UUID orderId) { return orderShares(orderId).stream().anyMatch(s -> s.stage() == CoverageShare.Stage.IN_TRANSIT); }
+    public boolean hasDeliveryWork(UUID workId) { return deliveryForWork(workId) != null; }
+    public int deliveryCount() { registry.requireOwner(); return deliveryIds.size(); }
+    public DeliveryOrder deliveryAt(int offset) { registry.requireOwner(); return deliveries.get(deliveryIds.get(offset)); }
+    public CoverageShare unroutedReservation() { registry.requireOwner(); return unroutedShares.isEmpty() ? null : shares.get(unroutedShares.iterator().next()); }
+    private void addDelivery(DeliveryOrder order) {
+        deliveries.put(order.id(), order); deliveryOffsets.put(order.id(), deliveryIds.size()); deliveryIds.add(order.id());
+    }
+    private void removeDelivery(UUID id) {
+        deliveries.remove(id); int offset = deliveryOffsets.remove(id); UUID last = deliveryIds.remove(deliveryIds.size() - 1);
+        if (offset < deliveryIds.size()) { deliveryIds.set(offset, last); deliveryOffsets.put(last, offset); }
+    }
     public boolean usedId(UUID id) { registry.requireOwner(); return demands.containsKey(id) || shares.containsKey(id) || productions.containsKey(id) || deliveries.containsKey(id); }
     public SupplySnapshot snapshot() { return new SupplySnapshot(demands().stream().map(Demand::snapshot).toList(), shares(), productionOrders(), deliveries()); }
 
@@ -63,10 +92,27 @@ public final class SupplyRegistry {
         if (!registry.colony(colony).available()) throw new IllegalStateException("Colony unavailable");
         unique(id); if (demands.size() >= MAX_DEMANDS) throw new IllegalArgumentException("Demand envelope exceeded");
         Demand value = new Demand(new Demand.Snapshot(id, colony, owner, matcher, kind, destination, required, 0, 0, 0, 0, 0, lane, priority, tick,
-                required == 0 ? Demand.Status.COMPLETED : Demand.Status.ACTIVE));
+                required == 0 ? Demand.Status.COMPLETED : Demand.Status.ACTIVE, List.of()));
         AdmissionLedger.Lease lease = admit(colony, lane, Resource.DEMANDS);
         try { registry.beforeMutation(); } catch (RuntimeException failure) { lease.close(); throw failure; }
         demands.put(id, value); leases.put(id, lease); return value;
+    }
+    public Demand requestDelivery(UUID id, UUID colony, UUID owner, ItemDescriptor item, long required,
+                                  WorldPosition destination, List<StorageId> sources, long tick) {
+        sources = List.copyOf(sources);
+        if (sources.size() > 2 || sources.stream().distinct().count() != sources.size()
+                || sources.stream().anyMatch(source -> !source.dimension().equals(destination.dimension()))) throw new IllegalArgumentException("Invalid delivery source constraint");
+        if (sources.isEmpty()) throw new IllegalArgumentException("Delivery requires selected canonical source");
+        Demand existing = demands.get(id);
+        if (existing != null && !existing.snapshot().sourceStorages().equals(sources)) throw new IllegalArgumentException("Delivery source changed");
+        Demand result = request(id, colony, owner, new ItemMatcher(item.itemId(), item), required, Demand.GoalKind.DELIVERY,
+                destination, Lane.NORMAL, 0, tick);
+        if (existing == null) {
+            var s = result.snapshot();
+            result.replace(new Demand.Snapshot(s.id(), s.colonyId(), s.ownerId(), s.matcher(), s.goalKind(), s.destination(),
+                    s.required(), s.fulfilled(), s.allocated(), s.covered(), s.deliveredTotal(), s.revision(), s.lane(), s.priority(), s.createdTick(), s.status(), sources));
+        }
+        return result;
     }
     public void status(UUID id, Demand.Status status) {
         Demand d = demand(id); var s = d.snapshot(); Objects.requireNonNull(status);
@@ -81,7 +127,7 @@ public final class SupplyRegistry {
         if (status != Demand.Status.CANCELLED && fulfilled >= required) status = Demand.Status.COMPLETED;
         else if (status == Demand.Status.COMPLETED) status = Demand.Status.ACTIVE;
         return new Demand.Snapshot(s.id(), s.colonyId(), s.ownerId(), s.matcher(), s.goalKind(), s.destination(), required, fulfilled, allocated, covered,
-                delivered, Math.addExact(s.revision(), 1), s.lane(), s.priority(), s.createdTick(), status);
+                delivered, Math.addExact(s.revision(), 1), s.lane(), s.priority(), s.createdTick(), status, s.sourceStorages());
     }
     private Demand.Snapshot totals(Demand.Snapshot old, Collection<CoverageShare> all, long required, long delivered, Demand.Status status) {
         long fulfilled = 0, allocated = 0, covered = 0;
@@ -114,6 +160,7 @@ public final class SupplyRegistry {
     }
     public DeliveryOrder coverStock(UUID demandId, StockRegion slot, ItemDescriptor item, long quantity, long tick) {
         var s = demand(demandId).snapshot(); active(s, item, quantity);
+        if (!s.acceptsSource(slot.storage())) throw new IllegalArgumentException("Stock outside selected source");
         UUID orderId = fresh(), shareId = fresh(), obligationId = fresh();
         DeliveryOrder order = new DeliveryOrder(orderId, s.colonyId(), demandId, slot, s.destination(), item, quantity, 0, 0, null, null, DeliveryOrder.State.PLANNED, s.lane(), s.priority());
         if (productions.size() + deliveries.size() >= MAX_ORDERS) throw new IllegalArgumentException("Order envelope exceeded");
@@ -122,7 +169,7 @@ public final class SupplyRegistry {
         catch (RuntimeException failure) { lease.close(); throw failure; }
         CoverageShare share = shares.get(shareId);
         putShare(shareId, new CoverageShare(share.id(), share.colonyId(), share.demandId(), orderId, share.obligationId(), share.slot(), share.item(), share.quantity(), share.revision(), share.stage()));
-        deliveries.put(orderId, order); leases.put(orderId, lease); return order;
+        addDelivery(order); leases.put(orderId, lease); return order;
     }
     public void coverProductionKit(UUID productionId, List<ReservationLedger.Entry> candidates, long tick) {
         registry.requireOwner(); ProductionOrder order = productions.get(productionId);
@@ -160,7 +207,7 @@ public final class SupplyRegistry {
             for (var delivery : orders) admitted.put(delivery.id(), admit(order.colonyId(), delivery.lane(), Resource.DELIVERIES_AND_PRODUCTION_ORDERS));
             registry.storage().reserveAll(reservations, tick);
         } catch (RuntimeException failure) { admitted.values().forEach(AdmissionLedger.Lease::close); throw failure; }
-        leases.putAll(admitted); orders.forEach(o -> deliveries.put(o.id(), o)); proposed.forEach(s -> putShare(s.id(), s)); states.forEach((id, s) -> demand(id).replace(s));
+        leases.putAll(admitted); orders.forEach(this::addDelivery); proposed.forEach(s -> putShare(s.id(), s)); states.forEach((id, s) -> demand(id).replace(s));
     }
     public ProductionOrder promiseProduction(UUID demandId, RecipeDefinition recipe, long batches) {
         var s = demand(demandId).snapshot(); long output = Math.multiplyExact(batches, recipe.outputCount()); Demand.quantity(output);
@@ -192,7 +239,7 @@ public final class SupplyRegistry {
             unique(id); if (!ids.add(id)) throw new IllegalArgumentException("Ingredient identity collision");
             long quantity = Math.multiplyExact(order.batches(), ingredient.count());
             ingredients.add(new Demand(new Demand.Snapshot(id, order.colonyId(), order.id(), ingredient.matcher(), Demand.GoalKind.CONSUMPTION,
-                    owner.destination(), quantity, 0, 0, 0, 0, 0, order.lane(), order.priority(), owner.createdTick(), Demand.Status.ACTIVE)));
+                    owner.destination(), quantity, 0, 0, 0, 0, 0, order.lane(), order.priority(), owner.createdTick(), Demand.Status.ACTIVE, List.of())));
         }
         if (demands.size() + ingredients.size() > MAX_DEMANDS) throw new IllegalArgumentException("Ingredient demand envelope exceeded");
         Map<UUID, AdmissionLedger.Lease> admitted = new LinkedHashMap<>();
@@ -235,6 +282,7 @@ public final class SupplyRegistry {
     public boolean coverExistingProduction(UUID demandId, long quantity) {
         var s = demand(demandId).snapshot(); if (quantity <= 0 || quantity > s.deficit()) return false;
         for (ProductionOrder order : List.copyOf(productions.values())) {
+            if (order.state() == ProductionOrder.State.CANCELLED || s.goalKind() == Demand.GoalKind.DELIVERY) continue;
             if (!order.colonyId().equals(s.colonyId()) || !s.matcher().matches(order.recipe().output()) || dependsOn(s.id(), order.id())) continue;
             long promised = 0; for (CoverageShare share : shares.values()) if (order.id().equals(share.sourceOrderId())) promised = Math.addExact(promised, share.quantity());
             if (Math.multiplyExact(order.batches(), order.recipe().outputCount()) - promised < quantity) continue;
@@ -255,44 +303,167 @@ public final class SupplyRegistry {
         if (existing.snapshot().required() != required || !existing.snapshot().matcher().equals(ingredient.matcher())) throw new IllegalArgumentException("Ingredient quantity differs from pinned batch");
         return existing;
     }
-    /** Moves only already reserved physical stock into an actual cargo reservation. */
-    public void inTransit(UUID shareId, UUID orderId, StockRegion cargoSlot, UUID cargoObligation, long tick) {
-        CoverageShare share = requiredShare(shareId); var d = demand(share.demandId()).snapshot(); DeliveryOrder order = deliveries.get(orderId);
-        if (share.stage() != CoverageShare.Stage.RESERVED_STOCK || order == null || !orderId.equals(share.sourceOrderId()) || !order.ownerDemandId().equals(d.id())) throw new IllegalArgumentException("Invalid pickup reference");
-        var held = registry.storage().reservations().get(share.obligationId()); if (held == null || held.count() != share.quantity()) throw new IllegalStateException("Pickup reservation changed");
-        CoverageShare next = new CoverageShare(share.id(), share.colonyId(), share.demandId(), orderId, cargoObligation, cargoSlot, share.item(), share.quantity(), Math.addExact(share.revision(), 1), CoverageShare.Stage.IN_TRANSIT);
-        var nextDemand = totals(d, replacement(share.id(), next).values(), d.required(), d.deliveredTotal(), d.status());
-        DeliveryOrder nextOrder = delivery(order, order.transferred(), DeliveryOrder.State.IN_TRANSIT);
-        registry.storage().replaceObligations(List.of(share.obligationId()), List.of(new ReservationLedger.Entry(cargoObligation, share.colonyId(), d.ownerId(), cargoSlot, share.item(), share.quantity(), 0, d.lane())), List.of(), tick);
-        putShare(share.id(), next); demand(d.id()).replace(nextDemand); deliveries.put(orderId, nextOrder);
+    public PreparedTransfer preparePickup(UUID shareId, UUID orderId, StockRegion cargo, int maximum, long tick) {
+        CoverageShare s = requiredShare(shareId); DeliveryOrder o = delivery(orderId);
+        if (s.stage() != CoverageShare.Stage.RESERVED_STOCK || !orderId.equals(s.sourceOrderId()) || o.terminal()
+                || o.returnRequired() || hasCargo(orderId) || demand(s.demandId()).snapshot().status() == Demand.Status.CANCELLED) throw new IllegalStateException("Pickup no longer permitted");
+        return prepare(s, cargo, maximum, tick, TransferKind.PICKUP);
     }
-    /** Confirmation follows actual native transfer. Consumption retains destination allocation; DELIVERY fulfils directly. */
-    public CoverageShare transfer(UUID shareId, long quantity, StockRegion destinationSlot, UUID allocationId, long tick) {
-        CoverageShare share = requiredShare(shareId); var d = demand(share.demandId()).snapshot();
-        if ((share.stage() != CoverageShare.Stage.RESERVED_STOCK && share.stage() != CoverageShare.Stage.IN_TRANSIT) || quantity <= 0 || quantity > share.quantity()) throw new IllegalArgumentException("Invalid transferred portion");
-        var held = registry.storage().reservations().get(share.obligationId()); if (held == null || held.count() < share.quantity()) throw new IllegalStateException("Transfer reservation changed");
-        boolean allocation = d.goalKind() == Demand.GoalKind.CONSUMPTION;
-        UUID resultId = quantity == share.quantity() ? share.id() : fresh();
-        CoverageShare result = new CoverageShare(resultId, share.colonyId(), share.demandId(), share.sourceOrderId(), allocation ? allocationId : null,
-                allocation ? destinationSlot : null, share.item(), quantity, Math.addExact(share.revision(), 1), allocation ? CoverageShare.Stage.ALLOCATED : CoverageShare.Stage.FULFILLED);
-        Map<UUID, CoverageShare> staged = new LinkedHashMap<>(shares); staged.remove(shareId);
-        List<ReservationLedger.Entry> reservations = new ArrayList<>();
-        if (quantity < share.quantity()) {
-            staged.put(shareId, resized(share, share.quantity() - quantity));
-            reservations.add(new ReservationLedger.Entry(share.obligationId(), share.colonyId(), d.ownerId(), share.slot(), share.item(), share.quantity() - quantity, Math.addExact(held.revision(), 1), d.lane()));
-        }
-        staged.put(resultId, result); var nextDemand = totals(d, staged.values(), d.required(), Math.addExact(d.deliveredTotal(), quantity), d.status());
-        DeliveryOrder order = share.sourceOrderId() == null ? null : deliveries.get(share.sourceOrderId());
-        DeliveryOrder nextOrder = order == null ? null : delivery(order, Math.addExact(order.transferred(), quantity), order.transferred() + quantity == order.quantity() ? DeliveryOrder.State.COMPLETED : DeliveryOrder.State.TRANSFERRED);
-        AdmissionLedger.Lease extra = null;
+    public PreparedTransfer prepareTransfer(UUID shareId, StockRegion destination, int maximum, long tick) {
+        CoverageShare s = requiredShare(shareId);
+        if (s.stage() != CoverageShare.Stage.IN_TRANSIT || delivery(s.sourceOrderId()).returnRequired()
+                || demand(s.demandId()).snapshot().status() == Demand.Status.CANCELLED) throw new IllegalStateException("Delivery no longer permitted");
+        return prepare(s, destination, maximum, tick, TransferKind.DELIVER);
+    }
+    public PreparedTransfer prepareReturn(UUID shareId, StockRegion buffer, int maximum, long tick) {
+        CoverageShare s = requiredShare(shareId);
+        if (s.stage() != CoverageShare.Stage.IN_TRANSIT || !delivery(s.sourceOrderId()).returnRequired()) throw new IllegalStateException("Cargo not returning");
+        return prepare(s, buffer, maximum, tick, TransferKind.RETURN);
+    }
+    private enum TransferKind { PICKUP, DELIVER, RETURN }
+    private PreparedTransfer prepare(CoverageShare share, StockRegion destination, int maximum, long tick, TransferKind kind) {
+        var d = demand(share.demandId()).snapshot();
+        if (maximum <= 0 || maximum > share.quantity()) throw new IllegalArgumentException("Invalid transfer maximum");
+        boolean retained = kind == TransferKind.PICKUP || kind == TransferKind.RETURN && d.status() != Demand.Status.CANCELLED
+                || kind == TransferKind.DELIVER && d.goalKind() == Demand.GoalKind.CONSUMPTION;
+        UUID resultId = fresh(), splitObligation = fresh(); AdmissionLedger.Lease extra = null;
         try {
-            if (!resultId.equals(shareId)) { if (shares.size() >= MAX_SHARES) throw new IllegalArgumentException("Coverage envelope exceeded"); extra = admit(d.colonyId(), d.lane(), Resource.COVERAGE_SHARES); }
-            List<AllocationLedger.Entry> allocations = allocation ? List.of(new AllocationLedger.Entry(allocationId, d.colonyId(), d.ownerId(), destinationSlot, share.item(), quantity, 0, d.lane())) : List.of();
-            registry.storage().replaceObligations(List.of(share.obligationId()), reservations, allocations, tick);
+            if (share.quantity() > 1 && (kind != TransferKind.RETURN || retained)) {
+                if (shares.size() >= MAX_SHARES) throw new IllegalArgumentException("Coverage envelope exceeded");
+                extra = admit(d.colonyId(), d.lane(), Resource.COVERAGE_SHARES);
+            }
+            var physical = registry.storage().prepareMoveReservation(share.obligationId(), destination, splitObligation,
+                    kind == TransferKind.DELIVER, retained, maximum, tick);
+            return new PreparedTransfer(share, d, delivery(share.sourceOrderId()), destination, maximum, kind, retained, resultId, extra, physical);
         } catch (RuntimeException failure) { if (extra != null) extra.close(); throw failure; }
-        clearShares(); putShares(staged); if (extra != null) leases.put(resultId, extra); demand(d.id()).replace(nextDemand);
-        if (nextOrder != null) deliveries.put(nextOrder.id(), nextOrder); recomputePriorities(); return result;
     }
+    /** Holds every possible split lease while the native effect executes in the same owner step. */
+    public final class PreparedTransfer implements AutoCloseable {
+        private final CoverageShare share;
+        private final Demand.Snapshot before;
+        private final DeliveryOrder order;
+        private final StockRegion destination;
+        private final int maximum;
+        private final TransferKind kind;
+        private final boolean retained;
+        private final UUID resultId;
+        private AdmissionLedger.Lease extra;
+        private final StorageRegistry.PreparedMove physical;
+        private boolean closed;
+        private PreparedTransfer(CoverageShare share, Demand.Snapshot before, DeliveryOrder order, StockRegion destination,
+                int maximum, TransferKind kind, boolean retained, UUID resultId, AdmissionLedger.Lease extra, StorageRegistry.PreparedMove physical) {
+            this.share = share; this.before = before; this.order = order; this.destination = destination; this.maximum = maximum;
+            this.kind = kind; this.retained = retained; this.resultId = resultId; this.extra = extra; this.physical = physical;
+        }
+        public StockRegion source() { return share.slot(); }
+        public StockRegion destination() { return destination; }
+        public ItemDescriptor item() { return share.item(); }
+        public int maximum() { return maximum; }
+        public void commit(int moved) {
+            registry.requireOwner();
+            if (closed || moved <= 0 || moved > maximum || shares.get(share.id()) != share
+                    || demand(before.id()).snapshot() != before || deliveries.get(order.id()) != order) throw new IllegalStateException("Prepared logical transition changed");
+            boolean full = moved == share.quantity(); UUID id = full ? share.id() : resultId;
+            CoverageShare result = null;
+            if (kind != TransferKind.RETURN || retained) {
+                CoverageShare.Stage stage = kind == TransferKind.PICKUP ? CoverageShare.Stage.IN_TRANSIT
+                        : kind == TransferKind.RETURN ? CoverageShare.Stage.RESERVED_STOCK
+                        : retained ? CoverageShare.Stage.ALLOCATED : CoverageShare.Stage.FULFILLED;
+                result = new CoverageShare(id, share.colonyId(), share.demandId(), kind == TransferKind.RETURN ? null : order.id(),
+                        retained ? physical.destinationObligation(moved) : null, retained ? destination : null,
+                        share.item(), moved, Math.addExact(share.revision(), 1), stage);
+            }
+            Map<UUID, CoverageShare> staged = new LinkedHashMap<>(shares); staged.remove(share.id());
+            if (!full) staged.put(share.id(), resized(share, share.quantity() - moved));
+            if (result != null) staged.put(id, result);
+            long delivered = kind == TransferKind.DELIVER ? Math.addExact(before.deliveredTotal(), moved) : before.deliveredTotal();
+            long transferred = kind == TransferKind.DELIVER ? Math.addExact(order.transferred(), moved) : order.transferred();
+            boolean cargoLeft = staged.values().stream().anyMatch(s -> order.id().equals(s.sourceOrderId()) && s.stage() == CoverageShare.Stage.IN_TRANSIT);
+            if (kind == TransferKind.RETURN && !cargoLeft) {
+                for (var old : List.copyOf(staged.values())) if (order.id().equals(old.sourceOrderId()) && old.stage() == CoverageShare.Stage.RESERVED_STOCK)
+                    staged.put(old.id(), new CoverageShare(old.id(), old.colonyId(), old.demandId(), null, old.obligationId(), old.slot(), old.item(), old.quantity(), Math.addExact(old.revision(), 1), old.stage()));
+            }
+            var nextDemand = totals(before, staged.values(), before.required(), delivered, before.status());
+            var state = kind == TransferKind.PICKUP ? DeliveryOrder.State.IN_TRANSIT : kind == TransferKind.RETURN
+                    ? cargoLeft ? DeliveryOrder.State.RETURNING : DeliveryOrder.State.RETURNED
+                    : transferred == order.quantity() ? DeliveryOrder.State.COMPLETED : cargoLeft ? DeliveryOrder.State.IN_TRANSIT : DeliveryOrder.State.TRANSFERRED;
+            if (kind == TransferKind.DELIVER && !cargoLeft && state == DeliveryOrder.State.TRANSFERRED
+                    && staged.values().stream().noneMatch(s -> order.id().equals(s.sourceOrderId()) && s.covered())) state = DeliveryOrder.State.RETURNED;
+            var nextOrder = delivery(order, transferred, state);
+            physical.commit(moved);
+            if (!full && result != null) { leases.put(id, extra); extra = null; }
+            publishShares(staged); demand(before.id()).replace(nextDemand); deliveries.put(order.id(), nextOrder);
+            closed = true; if (extra != null) { extra.close(); extra = null; }
+        }
+        @Override public void close() { registry.requireOwner(); physical.close(); if (!closed) { closed = true; if (extra != null) { extra.close(); extra = null; } } }
+    }
+    public void assignDelivery(UUID orderId, UUID citizenId, UUID workId) {
+        DeliveryOrder o = delivery(orderId);
+        if (o.terminal() && (citizenId != null || workId != null) || citizenId != null && workId == null) throw new IllegalStateException("Invalid delivery assignment");
+        if (workId != null) { var w = registry.workBoard().work(workId); if (!w.colonyId().equals(o.colonyId()) || !io.github.kpuctajluk.colonyloom.core.work.WorkOrder.DELIVERY.equals(w.typeId())) throw new IllegalArgumentException("Invalid delivery work"); }
+        if (citizenId != null && !registry.citizen(citizenId).colonyId().equals(o.colonyId())) throw new IllegalArgumentException("Foreign courier");
+        if (hasCargo(orderId) && (!Objects.equals(o.citizenId(), citizenId) || !Objects.equals(o.workId(), workId))) throw new IllegalStateException("Cannot replace bound cargo courier");
+        if (Objects.equals(o.citizenId(), citizenId) && Objects.equals(o.workId(), workId)) return;
+        registry.beforeMutation(); deliveries.put(o.id(), new DeliveryOrder(o.id(), o.colonyId(), o.ownerDemandId(), o.source(), o.destination(), o.item(), o.quantity(), o.transferred(), Math.addExact(o.revision(), 1), citizenId, workId, o.state(), o.lane(), o.priority()));
+    }
+    public void returnDelivery(UUID orderId) {
+        DeliveryOrder o = delivery(orderId); if (o.terminal() || o.returnRequired()) return;
+        registry.beforeMutation();
+        boolean cargo = hasCargo(orderId);
+        if (!cargo) for (var s : orderShares(orderId)) if (s.stage() == CoverageShare.Stage.RESERVED_STOCK)
+            putShare(s.id(), new CoverageShare(s.id(), s.colonyId(), s.demandId(), null, s.obligationId(), s.slot(), s.item(), s.quantity(), Math.addExact(s.revision(), 1), s.stage()));
+        deliveries.put(orderId, delivery(o, o.transferred(), cargo ? DeliveryOrder.State.RETURNING : DeliveryOrder.State.RETURNED));
+    }
+    /** Explicit operator cutover abandons promises without touching native contents. */
+    public void acceptWorld(UUID colonyId) {
+        registry.colony(colonyId); Map<UUID, CoverageShare> staged = new LinkedHashMap<>(shares);
+        for (var s : shares.values()) if (s.colonyId().equals(colonyId) && s.stage() != CoverageShare.Stage.FULFILLED) staged.remove(s.id());
+        Map<UUID, Long> releases = new LinkedHashMap<>();
+        for (var r : registry.storage().reservations().entries()) if (r.colonyId().equals(colonyId)) releases.put(r.id(), 0L);
+        for (var a : registry.storage().allocations().entries()) if (a.colonyId().equals(colonyId)) releases.put(a.id(), 0L);
+        Map<UUID, Demand.Snapshot> states = new LinkedHashMap<>();
+        for (var d : demands.values()) if (d.snapshot().colonyId().equals(colonyId)) {
+            var s = d.snapshot(); states.put(s.id(), totals(s, staged.values(), s.required(), s.deliveredTotal(), Demand.Status.CANCELLED));
+        }
+        registry.beforeMutation(); registry.storage().reduceObligations(releases); publishShares(staged);
+        states.forEach((id, s) -> demand(id).replace(s));
+        for (var o : List.copyOf(deliveries.values())) if (o.colonyId().equals(colonyId) && !o.terminal()) deliveries.put(o.id(), delivery(o, o.transferred(), DeliveryOrder.State.CANCELLED));
+        for (var o : List.copyOf(productions.values())) if (o.colonyId().equals(colonyId))
+            productions.put(o.id(), new ProductionOrder(o.id(), o.colonyId(), o.ownerDemandId(), o.recipe(), o.batches(), o.remainingActiveTicks(), Math.addExact(o.revision(), 1), o.workId(), o.citizenId(), ProductionOrder.State.CANCELLED, o.lane(), o.priority()));
+        dirtyObligations.removeIf(id -> !obligationShares.containsKey(id));
+    }
+
+    public void retireDelivery(UUID orderId) {
+        DeliveryOrder o = delivery(orderId);
+        if (!o.terminal() || hasCargo(orderId)) throw new IllegalStateException("Delivery retains live cargo");
+        if (o.workId() != null && !registry.workBoard().work(o.workId()).terminal()) throw new IllegalStateException("Delivery work still active");
+        for (var e : registry.effects().snapshots()) if (o.workId() != null && o.workId().equals(e.workId())) throw new IllegalStateException("Delivery has native evidence");
+        registry.beforeMutation();
+        for (var s : orderShares(orderId)) putShare(s.id(), new CoverageShare(s.id(), s.colonyId(), s.demandId(), null, s.obligationId(), s.slot(), s.item(), s.quantity(), Math.addExact(s.revision(), 1), s.stage()));
+        removeDelivery(orderId); leases.remove(orderId).close();
+    }
+    public void markDeliveryLost(UUID orderId) {
+        DeliveryOrder o = delivery(orderId); if (o.terminal()) return;
+        Map<UUID, CoverageShare> staged = new LinkedHashMap<>(shares); Map<UUID, Long> releases = new LinkedHashMap<>();
+        for (var s : orderShares(orderId)) if (s.stage() == CoverageShare.Stage.IN_TRANSIT || s.stage() == CoverageShare.Stage.RESERVED_STOCK) {
+            staged.remove(s.id()); if (registry.storage().reservations().get(s.obligationId()) != null) releases.put(s.obligationId(), 0L);
+        }
+        var states = recomputed(staged); registry.beforeMutation(); registry.storage().reduceObligations(releases);
+        publishShares(staged); states.forEach((id, s) -> demand(id).replace(s)); deliveries.put(orderId, delivery(o, o.transferred(), DeliveryOrder.State.LOST));
+    }
+    /** Routes returned buffer reservations without inventing stock or increasing coverage. */
+    public DeliveryOrder routeReservedStock(UUID shareId) {
+        CoverageShare s = requiredShare(shareId); var d = demand(s.demandId()).snapshot();
+        if (s.stage() != CoverageShare.Stage.RESERVED_STOCK || s.sourceOrderId() != null || d.status() == Demand.Status.CANCELLED) throw new IllegalStateException("Stock not awaiting route");
+        if (productions.size() + deliveries.size() >= MAX_ORDERS) throw new IllegalArgumentException("Order envelope exceeded");
+        UUID id = fresh(); var lease = admit(s.colonyId(), d.lane(), Resource.DELIVERIES_AND_PRODUCTION_ORDERS);
+        try { registry.beforeMutation(); } catch (RuntimeException failure) { lease.close(); throw failure; }
+        DeliveryOrder o = new DeliveryOrder(id, s.colonyId(), s.demandId(), s.slot(), d.destination(), s.item(), s.quantity(), 0, 0, null, null, DeliveryOrder.State.PLANNED, d.lane(), d.priority());
+        addDelivery(o); leases.put(id, lease);
+        putShare(s.id(), new CoverageShare(s.id(), s.colonyId(), s.demandId(), id, s.obligationId(), s.slot(), s.item(), s.quantity(), Math.addExact(s.revision(), 1), s.stage()));
+        return o;
+    }
+
     public void fulfillConsumption(UUID shareId, long quantity) {
         CoverageShare share = requiredShare(shareId); var d = demand(share.demandId()).snapshot();
         if (share.stage() != CoverageShare.Stage.ALLOCATED || d.goalKind() != Demand.GoalKind.CONSUMPTION || quantity <= 0 || quantity > share.quantity()) throw new IllegalArgumentException("Invalid consumption");
@@ -308,7 +479,6 @@ public final class SupplyRegistry {
         clearShares(); putShares(staged); if (extra != null) leases.put(id, extra); demand(d.id()).replace(next);
     }
     private CoverageShare requiredShare(UUID id) { registry.requireOwner(); CoverageShare s = shares.get(id); if (s == null) throw new IllegalArgumentException("Unknown coverage share"); return s; }
-    private Map<UUID, CoverageShare> replacement(UUID id, CoverageShare next) { Map<UUID, CoverageShare> map = new LinkedHashMap<>(shares); map.put(id, next); return map; }
     private static CoverageShare resized(CoverageShare s, long count) { return new CoverageShare(s.id(), s.colonyId(), s.demandId(), s.sourceOrderId(), s.obligationId(), s.slot(), s.item(), count, Math.addExact(s.revision(), 1), s.stage()); }
     private static DeliveryOrder delivery(DeliveryOrder o, long transferred, DeliveryOrder.State state) {
         return new DeliveryOrder(o.id(), o.colonyId(), o.ownerDemandId(), o.source(), o.destination(), o.item(), o.quantity(), transferred, Math.addExact(o.revision(), 1), o.citizenId(), o.workId(), state, o.lane(), o.priority());
@@ -348,7 +518,13 @@ public final class SupplyRegistry {
             boolean keepPartial = old.stage() != CoverageShare.Stage.RESERVED_STOCK || !productions.containsKey(owner);
             if (keepPartial && actual > 0) putShare(old.id(), resized(old, actual));
             else { shares.remove(old.id()); unindex(old); AdmissionLedger.Lease lease = leases.remove(old.id()); if (lease != null) lease.close(); }
-            if (old.sourceOrderId() != null) { DeliveryOrder order = deliveries.get(old.sourceOrderId()); if (order != null && order.state() != DeliveryOrder.State.COMPLETED) deliveries.put(order.id(), delivery(order, order.transferred(), DeliveryOrder.State.BLOCKED)); }
+            if (old.sourceOrderId() != null) {
+                DeliveryOrder order = deliveries.get(old.sourceOrderId());
+                if (order != null && !order.terminal()) deliveries.put(order.id(), delivery(order, order.transferred(),
+                        old.stage() == CoverageShare.Stage.IN_TRANSIT && actual == 0 && !hasCargo(order.id())
+                                && orderShares(order.id()).stream().noneMatch(CoverageShare::covered) ? DeliveryOrder.State.LOST
+                                : order.returnRequired() ? DeliveryOrder.State.RETURNING : DeliveryOrder.State.BLOCKED));
+            }
         }
         states.forEach((id, s) -> demand(id).replace(s));
     }
@@ -392,8 +568,9 @@ public final class SupplyRegistry {
         blockUnreferencedDeliveries(); recomputePriorities();
     }
     private void blockUnreferencedDeliveries() {
-        for (DeliveryOrder order : List.copyOf(deliveries.values())) if (order.state() != DeliveryOrder.State.COMPLETED && order.state() != DeliveryOrder.State.BLOCKED && shares.values().stream().noneMatch(s -> order.id().equals(s.sourceOrderId())))
-            deliveries.put(order.id(), delivery(order, order.transferred(), DeliveryOrder.State.BLOCKED));
+        for (DeliveryOrder order : List.copyOf(deliveries.values())) if (!order.terminal() && !hasCargo(order.id())
+                && orderShares(order.id()).stream().noneMatch(CoverageShare::covered))
+            deliveries.put(order.id(), delivery(order, order.transferred(), demand(order.ownerDemandId()).snapshot().status() == Demand.Status.CANCELLED ? DeliveryOrder.State.CANCELLED : DeliveryOrder.State.LOST));
     }
     private static int laneRank(Lane lane) { return lane == Lane.CRITICAL ? 2 : lane == Lane.SERVICE ? 1 : 0; }
     /** Every removed dependency recomputes inherited urgency instead of keeping a historical maximum. */
@@ -415,7 +592,7 @@ public final class SupplyRegistry {
                 for (Demand ingredient : demands.values()) {
                     var s = ingredient.snapshot(); if (!s.ownerId().equals(order.id()) || s.status() == Demand.Status.CANCELLED) continue;
                     if (s.lane() != lane || s.priority() != priority) {
-                        ingredient.replace(new Demand.Snapshot(s.id(), s.colonyId(), s.ownerId(), s.matcher(), s.goalKind(), s.destination(), s.required(), s.fulfilled(), s.allocated(), s.covered(), s.deliveredTotal(), Math.addExact(s.revision(), 1), lane, priority, s.createdTick(), s.status())); changed = true;
+                        ingredient.replace(new Demand.Snapshot(s.id(), s.colonyId(), s.ownerId(), s.matcher(), s.goalKind(), s.destination(), s.required(), s.fulfilled(), s.allocated(), s.covered(), s.deliveredTotal(), Math.addExact(s.revision(), 1), lane, priority, s.createdTick(), s.status(), s.sourceStorages())); changed = true;
                     }
                 }
             }
@@ -451,7 +628,7 @@ public final class SupplyRegistry {
             if (share.sourceOrderId() != null && p == null && l == null) throw new IllegalArgumentException("Missing share source order");
             if (p != null) { if (!p.colonyId().equals(share.colonyId()) || !p.recipe().output().equals(share.item())) throw new IllegalArgumentException("Invalid pinned output share"); output.merge(p.id(), share.quantity(), Math::addExact); }
             if (l != null && (!l.colonyId().equals(share.colonyId()) || !l.ownerDemandId().equals(d.id()) || !l.item().equals(share.item()))) throw new IllegalArgumentException("Invalid delivery share");
-            if (share.stage() == CoverageShare.Stage.PROMISED_OUTPUT && p == null || share.stage() == CoverageShare.Stage.IN_TRANSIT && (l == null || l.state() != DeliveryOrder.State.IN_TRANSIT && l.state() != DeliveryOrder.State.PICKED_UP && l.state() != DeliveryOrder.State.RETURNING && l.state() != DeliveryOrder.State.TRANSFERRED)) throw new IllegalArgumentException("Share/order stage mismatch");
+            if (share.stage() == CoverageShare.Stage.PROMISED_OUTPUT && p == null || share.stage() == CoverageShare.Stage.IN_TRANSIT && (l == null || l.terminal())) throw new IllegalArgumentException("Share/order stage mismatch");
             if (share.obligationId() != null) {
                 if (!obligationIds.add(share.obligationId())) throw new IllegalArgumentException("Physical obligation counted twice");
                 if (share.stage() == CoverageShare.Stage.ALLOCATED) {
@@ -505,7 +682,7 @@ public final class SupplyRegistry {
             demands.clear(); snapshot.demands().forEach(s -> demands.put(s.id(), new Demand(s)));
             productions.clear(); snapshot.productionOrders().forEach(p -> productions.put(p.id(), p));
             clearShares(); snapshot.shares().forEach(s -> putShare(s.id(), s)); dirtyObligations.clear();
-            deliveries.clear(); snapshot.deliveries().forEach(l -> deliveries.put(l.id(), l)); snapshot = null;
+            deliveries.clear(); deliveryIds.clear(); deliveryOffsets.clear(); snapshot.deliveries().forEach(SupplyRegistry.this::addDelivery); snapshot = null;
         }
         @Override public void close() { registry.requireOwner(); if (snapshot != null) { admitted.values().forEach(AdmissionLedger.Lease::close); admitted.clear(); snapshot = null; } }
     }

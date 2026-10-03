@@ -10,7 +10,7 @@ import java.util.UUID;
 public record ProductionOrder(UUID id, UUID colonyId, UUID ownerDemandId, RecipeDefinition recipe,
                               long batches, long remainingActiveTicks, long revision, UUID workId,
                               UUID citizenId, State state, Lane lane, int priority) {
-    public enum State { PLANNED, WAITING }
+    public enum State { PLANNED, WAITING, CANCELLED }
     public ProductionOrder {
         Objects.requireNonNull(id); Objects.requireNonNull(colonyId); Objects.requireNonNull(ownerDemandId);
         Objects.requireNonNull(recipe); Objects.requireNonNull(state); Objects.requireNonNull(lane);

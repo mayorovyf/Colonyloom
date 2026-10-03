@@ -26,7 +26,8 @@ final class IdentityPlatform {
     private final MinecraftServer server;
     private final MinecraftServerRuntime bridge;
     private final Map<UUID,CitizenEntity> loaded = new HashMap<>();
-    private record Inspection(ColonyCommands.RecoveryInspection state, Map<UUID, net.minecraft.nbt.CompoundTag> inventories,Map<UUID,String> physicalSites,Map<UUID,String> physicalEffects) {}
+    private record Inspection(ColonyCommands.RecoveryInspection state, Map<UUID, net.minecraft.nbt.CompoundTag> inventories,Map<UUID,String> physicalSites,Map<UUID,String> physicalEffects,
+            io.github.kpuctajluk.colonyloom.core.supply.SupplySnapshot supply,io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot storage) {}
     private final Map<UUID,Inspection> inspections = new HashMap<>();
     private String identityFailure;
     private UUID provisioningEntity;
@@ -94,9 +95,7 @@ final class IdentityPlatform {
             bridge.persistence().ensureSessionDirty();
             int before=0; for(int slot=0;slot<CitizenEntity.INVENTORY_SIZE;slot++) before+=citizen.inventory().getItem(slot).getCount();
             var inventory=new net.minecraft.nbt.CompoundTag(); net.minecraft.world.ContainerHelper.saveAllItems(inventory,citizen.inventory().getItems(),server.registryAccess());
-            var effect=new io.github.kpuctajluk.colonyloom.core.action.EffectRecord(UUID.randomUUID(),record.colonyId(),record.assignedWorkId(),record.citizenId(),record.bindingEpoch(),
-                    io.github.kpuctajluk.colonyloom.core.action.ActionContext.Kind.DEATH,position((ServerLevel)citizen.level(),citizen.blockPosition()),"inventoryHash:"+Integer.toHexString(inventory.hashCode()),"colonyloom:inventory",before,before,
-                    io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.PREPARED,0);
+            var effect=new io.github.kpuctajluk.colonyloom.core.action.EffectRecord(UUID.randomUUID(),record.colonyId(),record.assignedWorkId(),record.citizenId(),record.bindingEpoch(),io.github.kpuctajluk.colonyloom.core.action.ActionContext.Kind.DEATH,position((ServerLevel)citizen.level(),citizen.blockPosition()),"inventoryHash:"+Integer.toHexString(inventory.hashCode()),"colonyloom:inventory",before,before,io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.PREPARED,0,null);
             bridge.core().registry().effects().prepare(effect,io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);
             citizen.observeDeathInventory(remaining -> {
                 try {
@@ -193,6 +192,18 @@ final class IdentityPlatform {
         var work=bridge.core().commands().build(context(source),UUID.randomUUID(),colony,blueprint,position(source.getLevel(),origin),rotation);
         bridge.persistence().capture(); return "work="+work.id()+" state="+work.state()+" blueprint="+blueprint;
     }
+    String requestDelivery(CommandSourceStack source,UUID colony,BlockPos from,BlockPos to,String item,long count) throws CommandSyntaxException {
+        var nativeItem=net.minecraft.core.registries.BuiltInRegistries.ITEM.getOptional(net.minecraft.resources.ResourceLocation.parse(item))
+                .filter(value -> value!=net.minecraft.world.item.Items.AIR).orElseThrow(() -> new IllegalArgumentException("Unknown delivery item"));
+        var descriptor=io.github.kpuctajluk.colonyloom.minecraft.storage.NativeItemDescriptor.describe(new net.minecraft.world.item.ItemStack(nativeItem),server.registryAccess());
+        var demand=bridge.core().commands().requestDelivery(context(source),UUID.randomUUID(),colony,
+                position(source.getLevel(),from),position(source.getLevel(),to),descriptor,count);
+        bridge.persistence().capture();return "demand="+demand.id()+" state="+demand.snapshot().status()+" required="+demand.snapshot().required();
+    }
+    String cancelDelivery(CommandSourceStack source,UUID demand) throws CommandSyntaxException {
+        bridge.core().commands().cancelDelivery(context(source),demand);bridge.persistence().capture();
+        return "demand="+demand+" state="+bridge.core().registry().supply().demand(demand).snapshot().status();
+    }
     String cancelWork(CommandSourceStack source,UUID workId) throws CommandSyntaxException {
         var work=bridge.core().commands().cancelWork(context(source),workId);
         bridge.persistence().capture(); return "work="+work.id()+" state="+work.state();
@@ -275,7 +286,7 @@ final class IdentityPlatform {
     }
     String inspect(CommandSourceStack source,UUID colony) throws CommandSyntaxException {
         var inspection=bridge.core().commands().inspect(context(source),colony);
-        inspections.put(colony,new Inspection(inspection,inventorySnapshot(inspection),siteSnapshot(inspection),effectSnapshot(inspection)));
+        inspections.put(colony,new Inspection(inspection,inventorySnapshot(inspection),siteSnapshot(inspection),effectSnapshot(inspection),bridge.core().registry().supply().snapshot(),bridge.core().registry().storage().snapshot()));
         StringBuilder result=new StringBuilder(inspection.toString());
         for(CitizenEntity entity:loaded.values()) {
             if(entity.citizenId()==null)continue;
@@ -298,6 +309,9 @@ final class IdentityPlatform {
         if(!inspected.physicalSites().equals(siteSnapshot(inspected.state())) || !inspected.physicalEffects().equals(effectSnapshot(inspected.state()))) {
             inspections.remove(colony); throw new IllegalStateException("Physical blocks changed; inspect again");
         }
+        if(!inspected.supply().equals(bridge.core().registry().supply().snapshot())||!inspected.storage().equals(bridge.core().registry().storage().snapshot())) {
+            inspections.remove(colony);throw new IllegalStateException("Economic obligations changed; inspect again");
+        }
         bridge.core().commands().acceptWorld(context(source),colony,checkpoint,inspected.state());
         bridge.persistence().persistSnapshot(); inspections.remove(colony);
         for(CitizenEntity entity:loaded.values()) if(entity.citizenId()!=null)refresh(entity.citizenId());
@@ -319,6 +333,14 @@ final class IdentityPlatform {
             net.minecraft.world.ContainerHelper.saveAllItems(inventory,entity.inventory().getItems(),server.registryAccess());
             inventories.put(entity.getUUID(),inventory);
         }
+        var examined=new java.util.HashSet<io.github.kpuctajluk.colonyloom.core.storage.StorageId>();
+        for(var registration:bridge.core().registry().storage().registrations(inspection.colonyId()))for(var slot:registration.slots()) {
+            if(slot.storage().bindingEpoch()>0||!examined.add(slot.storage()))continue;
+            var container=bridge.storage().recoveryContainer(slot);if(container==null)throw new IllegalStateException("Recovery storage CHUNK_NOT_READY or identity conflict: "+slot.storage());
+            var inventory=new net.minecraft.nbt.CompoundTag();var stacks=net.minecraft.core.NonNullList.withSize(container.getContainerSize(),net.minecraft.world.item.ItemStack.EMPTY);
+            for(int index=0;index<stacks.size();index++)stacks.set(index,container.getItem(index).copy());
+            net.minecraft.world.ContainerHelper.saveAllItems(inventory,stacks,server.registryAccess());inventories.put(slot.storage().identity(),inventory);
+        }
         return Map.copyOf(inventories);
     }
     private String observedBlock(WorldPosition target) {
@@ -328,8 +350,23 @@ final class IdentityPlatform {
     }
     private Map<UUID,String> effectSnapshot(ColonyCommands.RecoveryInspection inspection) {
         Map<UUID,String> result=new LinkedHashMap<>();
-        for(var effect:inspection.effects()) result.put(effect.operationId(),observedBlock(effect.target()));
+        for(var effect:inspection.effects()) {
+            if(effect.transfer()==null) {result.put(effect.operationId(),observedBlock(effect.target()));continue;}
+            var transfer=effect.transfer();
+            result.put(effect.operationId(),observedTransferSlot(transfer.source())+" -> "+observedTransferSlot(transfer.destination()));
+        }
         return Map.copyOf(result);
+    }
+    private String observedTransferSlot(io.github.kpuctajluk.colonyloom.core.storage.StockRegion slot) {
+        var id=slot.storage();
+        if(id.bindingEpoch()>0) {
+            var citizen=bridge.core().registry().citizen(id.identity());
+            if(citizen.lifecycle()!=CitizenRecord.Lifecycle.ALIVE||citizen.bindingEpoch()!=id.bindingEpoch())
+                return "historical-custody="+id+" lifecycle="+citizen.lifecycle()+" currentEpoch="+citizen.bindingEpoch()+" inventory=UNKNOWN";
+        }
+        var container=bridge.storage().recoveryContainer(slot);
+        if(container==null)throw new IllegalStateException("Recovery transfer participant not ready: "+slot);
+        return container.getItem(slot.slot()).saveOptional(server.registryAccess()).toString();
     }
     private Map<UUID,String> siteSnapshot(ColonyCommands.RecoveryInspection inspection) {
         Map<UUID,String> result=new LinkedHashMap<>();
@@ -371,7 +408,7 @@ final class IdentityPlatform {
                     CitizenEntity entity=loaded.get(record.entityId());
                     if(entity==null||!entity.isAlive()||!record.citizenId().equals(entity.citizenId())||record.bindingEpoch()!=entity.bindingEpoch())throw new IllegalStateException("Recovery identity is not fully loaded and alive");
                 }
-                for(var observation:observations)if(!loaded.containsKey(observation.entityId()))throw new IllegalStateException("Known competing embodiment is not loaded");
+                for(var observation:observations)if(bridge.core().registry().citizen(observation.citizenId()).lifecycle()==CitizenRecord.Lifecycle.ALIVE&&!loaded.containsKey(observation.entityId()))throw new IllegalStateException("Known competing embodiment is not loaded");
             }
         });
     }

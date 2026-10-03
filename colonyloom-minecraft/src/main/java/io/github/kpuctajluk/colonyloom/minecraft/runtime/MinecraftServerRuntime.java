@@ -26,6 +26,7 @@ public final class MinecraftServerRuntime {
     private io.github.kpuctajluk.colonyloom.minecraft.construction.MinecraftConstructionService constructionService;
     private io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService storage;
     private io.github.kpuctajluk.colonyloom.core.supply.SupplyPlanner supplyPlanner;
+    private io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftDeliveryService deliveryService;
     private java.util.Map<String,io.github.kpuctajluk.colonyloom.gameplay.production.ProcessDefinition> processes=java.util.Map.of();
     private long metricsTickStart;
     public void metricsTickStarted() { runtime.requireOwnerThread(); metricsTickStart=System.nanoTime(); }
@@ -91,19 +92,28 @@ public final class MinecraftServerRuntime {
         if(storage==null)return;
         if(supplyPlanner==null)supplyPlanner=new io.github.kpuctajluk.colonyloom.core.supply.SupplyPlanner(runtime.registry(),runtime.registry().supply(),runtime.budgets());
         supplyPlanner.configure(new io.github.kpuctajluk.colonyloom.gameplay.production.ProductionCatalog(runtime.registry(),processes),new io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftSupplyAccess(runtime.registry(),storage));
+        runtime.commands().delivery(new io.github.kpuctajluk.colonyloom.gameplay.logistics.DeliveryController(runtime.registry(),new io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftDeliveryAccess(runtime.registry(),storage)));
         runtime.registry().setAfterRestore(() -> {runtime.scheduler().rebuild();supplyPlanner.rebuild();});
     }
     public void configurePhysical(io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager.ChunkAccess access,
             io.github.kpuctajluk.colonyloom.minecraft.construction.BlockPlacementExecutor.ItemInteraction interaction,
-            io.github.kpuctajluk.colonyloom.minecraft.construction.BlockPlacementExecutor.FaultObserver observer) {
+            io.github.kpuctajluk.colonyloom.minecraft.construction.BlockPlacementExecutor.FaultObserver observer,
+            io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor.Protection transferProtection,
+            io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor.FaultObserver transferObserver) {
         runtime.requireOwnerThread();
         if (chunks != null) throw new IllegalStateException("Physical services already configured");
         chunks = new io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager(runtime.registry(), runtime.budgets(), access);
         var placement=new io.github.kpuctajluk.colonyloom.minecraft.construction.BlockPlacementExecutor(server,runtime.registry(),interaction,observer);
         constructionService=new io.github.kpuctajluk.colonyloom.minecraft.construction.MinecraftConstructionService(runtime.registry(),construction,chunks,placement,persistence::checkpointId);
-        navigationBackend = new io.github.kpuctajluk.colonyloom.minecraft.navigation.MinecraftNavigationBackend(server, runtime.registry(), chunks,constructionService);
-        navigation = new io.github.kpuctajluk.colonyloom.core.navigation.NavigationService(runtime.registry(), runtime.budgets(), chunks,navigationBackend,constructionService);
+        var transfer=new io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor(server,runtime.registry(),storage,transferProtection,persistence::checkpointId,transferObserver);
+        deliveryService=new io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftDeliveryService(server,runtime.registry(),storage,transfer,chunks);
+        io.github.kpuctajluk.colonyloom.core.navigation.NavigationService.GoalAuthority goals=(work,request) ->
+                io.github.kpuctajluk.colonyloom.core.work.WorkOrder.DELIVERY.equals(work.typeId())?deliveryService.current(work,request):constructionService.current(work,request);
+        navigationBackend = new io.github.kpuctajluk.colonyloom.minecraft.navigation.MinecraftNavigationBackend(server, runtime.registry(), chunks,goals);
+        navigation = new io.github.kpuctajluk.colonyloom.core.navigation.NavigationService(runtime.registry(), runtime.budgets(), chunks,navigationBackend,goals);
         constructionService.navigation(navigation);
+        deliveryService.navigation(navigation);
+        runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.DELIVERY,deliveryService);
         runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.CONSTRUCTION,constructionService);
         citizens = new CitizenAdmissionService(server, runtime, chunks);
         runtime.scheduler().beforeWork(tick -> {
@@ -117,6 +127,7 @@ public final class MinecraftServerRuntime {
             runtime.registry().targetClaims().tick();
             runtime.registry().supply().reconcile(tick,runtime.budgets());
             if(supplyPlanner!=null)supplyPlanner.tick(tick);
+            if(deliveryService!=null)deliveryService.tick(tick);
         });
         runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.MOVE, new io.github.kpuctajluk.colonyloom.core.scheduler.SimulationScheduler.PhysicalExecutor() {
             public void step(io.github.kpuctajluk.colonyloom.core.work.WorkOrder work, long tick) {
@@ -158,12 +169,23 @@ public final class MinecraftServerRuntime {
         if (!persistence.isAvailable()) runtime.setSimulationEnabled(false);
         runtime.tick(runtime.serverTick() + 1);
         if(persistence.isAvailable() && runtime.serverTick()-lastCompactionAttempt>=1200
-                && (runtime.registry().effects().size()>=2048 || runtime.registry().construction().size()>=384)
+                && (runtime.registry().effects().size()>=2048 || runtime.registry().construction().size()>=384
+                    || runtime.registry().supply().deliveries().stream().filter(io.github.kpuctajluk.colonyloom.core.logistics.DeliveryOrder::terminal).count()>=32)
                 && runtime.registry().colonies().stream().noneMatch(colony -> colony.recoveryBlocked() || colony.contentBlocked())) {
             lastCompactionAttempt=runtime.serverTick();
             if(persistence.checkpointForCompaction()) {
                 runtime.registry().effects().compactAfterVerifiedCheckpoint();
                 runtime.registry().construction().compactAfterVerifiedCheckpoint();
+                var retained=new java.util.HashSet<UUID>();
+                for(var effect:runtime.registry().effects().snapshots())if(effect.workId()!=null)retained.add(effect.workId());
+                for(var dependency:runtime.registry().workBoard().works())retained.addAll(dependency.dependencies());
+                for(var citizen:runtime.registry().citizensView())if(citizen.assignedWorkId()!=null)retained.add(citizen.assignedWorkId());
+                for(var claim:runtime.registry().targetClaims().snapshots())retained.add(claim.ownerId());
+                for(var order:runtime.registry().supply().deliveries())if(order.terminal()) {
+                    var work=order.workId()==null?null:runtime.registry().workBoard().work(order.workId());
+                    if(work!=null&&(!work.terminal()||retained.contains(work.id())))continue;
+                    runtime.registry().supply().retireDelivery(order.id());if(work!=null)runtime.registry().workBoard().retire(work.id());
+                }
                 persistence.persistSnapshot();
             }
         }
@@ -174,6 +196,7 @@ public final class MinecraftServerRuntime {
         requireBoundServer(eventServer);
         runtime.beginStopping();
         if (supplyPlanner != null) supplyPlanner.close();
+        if (deliveryService != null) deliveryService.close();
         if (navigation != null) navigation.close();
         if (constructionService != null) constructionService.close();
         if (citizens != null) citizens.close();

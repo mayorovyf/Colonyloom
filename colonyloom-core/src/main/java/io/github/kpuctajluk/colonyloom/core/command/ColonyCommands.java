@@ -45,6 +45,16 @@ public final class ColonyCommands {
         registry.requireOwner(); if(construction==null) throw new IllegalStateException("Construction content unavailable");
         return construction.build(context,workId,colonyId,blueprintId,origin,rotation);
     }
+    private DeliveryCommands delivery;
+    public void delivery(DeliveryCommands commands) { registry.requireOwner(); delivery=Objects.requireNonNull(commands); }
+    public io.github.kpuctajluk.colonyloom.core.supply.Demand requestDelivery(CommandContext context,UUID demandId,UUID colonyId,
+            WorldPosition source,WorldPosition destination,io.github.kpuctajluk.colonyloom.core.storage.ItemDescriptor item,long count) {
+        registry.requireOwner();if(delivery==null)throw new IllegalStateException("Delivery unavailable");
+        return delivery.request(context,demandId,colonyId,source,destination,item,count);
+    }
+    public void cancelDelivery(CommandContext context,UUID demandId) {
+        registry.requireOwner();if(delivery==null)throw new IllegalStateException("Delivery unavailable");delivery.cancel(context,demandId);
+    }
 
     public ColonyCommands(ColonyRegistry registry) { this.registry = Objects.requireNonNull(registry, "registry"); }
     public void setProfessions(Collection<ProfessionDefinition> definitions) {
@@ -113,6 +123,7 @@ public final class ColonyCommands {
         if (citizen.lifecycle() != CitizenRecord.Lifecycle.ALIVE) throw new IllegalStateException("Citizen is not alive");
         if (!professions.containsKey(professionId)) throw new IllegalArgumentException("Unknown profession ID");
         if (professionId.equals(citizen.professionId())) return citizen;
+        requireNoCargo(citizenId);
         CitizenRecord changed = citizen.withProfession(professionId);
         ColonyRuntime changedColony = revised(colony, colony.ownerId(), colony.members(), false, false, null);
         registry.beforeMutation(); registry.updateCitizen(changed); registry.updateColony(changedColony);
@@ -183,6 +194,7 @@ public final class ColonyCommands {
         if (!inspection.effects().equals(colonyEffects(colonyId)) || !inspection.constructionSites().equals(colonySites(colonyId))) throw new IllegalStateException("Physical effect state changed during verification");
         ColonyRuntime changed = revised(colony, colony.ownerId(), colony.members(), false, false, null);
         registry.beforeMutation();
+        registry.supply().acceptWorld(colonyId);
         for (var work : registry.workBoard().works()) if (work.colonyId().equals(colonyId) && !work.terminal()) registry.workBoard().cancel(work.id());
         for (var claim : inspection.targetClaims()) registry.targetClaims().release(claim.ownerId());
         registry.effects().accept(colonyId); registry.construction().accept(colonyId);
@@ -217,7 +229,12 @@ public final class ColonyCommands {
     public CitizenRecord removeCitizen(CommandContext context, UUID citizenId) {
         CitizenRecord citizen = registry.citizen(citizenId);
         requireRank(context, citizen.colonyId(), MemberRank.OWNER);
+        requireNoCargo(citizenId);
         return finishLifecycle(citizenId, CitizenRecord.Lifecycle.REMOVED);
+    }
+    private void requireNoCargo(UUID citizenId) {
+        for(var order:registry.supply().deliveries())if(citizenId.equals(order.citizenId())&&registry.supply().hasCargo(order.id()))
+            throw new IllegalStateException("Return or unload bound cargo before changing citizen profession/removing citizen");
     }
     private CitizenRecord finishLifecycle(UUID citizenId, CitizenRecord.Lifecycle lifecycle) {
         CitizenRecord citizen = registry.citizen(citizenId);

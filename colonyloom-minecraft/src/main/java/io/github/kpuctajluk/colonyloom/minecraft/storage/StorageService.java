@@ -19,7 +19,7 @@ import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.entity.*;
 import net.minecraft.world.level.block.state.properties.ChestType;
 
-/** Server-thread only, nonloading physical observations; never executes delivery or crafting. */
+/** Server-thread only, nonloading canonical native inventory observations and guarded access. */
 public final class StorageService {
     private record Physical(List<BlockEntity> halves, List<StorageId> identities, List<WorldPosition> positions, List<StockRegion> slots) {}
     private final MinecraftServer server;
@@ -167,6 +167,88 @@ public final class StorageService {
     public long observationRevision(StockRegion slot) {owner();Sample sample=samples.get(slot);return sample==null?0:sample.revision();}
     public StockIndex.Observation readFresh(StockRegion slot) {owner();tickPhysical.clear();return read(slot);}
 
+    /** Known locator only: no lookup loads a chunk, and live citizen locators follow their embodiment. */
+    public WorldPosition locate(StorageId id) {
+        owner(); Objects.requireNonNull(id);
+        if (storage.isRetired(id) || conflicted(id) || !memberships.containsKey(id)) return null;
+        if (id.bindingEpoch() > 0) {
+            CitizenEntity entity = currentCitizen(id.identity(), id.bindingEpoch(), id.dimension());
+            return entity == null ? null : position((ServerLevel)entity.level(), entity.blockPosition());
+        }
+        return locators.get(id);
+    }
+
+    /** Current local slot mapping; never generic item handlers or a stale/replacement block entity. */
+    public Container currentContainer(StockRegion slot) {
+        return container(slot,false);
+    }
+    /** Inspection only: blocked colonies remain blocked; native inventory/binding is never synthesized. */
+    public Container recoveryContainer(StockRegion slot) {
+        return container(slot,true);
+    }
+    private Container container(StockRegion slot, boolean recovery) {
+        owner(); Objects.requireNonNull(slot); tickPhysical.clear();
+        StorageId id = slot.storage();
+        if (storage.isRetired(id) || conflicted(id) || !currentAuthority(slot,recovery)) return null;
+        if (id.bindingEpoch() > 0) {
+            CitizenEntity entity = recovery ? recoveryCitizen(id.identity(),id.bindingEpoch(),id.dimension())
+                    : currentCitizen(id.identity(),id.bindingEpoch(),id.dimension());
+            if (entity == null || slot.slot() >= CitizenEntity.INVENTORY_SIZE) return null;
+            WorldPosition live = position((ServerLevel)entity.level(), entity.blockPosition());
+            return registry.colony(registry.citizen(id.identity()).colonyId()).territory().contains(live) ? entity.inventory() : null;
+        }
+        WorldPosition address = locators.get(id);
+        if (address == null) return null;
+        Physical physical = physical(address, false);
+        if (physical == null || slot.slot() >= 27) return null;
+        for (WorldPosition location : physical.positions()) if (!ready(level(location.dimension()),blockPos(location))) return null;
+        int half = physical.identities().indexOf(id);
+        if (half < 0 || conflicted(id) || registrations(id).stream().noneMatch(registration ->
+                registration.slots().contains(slot) && registration.storages().equals(physical.identities())
+                        && registration.positions().equals(physical.positions()))) return null;
+        return (Container)physical.halves().get(half);
+    }
+
+    /** Remaining native capacity for this exact component map: -1 unknown, zero incompatible/full. */
+    public int capacity(StockRegion slot, ItemDescriptor item) {
+        owner(); Objects.requireNonNull(item);
+        Container container = currentContainer(slot);
+        if (container == null) return -1;
+        try { return capacity(container,slot.slot(),NativeItemDescriptor.capacityProbe(item,server.registryAccess())); }
+        catch (IllegalArgumentException | IllegalStateException failure) { return -1; }
+    }
+    static int capacity(Container container, int slot, ItemStack candidate) {
+        ItemStack current = container.getItem(slot);
+        if (!container.canPlaceItem(slot,candidate) || !current.isEmpty() && !ItemStack.isSameItemSameComponents(current,candidate)) return 0;
+        return Math.max(0,Math.min(container.getMaxStackSize(),candidate.getMaxStackSize())-current.getCount());
+    }
+    long observationTick() { owner(); return Math.max(0,budgets.tick()); }
+
+    /** Rechecks current binding, lifecycle, active admission and entity-ticking readiness. */
+    public CitizenEntity currentCitizen(UUID id, long epoch, String dimension) {
+        owner();
+        var record = registry.findCitizen(id).orElse(null);
+        CitizenEntity entity = citizen(id,epoch,dimension);
+        return record == null || entity == null || record.admission() != CitizenRecord.Admission.ACTIVE
+                || record.readiness() != CitizenRecord.Readiness.READY || entity.isPassenger()
+                || !registry.bindings().activeEntity(id).filter(record.entityId()::equals).isPresent()
+                || !ready((ServerLevel)entity.level(),entity.blockPosition()) ? null : entity;
+    }
+    private CitizenEntity recoveryCitizen(UUID id, long epoch, String dimension) {
+        var record = registry.findCitizen(id).orElse(null);
+        if (record == null || record.bindingEpoch() != epoch || record.lifecycle() != CitizenRecord.Lifecycle.ALIVE
+                || !registry.bindings().recoveryReady(id)) return null;
+        ServerLevel level = level(dimension);
+        if (level == null || !(level.getEntity(record.entityId()) instanceof CitizenEntity entity)
+                || !entity.isAlive() || entity.isRemoved() || !id.equals(entity.citizenId()) || entity.bindingEpoch() != epoch
+                || !ready(level,entity.blockPosition())) return null;
+        return entity;
+    }
+    private static boolean ready(ServerLevel level, BlockPos pos) {
+        return level != null && !level.isOutsideBuildHeight(pos) && level.getWorldBorder().isWithinBounds(pos)
+                && level.getChunkSource().getChunkNow(pos.getX() >> 4,pos.getZ() >> 4) != null && level.isPositionEntityTicking(pos);
+    }
+
     /** Public future-executor guard, including native exact components and current scope. */
     public boolean matches(UUID colony, StockRegion slot, ItemDescriptor item, long count) {
         owner();
@@ -300,11 +382,12 @@ public final class StorageService {
     }
 
     private boolean conflicted(StorageId id) { return blockedIdentities.contains(id) || addresses.getOrDefault(id, Set.of()).size() > 1; }
-    private boolean currentAuthority(StockRegion slot) {
+    private boolean currentAuthority(StockRegion slot) { return currentAuthority(slot,false); }
+    private boolean currentAuthority(StockRegion slot, boolean recovery) {
         for (var registration : registrations(slot.storage())) {
             if (!registration.slots().contains(slot)) continue;
             var colony = registry.colony(registration.colonyId());
-            if (colony.available() && registration.positions().stream().allMatch(colony.territory()::contains)) return true;
+            if ((recovery || colony.available()) && registration.positions().stream().allMatch(colony.territory()::contains)) return true;
         }
         return false;
     }
@@ -338,14 +421,8 @@ public final class StorageService {
         return entity;
     }
     private ItemStack nativeStack(StockRegion slot) {
-        if (slot.storage().bindingEpoch() > 0) {
-            CitizenEntity entity = citizen(slot.storage().identity(), slot.storage().bindingEpoch(), slot.storage().dimension());
-            return entity == null ? null : entity.inventory().getItem(slot.slot());
-        }
-        Physical physical = physical(locators.get(slot.storage()), false);
-        if (physical == null) return null;
-        int half = physical.identities().indexOf(slot.storage());
-        return half < 0 ? null : ((Container)physical.halves().get(half)).getItem(slot.slot());
+        Container container = currentContainer(slot);
+        return container == null ? null : container.getItem(slot.slot());
     }
     private void requirePosition(UUID colonyId, WorldPosition position) {
         var colony = registry.colony(colonyId);

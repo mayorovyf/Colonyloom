@@ -68,7 +68,7 @@ final class RegistryNbt {
             for (Tag element : entries) {
                 CompoundTag entry = (CompoundTag) element;
                 String type = string(entry, "typeId");
-                if (type.equals(KNOWN_TYPES.get(key)) || key.equals("works") && (type.equals(WorkOrder.MOVE) || type.equals(WorkOrder.CONSTRUCTION))
+                if (type.equals(KNOWN_TYPES.get(key)) || key.equals("works") && (type.equals(WorkOrder.MOVE) || type.equals(WorkOrder.CONSTRUCTION) || type.equals(WorkOrder.DELIVERY))
                         || key.equals("evidence") && (type.equals(ConstructionNbt.SITE) || type.equals(ConstructionNbt.EFFECT))
                         || StorageNbt.known(key,type) || SupplyNbt.known(key,type) || key.equals("pinnedDefinitions") && type.equals(ConstructionNbt.PIN)) {
                     if (key.equals("pinnedDefinitions") && type.equals(ConstructionNbt.PIN) && !ConstructionNbt.knownBlueprintSchema(entry)

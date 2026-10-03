@@ -18,4 +18,9 @@ public final class ConstructionExecutorEvent extends Event {
         this.observer=Objects.requireNonNull(observer);
     }
     public BlockPlacementExecutor.FaultObserver observer() { return observer; }
+    private io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor.FaultObserver transferObserver;
+    public void transferObserver(io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor.FaultObserver observer) {
+        if(transferObserver!=null)throw new IllegalStateException("Transfer observer already installed");transferObserver=Objects.requireNonNull(observer);
+    }
+    public io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor.FaultObserver transferObserver() {return transferObserver;}
 }

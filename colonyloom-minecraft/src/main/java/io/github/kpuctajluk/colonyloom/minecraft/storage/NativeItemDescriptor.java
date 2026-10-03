@@ -6,6 +6,7 @@ import java.util.*;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.core.component.DataComponentMap;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.nbt.*;
 import net.minecraft.world.item.ItemStack;
 
@@ -35,17 +36,27 @@ public final class NativeItemDescriptor {
     public static boolean matches(ItemStack stack, ItemDescriptor descriptor, HolderLookup.Provider registries) {
         if (stack.isEmpty() || descriptor == null || !BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().equals(descriptor.itemId())) return false;
         try {
-            byte[] bytes = descriptor.canonicalComponents();
-            ByteArrayInputStream input = new ByteArrayInputStream(bytes);
+            return ItemStack.isSameItemSameComponents(stack, capacityProbe(descriptor, registries));
+        } catch (RuntimeException failure) {
+            return false;
+        }
+    }
+    /** A one-item validation probe only; never published into a physical inventory. */
+    static ItemStack capacityProbe(ItemDescriptor descriptor, HolderLookup.Provider registries) {
+        try {
+            ByteArrayInputStream input = new ByteArrayInputStream(descriptor.canonicalComponents());
             Tag tag = NbtIo.readAnyTag(new DataInputStream(input), new NbtAccounter(65536, 32));
-            if (input.available() != 0) return false;
+            if (input.available() != 0) throw new IllegalArgumentException("Trailing item components");
             DataComponentMap components = DataComponentMap.CODEC.parse(registries.createSerializationContext(NbtOps.INSTANCE), tag).getOrThrow();
-            ItemStack expected = new ItemStack(stack.getItem());
+            var item = BuiltInRegistries.ITEM.getOptional(ResourceLocation.parse(descriptor.itemId()))
+                    .orElseThrow(() -> new IllegalArgumentException("Unknown native item"));
+            ItemStack expected = new ItemStack(item);
             for (var type : Set.copyOf(expected.getComponents().keySet())) if (!components.has(type)) expected.remove(type);
             expected.applyComponents(components);
-            return ItemStack.isSameItemSameComponents(stack, expected);
-        } catch (IOException | RuntimeException failure) {
-            return false;
+            if (expected.isEmpty()) throw new IllegalArgumentException("Empty native item probe");
+            return expected;
+        } catch (IOException failure) {
+            throw new IllegalArgumentException("Invalid native item components", failure);
         }
     }
 

@@ -88,6 +88,15 @@ final class ColonyloomBrigadier {
                 platform.registerBuilding(ctx.getSource(), uuid(ctx, "colony"), pos(ctx, "crafting_table_pos"), pos(ctx, "workshop_storage_pos"))));
         root.then(literal("building").then(literal("register").then(argument("colony", UuidArgument.uuid())
                 .then(argument("crafting_table_pos", BlockPosArgument.blockPos()).then(workshopStorage)))));
+        var delivery=literal("delivery");
+        var deliveryCount=argument("count",IntegerArgumentType.integer(1,1_000_000)).executes(ctx -> execute(ctx,resolve,platform ->
+                platform.requestDelivery(ctx.getSource(),uuid(ctx,"colony"),pos(ctx,"source"),pos(ctx,"destination"),ResourceLocationArgument.getId(ctx,"item").toString(),IntegerArgumentType.getInteger(ctx,"count"))));
+        delivery.then(literal("request").then(argument("colony",UuidArgument.uuid())
+                .then(argument("source",BlockPosArgument.blockPos()).then(argument("destination",BlockPosArgument.blockPos())
+                        .then(argument("item",ResourceLocationArgument.id()).then(deliveryCount))))));
+        delivery.then(literal("cancel").then(argument("demand",UuidArgument.uuid()).executes(ctx -> execute(ctx,resolve,platform ->
+                platform.cancelDelivery(ctx.getSource(),uuid(ctx,"demand"))))));
+        root.then(delivery);
         var recovery = literal("recovery").requires(source -> source.hasPermission(2));
         recovery.then(literal("inspect").then(argument("colony", UuidArgument.uuid()).executes(ctx -> execute(ctx, resolve, platform ->
                 platform.inspect(ctx.getSource(), uuid(ctx, "colony"))))));

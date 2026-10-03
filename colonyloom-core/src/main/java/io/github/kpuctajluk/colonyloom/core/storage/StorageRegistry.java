@@ -268,6 +268,61 @@ public final class StorageRegistry {
         staged.forEach(this::addClaim);
         for (StockRegion slot : released.keySet()) prune(slot);
     }
+    /** Pre-admits a possible split; native destination observation precedes publication. */
+    public PreparedMove prepareMoveReservation(UUID id, StockRegion destination, UUID splitId,
+                                               boolean allocation, boolean retainDestination, int maximum, long tick) {
+        requireOwner(); Claim old = claims.get(id);
+        if (old == null || old.allocation || maximum <= 0 || maximum > old.count || tick < 0
+                || old.slot.equals(destination) || !authorized(old.colony, old.slot) || retired.containsKey(old.slot.storage())
+                || !authorized(old.colony, destination) || retired.containsKey(destination.storage())
+                || !index.observation(old.slot).ready() || !old.item.equals(index.observation(old.slot).item())
+                || !index.observation(destination).ready()) throw new IllegalStateException("Transfer authority or readiness changed");
+        if (splitId.equals(id) || claims.containsKey(splitId) || registry.usedId(splitId)) throw new IllegalArgumentException("Split identity already used");
+        AdmissionLedger.Lease extra = null;
+        if (retainDestination && old.count > 1) {
+            if (claims.size() >= MAX_OBLIGATIONS) throw new IllegalArgumentException("Obligation envelope exceeded");
+            extra = registry.admission().reserve(old.colony, old.lane, Map.of(Resource.RESERVATIONS_AND_ALLOCATIONS, 1));
+        }
+        return new PreparedMove(old, destination, splitId, allocation, retainDestination, maximum, tick, extra);
+    }
+    public final class PreparedMove implements AutoCloseable {
+        private final Claim old;
+        private final StockRegion destination;
+        private final UUID splitId;
+        private final boolean allocation, retainDestination;
+        private final int maximum;
+        private final long tick, revision, count;
+        private AdmissionLedger.Lease extra;
+        private boolean closed;
+        private PreparedMove(Claim old, StockRegion destination, UUID splitId, boolean allocation,
+                             boolean retainDestination, int maximum, long tick, AdmissionLedger.Lease extra) {
+            this.old = old; this.destination = destination; this.splitId = splitId; this.allocation = allocation;
+            this.retainDestination = retainDestination; this.maximum = maximum; this.tick = tick; this.extra = extra;
+            revision = old.revision; count = old.count;
+        }
+        public UUID destinationObligation(int moved) { return moved == count ? old.id : splitId; }
+        public void commit(int moved) {
+            requireOwner();
+            if (closed || moved <= 0 || moved > maximum || claims.get(old.id) != old || old.revision != revision || old.count != count)
+                throw new IllegalStateException("Prepared transfer changed");
+            if (!authorized(old.colony, destination) || retired.containsKey(destination.storage())
+                    || !index.observation(destination).ready() || !old.item.equals(index.observation(destination).item())
+                    || index.free(destination, tick) < moved) throw new IllegalStateException("Native destination not observed");
+            long nextRevision = Math.addExact(revision, 1);
+            Claim next = retainDestination ? new Claim(allocation, destinationObligation(moved), old.colony, old.owner,
+                    destination, old.item, moved, nextRevision, old.lane, moved == count ? old.lease : extra) : null;
+            registry.beforeMutation();
+            if (moved == count) {
+                claims.remove(old.id); List<Claim> local = slotClaims.get(old.slot); local.remove(old);
+                if (local.isEmpty()) slotClaims.remove(old.slot);
+                if (next == null) old.lease.close();
+            } else { old.count = count - moved; old.revision = nextRevision; }
+            if (next != null) { addClaim(next); if (moved != count) extra = null; }
+            prune(old.slot); closed = true;
+            if (extra != null) { extra.close(); extra = null; }
+        }
+        @Override public void close() { requireOwner(); if (!closed) { closed = true; if (extra != null) { extra.close(); extra = null; } } }
+    }
     public void reduceObligations(Map<UUID, Long> retained) {
         requireOwner();
         for (var entry : retained.entrySet()) {
@@ -325,7 +380,7 @@ public final class StorageRegistry {
         }
         prune(slot);
     }
-    boolean authorized(UUID colony, StockRegion slot) { Set<StockRegion> view = views.get(colony); return view != null && view.contains(slot); }
+    public boolean authorized(UUID colony, StockRegion slot) { requireOwner(); Set<StockRegion> view = views.get(colony); return view != null && view.contains(slot); }
     boolean registered(StockRegion slot) { for (Set<StockRegion> view : views.values()) if (view.contains(slot)) return true; return false; }
     private void rebuildViews() {
         views.clear();

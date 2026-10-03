@@ -84,10 +84,17 @@ final class SupplyNbt {
     private static boolean member(Enum<?>[] values,String name) {for(var value:values) if(value.name().equals(name))return true;return false;}
     static CompoundTag demand(Demand.Snapshot value) {
         var tag=typed(DEMAND,value.id(),value.colonyId());tag.putUUID("ownerId",value.ownerId());tag.put("matcher",matcher(value.matcher()));tag.putString("goalKind",value.goalKind().name());tag.put("destination",StorageNbt.position(value.destination()));
-        tag.putLong("required",value.required());tag.putLong("fulfilled",value.fulfilled());tag.putLong("allocated",value.allocated());tag.putLong("covered",value.covered());tag.putLong("deliveredTotal",value.deliveredTotal());tag.putLong("revision",value.revision());tag.putString("lane",value.lane().name());tag.putInt("priority",value.priority());tag.putLong("createdTick",value.createdTick());tag.putString("status",value.status().name());return tag;
+        tag.putLong("required",value.required());tag.putLong("fulfilled",value.fulfilled());tag.putLong("allocated",value.allocated());tag.putLong("covered",value.covered());tag.putLong("deliveredTotal",value.deliveredTotal());tag.putLong("revision",value.revision());tag.putString("lane",value.lane().name());tag.putInt("priority",value.priority());tag.putLong("createdTick",value.createdTick());tag.putString("status",value.status().name());
+        var sources=new ListTag();for(var source:value.sourceStorages())sources.add(StorageNbt.storage(source));tag.put("sourceStorages",sources);return tag;
     }
     static Demand.Snapshot demand(CompoundTag tag) {
-        return new Demand.Snapshot(id(tag),colony(tag),RegistryNbt.uuid(tag,"ownerId"),matcher(compound(tag,"matcher")),Demand.GoalKind.valueOf(text(tag,"goalKind")),StorageNbt.position(compound(tag,"destination")),number(tag,"required"),number(tag,"fulfilled"),number(tag,"allocated"),number(tag,"covered"),number(tag,"deliveredTotal"),number(tag,"revision"),Lane.valueOf(text(tag,"lane")),RegistryNbt.integer(tag,"priority"),number(tag,"createdTick"),Demand.Status.valueOf(text(tag,"status")));
+        var sources=new ArrayList<io.github.kpuctajluk.colonyloom.core.storage.StorageId>();
+        if(tag.contains("sourceStorages")) {
+            if(!tag.contains("sourceStorages",Tag.TAG_LIST))throw new IllegalArgumentException("Invalid delivery sources");
+            var list=(ListTag)tag.get("sourceStorages");if(list.size()>2||!list.isEmpty()&&list.getElementType()!=Tag.TAG_COMPOUND)throw new IllegalArgumentException("Invalid delivery source envelope");
+            for(int index=0;index<list.size();index++)sources.add(StorageNbt.storage(list.getCompound(index)));
+        }
+        return new Demand.Snapshot(id(tag),colony(tag),RegistryNbt.uuid(tag,"ownerId"),matcher(compound(tag,"matcher")),Demand.GoalKind.valueOf(text(tag,"goalKind")),StorageNbt.position(compound(tag,"destination")),number(tag,"required"),number(tag,"fulfilled"),number(tag,"allocated"),number(tag,"covered"),number(tag,"deliveredTotal"),number(tag,"revision"),Lane.valueOf(text(tag,"lane")),RegistryNbt.integer(tag,"priority"),number(tag,"createdTick"),Demand.Status.valueOf(text(tag,"status")),sources);
     }
     static CompoundTag share(CoverageShare value) {
         var tag=typed(SHARE,value.id(),value.colonyId());tag.putUUID("demandId",value.demandId());optional(tag,"sourceOrderId",value.sourceOrderId());optional(tag,"obligationId",value.obligationId());if(value.slot()!=null)tag.put("slot",StorageNbt.slot(value.slot()));tag.put("item",StorageNbt.item(value.item()));tag.putLong("quantity",value.quantity());tag.putLong("revision",value.revision());tag.putString("stage",value.stage().name());return tag;

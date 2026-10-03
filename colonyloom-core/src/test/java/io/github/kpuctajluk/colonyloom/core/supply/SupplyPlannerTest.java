@@ -139,6 +139,28 @@ final class SupplyPlannerTest {
         mismatch.step(); assertEquals(1, unmet.deficit()); assertTrue(mismatch.supply.shares().isEmpty());
     }
 
+    @Test void pagedDeliverySearchRetainsSelectedConsumerAndNeverPlansCrafting() {
+        Fixture f = new Fixture(8, 8); f.stock(100, "a"); f.stock(101, "a");
+        var source1 = new StorageId("minecraft:overworld", id(100), 0);
+        var source2 = new StorageId("minecraft:overworld", id(101), 0);
+        var first = f.supply.requestDelivery(id(10), COLONY, OWNER, item("a"), 1, DESTINATION, List.of(source1), 0);
+        var second = f.supply.requestDelivery(id(11), COLONY, OWNER, item("a"), 1, DESTINATION, List.of(source2), 0);
+        f.recipes.add(recipe("a", "a", "raw"));
+        Map<UUID, List<Integer>> offsets = new HashMap<>();
+        f.planner.configure(f, new SupplyPlanner.PhysicalAccess() {
+            @Override public KitAllocator.Observation read(StockRegion slot) { return f.read(slot); }
+            @Override public SupplyPlanner.CandidatePage candidates(Demand.Snapshot demand, ItemMatcher target, int offset, int limit) {
+                offsets.computeIfAbsent(demand.id(), ignored -> new ArrayList<>()).add(offset);
+                return offset < 32 ? new SupplyPlanner.CandidatePage(List.of(), false) : f.candidates(demand, target, 0, limit);
+            }
+        });
+        f.budgets.updateLimits(f.budgets.limits().withBudget(Budget.STORAGE_SLOT_CHECKS, 1));
+        for (int i = 0; i < 20; i++) f.step();
+        assertEquals(0, first.deficit()); assertEquals(0, second.deficit()); assertTrue(f.supply.productionOrders().isEmpty());
+        assertEquals(List.of(0, 16, 32), offsets.get(first.id())); assertEquals(List.of(0, 16, 32), offsets.get(second.id()));
+        for (var order : f.supply.deliveries()) assertEquals(order.ownerDemandId().equals(first.id()) ? source1 : source2, order.source().storage());
+    }
+
     @Test void sharedBatchInheritsAndReleasesUrgencyWithoutDuplicatingCoverage() {
         Fixture f = new Fixture(8, 128); Demand normal = f.goal(10, "a"); f.stock(100, "raw");
         f.recipes.add(RecipeDefinition.create("colonyloom:a", 1, "colonyloom:carpenter", "minecraft:crafting_table",

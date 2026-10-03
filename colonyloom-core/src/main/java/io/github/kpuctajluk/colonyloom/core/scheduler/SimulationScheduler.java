@@ -438,6 +438,10 @@ public final class SimulationScheduler {
             try {
                 UUID id = bucket.ids.get(bucket.cursor); bucket.cursor = (bucket.cursor+1) % bucket.ids.size(); CitizenRecord citizen = board.registry().citizen(id);
                 if (!workerAvailable(citizen) || !work.target().dimension().equals(citizen.lastKnownPosition().dimension())) continue;
+                if(WorkOrder.DELIVERY.equals(work.typeId())) {
+                    var order=board.registry().supply().deliveryForWork(work.id());
+                    if(order!=null&&board.registry().supply().hasCargo(order.id())&&!id.equals(order.citizenId()))continue;
+                }
                 long dx = (long)work.target().x()-citizen.lastKnownPosition().x(), dz = (long)work.target().z()-citizen.lastKnownPosition().z();
                 long distance = Math.abs(dx)+Math.abs(dz)+Math.abs((long)work.target().y()-citizen.lastKnownPosition().y());
                 if (winner == null || distance < bestDistance || distance == bestDistance && id.compareTo(winner) < 0) { winner = id; bestDistance = distance; }

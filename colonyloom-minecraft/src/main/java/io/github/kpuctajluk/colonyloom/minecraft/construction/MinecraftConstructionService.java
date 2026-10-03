@@ -94,7 +94,7 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         if(before==0) { waitFor(work,WorkOrder.Reason.MATERIALS); return; }
         var colony=registry.colony(work.colonyId());
         var context=new ActionContext(work.colonyId(),citizen.citizenId(),ActionContext.Kind.BLOCK_PLACE,target.position(),ActionContext.AuthorityMode.COLONY,site.initiatorId(),colony.authorityRevision());
-        var effect=new EffectRecord(UUID.randomUUID(),work.colonyId(),work.id(),citizen.citizenId(),citizen.bindingEpoch(),ActionContext.Kind.BLOCK_PLACE,target.position(),MinecraftConstructionGeometry.state(target.expected()).toString(),target.expected().itemId(),before,before,EffectRecord.State.PREPARED,0);
+        var effect=new EffectRecord(UUID.randomUUID(),work.colonyId(),work.id(),citizen.citizenId(),citizen.bindingEpoch(),ActionContext.Kind.BLOCK_PLACE,target.position(),MinecraftConstructionGeometry.state(target.expected()).toString(),target.expected().itemId(),before,before,EffectRecord.State.PREPARED,0,null);
         try { registry.effects().prepare(effect,work.lane()); } catch(AdmissionLedger.AdmissionException denied) { waitFor(work,WorkOrder.Reason.STATE_LIMIT); return; }
         // The verified session-dirty marker is durable already; this evidence joins ordinary SavedData checkpoints.
         // No observer saves implicitly, so fault fixtures can deliberately persist only one physical side.
