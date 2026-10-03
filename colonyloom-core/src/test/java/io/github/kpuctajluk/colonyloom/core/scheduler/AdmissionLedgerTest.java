@@ -213,4 +213,41 @@ final class AdmissionLedgerTest {
         assertEquals(0, ledger.used(Resource.TOMBSTONES));
     }
 
+    @Test
+    void criticalRootsRetainTheirOwnCleanupWhenNormalRootsFillServiceReserve() {
+        AdmissionLedger ledger = ledger(SimulationLimits.development().withResource(Resource.WORKS, 32));
+        try (var first = ledger.reserveRoot(FIRST, Lane.NORMAL, Map.of(Resource.WORKS, 1));
+             var second = ledger.reserveRoot(FIRST, Lane.NORMAL, Map.of(Resource.WORKS, 1));
+             var third = ledger.reserveRoot(FIRST, Lane.NORMAL, Map.of(Resource.WORKS, 1));
+             var fourth = ledger.reserveRoot(FIRST, Lane.NORMAL, Map.of(Resource.WORKS, 1));
+             var food = ledger.reserveRoot(FIRST, Lane.CRITICAL, Map.of(Resource.WORKS, 1));
+             var delivery = ledger.reserveRoot(FIRST, Lane.CRITICAL, Map.of(Resource.WORKS, 1))) {
+            assertEquals(4, ledger.used(Resource.WORKS, Lane.SERVICE));
+            assertEquals(4, ledger.used(Resource.WORKS, Lane.CRITICAL));
+            delivery.finishRoot(); food.finishRoot();
+            assertEquals(2, ledger.used(Resource.WORKS, Lane.CRITICAL));
+            assertEquals(4, ledger.used(Resource.WORKS, Lane.SERVICE));
+        }
+        assertEquals(0, ledger.used(Resource.WORKS));
+    }
+
+    @Test
+    void criticalCapacityViolationDeniesNewNormalUntilCriticalStateIsReleased() {
+        AdmissionLedger ledger = ledger(SimulationLimits.development().withResource(Resource.GRAPH_NODES, 8));
+        try (var critical = ledger.reserve(FIRST, Lane.CRITICAL, Map.of(Resource.GRAPH_NODES, 1))) {
+            assertThrows(AdmissionLedger.AdmissionException.class,
+                    () -> ledger.reserve(SECOND, Lane.CRITICAL, Map.of(Resource.GRAPH_NODES, 1)));
+            assertTrue(ledger.normalAdmissionBlocked()); assertEquals(1, ledger.criticalCapacityViolations());
+            var failure = assertThrows(AdmissionLedger.AdmissionException.class,
+                    () -> ledger.reserveRoot(SECOND, Lane.NORMAL, Map.of(Resource.WORKS, 1)));
+            assertEquals(AdmissionLedger.Reason.CRITICAL_CAPACITY, failure.reason());
+            assertEquals(1, ledger.criticalCapacityViolations()); assertEquals(0, ledger.used(Resource.WORKS));
+            critical.close();
+            assertFalse(ledger.normalAdmissionBlocked());
+            try (var admitted = ledger.reserveRoot(SECOND, Lane.NORMAL, Map.of(Resource.WORKS, 1))) {
+                assertEquals(2, ledger.used(Resource.WORKS));
+            }
+        }
+    }
+
 }

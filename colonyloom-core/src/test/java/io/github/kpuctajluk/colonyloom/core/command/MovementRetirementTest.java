@@ -31,7 +31,7 @@ final class MovementRetirementTest {
         var work = runtime.commands().createMoveWork(context, UUID.randomUUID(), colony.colonyId(), target);
         assertThrows(IllegalStateException.class, () -> runtime.workBoard().retire(work.id()));
         runtime.workBoard().cancel(work.id());
-        var witness = new EffectRecord(UUID.randomUUID(),colony.colonyId(),work.id(),citizen.citizenId(),citizen.bindingEpoch(),ActionContext.Kind.DEATH,target,"inventory","minecraft:oak_stairs",4,4,EffectRecord.State.PREPARED,0,null);
+        var witness = new EffectRecord(UUID.randomUUID(),colony.colonyId(),work.id(),citizen.citizenId(),citizen.bindingEpoch(),ActionContext.Kind.DEATH,target,"inventory","minecraft:oak_stairs",4,4,EffectRecord.State.PREPARED,0,null,null,null);
         runtime.registry().effects().prepare(witness, io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);
         assertThrows(IllegalStateException.class, () -> runtime.workBoard().retire(work.id()));
         runtime.registry().effects().discardUnchanged(witness.operationId());

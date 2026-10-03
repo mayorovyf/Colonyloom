@@ -44,13 +44,15 @@ final class ConstructionNbt {
             tag.put("craft",craft(value.craft())); tag.putUUID("productionId",value.craft().productionId());
             tag.putUUID("buildingId",value.craft().workshopId());
         }
+        if(value.food()!=null)tag.put("food",food(value.food()));
         return tag;
     }
     static EffectRecord effect(CompoundTag tag) {
         return new EffectRecord(uuid(tag,"operationId"),uuid(tag,"colonyId"),tag.contains("workId")?uuid(tag,"workId"):null,uuid(tag,"citizenId"),number(tag,"bindingEpoch"),
                 ActionContext.Kind.valueOf(text(tag,"kind",64)),position(compound(tag,"target")),boundedText(tag,"expectedBlock",1024),boundedText(tag,"itemId",256),
                 integer(tag,"countBefore"),integer(tag,"countAfter"),EffectRecord.State.valueOf(text(tag,"state",64)),number(tag,"revision"),
-                tag.contains("transfer")?transfer(compound(tag,"transfer")):null,tag.contains("craft")?craft(compound(tag,"craft")):null);
+                tag.contains("transfer")?transfer(compound(tag,"transfer")):null,tag.contains("craft")?craft(compound(tag,"craft")):null,
+                tag.contains("food")?food(compound(tag,"food")):null);
     }
     private static CompoundTag transfer(EffectRecord.Transfer value) {
         var tag=new CompoundTag(); tag.putInt("schemaVersion",1);
@@ -99,6 +101,16 @@ final class ConstructionNbt {
         }
         return result;
     }
+    private static CompoundTag food(EffectRecord.Food value) {
+        var tag=new CompoundTag();tag.putInt("schemaVersion",1);tag.put("slot",StorageNbt.slot(value.slot()));tag.put("item",StorageNbt.item(value.item()));
+        tag.putUUID("shareId",value.shareId());tag.putUUID("demandId",value.demandId());tag.putInt("foodBefore",value.foodBefore());tag.putInt("foodAfter",value.foodAfter());
+        tag.putLong("timerBefore",value.timerBefore());tag.putLong("timerAfter",value.timerAfter());return tag;
+    }
+    private static EffectRecord.Food food(CompoundTag tag) {
+        if(integer(tag,"schemaVersion")!=1)throw new IllegalArgumentException("Unsupported food evidence schema");
+        return new EffectRecord.Food(StorageNbt.slot(compound(tag,"slot")),StorageNbt.item(compound(tag,"item")),uuid(tag,"shareId"),uuid(tag,"demandId"),
+                integer(tag,"foodBefore"),integer(tag,"foodAfter"),number(tag,"timerBefore"),number(tag,"timerAfter"));
+    }
     static final int MAX_PALETTE = 512;
     static CompoundTag blueprint(BlueprintDefinition definition) {
         var tag=typed(PIN); tag.putInt("schemaVersion",1); tag.putString("id",definition.id()); tag.putInt("version",definition.version()); tag.putString("digest",definition.digest());
@@ -131,7 +143,8 @@ final class ConstructionNbt {
             knownCraft=false;
             for(var phase:EffectRecord.CraftPhase.values()) knownCraft |= phase.name().equals(text(craft,"phase",64));
         }
-        return knownKind && knownState && knownCraft && (!tag.contains("transfer") || integer(compound(tag,"transfer"),"schemaVersion")==1);
+        return knownKind && knownState && knownCraft && (!tag.contains("transfer") || integer(compound(tag,"transfer"),"schemaVersion")==1)
+                &&(!tag.contains("food")||integer(compound(tag,"food"),"schemaVersion")==1);
     }
     static BlueprintDefinition blueprint(CompoundTag tag) {
         if(!knownBlueprintSchema(tag)) throw new IllegalArgumentException("Unsupported pinned blueprint schema");

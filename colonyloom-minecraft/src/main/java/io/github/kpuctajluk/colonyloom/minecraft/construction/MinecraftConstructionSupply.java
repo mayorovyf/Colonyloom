@@ -103,10 +103,6 @@ final class MinecraftConstructionSupply {
         }
         return WorkOrder.Reason.CAPACITY;
     }
-    WorldPosition buffer(WorkOrder work,ConstructionController.Layout layout) {
-        var buffer=registry.storage().registrations(work.colonyId()).stream().filter(r -> r.role().equals("construction")&&r.address().equals(layout.deliveryBuffer())&&r.storages().stream().allMatch(id -> id.bindingEpoch()==0)).findFirst().orElse(null);
-        return buffer==null?null:buffer.address();
-    }
     void close(UUID workId) {
         for(var demand:registry.supply().demands())if(demand.snapshot().ownerId().equals(workId)&&demand.snapshot().status()!=Demand.Status.CANCELLED)registry.supply().cancel(demand.id());
     }

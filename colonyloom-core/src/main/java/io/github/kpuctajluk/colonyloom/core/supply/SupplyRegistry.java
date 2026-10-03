@@ -26,6 +26,8 @@ public final class SupplyRegistry {
     private final Map<UUID, Set<UUID>> orderShares = new HashMap<>(), demandShares = new HashMap<>();
     private final List<UUID> deliveryIds = new ArrayList<>();
     private final Map<UUID, Integer> deliveryOffsets = new HashMap<>();
+    private final List<UUID> criticalDeliveryIds = new ArrayList<>();
+    private final Map<UUID, Integer> criticalDeliveryOffsets = new HashMap<>();
     private final List<UUID> productionIds = new ArrayList<>();
     private final LinkedHashSet<UUID> unroutedShares = new LinkedHashSet<>();
     private final LinkedHashSet<UUID> dirtyObligations = new LinkedHashSet<>();
@@ -68,15 +70,23 @@ public final class SupplyRegistry {
     public boolean hasDeliveryWork(UUID workId) { return deliveryForWork(workId) != null; }
     public int deliveryCount() { registry.requireOwner(); return deliveryIds.size(); }
     public DeliveryOrder deliveryAt(int offset) { registry.requireOwner(); return deliveries.get(deliveryIds.get(offset)); }
+    public int criticalDeliveryCount() { registry.requireOwner(); return criticalDeliveryIds.size(); }
+    public DeliveryOrder criticalDeliveryAt(int offset) { registry.requireOwner(); return deliveries.get(criticalDeliveryIds.get(offset)); }
     public int productionCount() { registry.requireOwner(); return productionIds.size(); }
     public ProductionOrder productionAt(int offset) { registry.requireOwner(); return productions.get(productionIds.get(offset)); }
     public CoverageShare unroutedReservation() { registry.requireOwner(); return unroutedShares.isEmpty() ? null : shares.get(unroutedShares.iterator().next()); }
     private void addDelivery(DeliveryOrder order) {
         deliveries.put(order.id(), order); deliveryOffsets.put(order.id(), deliveryIds.size()); deliveryIds.add(order.id());
+        if (order.lane() == Lane.CRITICAL) { criticalDeliveryOffsets.put(order.id(), criticalDeliveryIds.size()); criticalDeliveryIds.add(order.id()); }
     }
     private void removeDelivery(UUID id) {
         deliveries.remove(id); int offset = deliveryOffsets.remove(id); UUID last = deliveryIds.remove(deliveryIds.size() - 1);
         if (offset < deliveryIds.size()) { deliveryIds.set(offset, last); deliveryOffsets.put(last, offset); }
+        Integer critical = criticalDeliveryOffsets.remove(id);
+        if (critical != null) {
+            UUID lastCritical = criticalDeliveryIds.remove(criticalDeliveryIds.size() - 1);
+            if (critical < criticalDeliveryIds.size()) { criticalDeliveryIds.set(critical, lastCritical); criticalDeliveryOffsets.put(lastCritical, critical); }
+        }
     }
     public boolean usedId(UUID id) { registry.requireOwner(); return demands.containsKey(id) || shares.containsKey(id) || productions.containsKey(id) || deliveries.containsKey(id); }
     public SupplySnapshot snapshot() { return new SupplySnapshot(demands().stream().map(Demand::snapshot).toList(), shares(), productionOrders(), deliveries()); }
@@ -99,6 +109,11 @@ public final class SupplyRegistry {
         AdmissionLedger.Lease lease = admit(colony, lane, Resource.DEMANDS);
         try { registry.beforeMutation(); } catch (RuntimeException failure) { lease.close(); throw failure; }
         demands.put(id, value); leases.put(id, lease); return value;
+    }
+    public boolean foodConsumer(UUID demandId) {
+        UUID owner = demand(demandId).snapshot().ownerId();
+        try { return io.github.kpuctajluk.colonyloom.core.work.WorkOrder.FOOD.equals(registry.workBoard().work(owner).typeId()); }
+        catch (IllegalArgumentException absent) { return false; }
     }
     public Demand requestDelivery(UUID id, UUID colony, UUID owner, ItemDescriptor item, long required,
                                   WorldPosition destination, List<StorageId> sources, long tick) {
@@ -399,6 +414,10 @@ public final class SupplyRegistry {
     }
     private boolean localDestination(Demand.Snapshot d, StockRegion slot) {
         if (d.goalKind() != Demand.GoalKind.CONSUMPTION) return false;
+        if (foodConsumer(d.id())) {
+            var subject = registry.citizen(registry.workBoard().work(d.ownerId()).subjectId());
+            return slot.storage().identity().equals(subject.citizenId()) && slot.storage().bindingEpoch() == subject.bindingEpoch();
+        }
         for (var registration : registry.storage().registrations()) if (registration.colonyId().equals(d.colonyId()) && registration.storages().contains(slot.storage())) {
             if (registration.positions().get(registration.storages().indexOf(slot.storage())).equals(d.destination())) return true;
         }
@@ -565,6 +584,18 @@ public final class SupplyRegistry {
                 || o.returnRequired() || hasCargo(orderId) || demand(s.demandId()).snapshot().status() == Demand.Status.CANCELLED) throw new IllegalStateException("Pickup no longer permitted");
         return prepare(s, cargo, maximum, tick, TransferKind.PICKUP);
     }
+    /** One real source-to-subject transfer becomes its consumption allocation, never a second replay. */
+    public PreparedTransfer prepareSelfPickup(UUID shareId, UUID orderId, StockRegion citizenSlot, int maximum, long tick) {
+        CoverageShare s = requiredShare(shareId); DeliveryOrder o = delivery(orderId);
+        var d = demand(s.demandId()).snapshot();
+        if (!foodConsumer(d.id()) || s.stage() != CoverageShare.Stage.RESERVED_STOCK || !orderId.equals(s.sourceOrderId())
+                || o.terminal() || o.returnRequired() || hasCargo(orderId) || d.status() == Demand.Status.CANCELLED)
+            throw new IllegalStateException("Self pickup no longer permitted");
+        var owner = registry.workBoard().work(d.ownerId()); var subject = registry.citizen(owner.subjectId());
+        if (!citizenSlot.storage().identity().equals(subject.citizenId()) || citizenSlot.storage().bindingEpoch() != subject.bindingEpoch()
+                || !subject.citizenId().equals(o.citizenId())) throw new IllegalArgumentException("Self pickup must reach the prescribed citizen");
+        return prepare(s, citizenSlot, maximum, tick, TransferKind.SELF_PICKUP);
+    }
     public PreparedTransfer prepareTransfer(UUID shareId, StockRegion destination, int maximum, long tick) {
         CoverageShare s = requiredShare(shareId);
         if (s.stage() != CoverageShare.Stage.IN_TRANSIT || delivery(s.sourceOrderId()).returnRequired()
@@ -576,23 +607,23 @@ public final class SupplyRegistry {
         if (s.stage() != CoverageShare.Stage.IN_TRANSIT || !delivery(s.sourceOrderId()).returnRequired()) throw new IllegalStateException("Cargo not returning");
         return prepare(s, buffer, maximum, tick, productionSurplus(s.demandId()) ? TransferKind.DELIVER : TransferKind.RETURN);
     }
-    private enum TransferKind { PICKUP, DELIVER, RETURN }
+    private enum TransferKind { PICKUP, SELF_PICKUP, DELIVER, RETURN }
     private PreparedTransfer prepare(CoverageShare share, StockRegion destination, int maximum, long tick, TransferKind kind) {
         var d = demand(share.demandId()).snapshot();
         if (maximum <= 0 || maximum > share.quantity()) throw new IllegalArgumentException("Invalid transfer maximum");
         if (productionSurplus(d.id()) && kind != TransferKind.PICKUP && registry.storage().registrations(d.colonyId()).stream()
                 .noneMatch(r -> r.slots().contains(destination) && surplusBuffer(d.colonyId(), r, share.slot().storage().dimension())))
             throw new IllegalArgumentException("Surplus must physically reach registered safe storage");
-        boolean retained = kind == TransferKind.PICKUP || kind == TransferKind.RETURN && d.status() != Demand.Status.CANCELLED
+        boolean retained = kind == TransferKind.PICKUP || kind == TransferKind.SELF_PICKUP || kind == TransferKind.RETURN && d.status() != Demand.Status.CANCELLED
                 || kind == TransferKind.DELIVER && d.goalKind() == Demand.GoalKind.CONSUMPTION;
         UUID resultId = fresh(), splitObligation = fresh(); AdmissionLedger.Lease extra = null;
         try {
             if (share.quantity() > 1 && (kind != TransferKind.RETURN || retained)) {
                 if (shares.size() >= MAX_SHARES) throw new IllegalArgumentException("Coverage envelope exceeded");
-                extra = admit(d.colonyId(), d.lane(), Resource.COVERAGE_SHARES);
+                extra = admit(d.colonyId(), relocationLane(share.slot(), d.lane()), Resource.COVERAGE_SHARES);
             }
             var physical = registry.storage().prepareMoveReservation(share.obligationId(), destination, splitObligation,
-                    kind == TransferKind.DELIVER, retained, maximum, tick);
+                    kind == TransferKind.DELIVER || kind == TransferKind.SELF_PICKUP, retained, maximum, tick);
             return new PreparedTransfer(share, d, delivery(share.sourceOrderId()), destination, maximum, kind, retained, resultId, extra, physical);
         } catch (RuntimeException failure) { if (extra != null) extra.close(); throw failure; }
     }
@@ -635,8 +666,9 @@ public final class SupplyRegistry {
             Map<UUID, CoverageShare> staged = new LinkedHashMap<>(shares); staged.remove(share.id());
             if (!full) staged.put(share.id(), resized(share, share.quantity() - moved));
             if (result != null) staged.put(id, result);
-            long delivered = kind == TransferKind.DELIVER ? Math.addExact(before.deliveredTotal(), moved) : before.deliveredTotal();
-            long transferred = kind == TransferKind.DELIVER ? Math.addExact(order.transferred(), moved) : order.transferred();
+            boolean reached = kind == TransferKind.DELIVER || kind == TransferKind.SELF_PICKUP;
+            long delivered = reached ? Math.addExact(before.deliveredTotal(), moved) : before.deliveredTotal();
+            long transferred = reached ? Math.addExact(order.transferred(), moved) : order.transferred();
             boolean cargoLeft = staged.values().stream().anyMatch(s -> order.id().equals(s.sourceOrderId()) && s.stage() == CoverageShare.Stage.IN_TRANSIT);
             if ((kind == TransferKind.RETURN || order.returnRequired()) && !cargoLeft) {
                 for (var old : List.copyOf(staged.values())) if (order.id().equals(old.sourceOrderId()) && old.stage() == CoverageShare.Stage.RESERVED_STOCK)
@@ -762,9 +794,17 @@ public final class SupplyRegistry {
         AdmissionLedger.Lease extra = null;
         var production=productions.get(d.ownerId()); if(production!=null && production.batchStarted()) throw new IllegalStateException("Begun production allocation cannot relocate");
         try {
-            if (s.quantity() > 1) { if (shares.size() >= MAX_SHARES) throw new IllegalArgumentException("Coverage envelope exceeded"); extra = admit(d.colonyId(), d.lane(), Resource.COVERAGE_SHARES); }
+            if (s.quantity() > 1) { if (shares.size() >= MAX_SHARES) throw new IllegalArgumentException("Coverage envelope exceeded"); extra = admit(d.colonyId(), relocationLane(s.slot(), d.lane()), Resource.COVERAGE_SHARES); }
             return new PreparedAllocationMove(s, d, destination, maximum, fresh(), extra, registry.storage().prepareMoveAllocation(s.obligationId(), destination, fresh(), true, true, maximum, tick));
         } catch (RuntimeException failure) { if (extra != null) extra.close(); throw failure; }
+    }
+    private Lane relocationLane(StockRegion source, Lane fallback) {
+        if (source.storage().bindingEpoch() > 0) {
+            try { var citizen = registry.citizen(source.storage().identity());
+                if (citizen.assignedWorkId() != null && registry.workBoard().work(citizen.assignedWorkId()).criticalService()) return Lane.CRITICAL;
+            } catch (IllegalArgumentException absent) { return fallback; }
+        }
+        return fallback;
     }
     public final class PreparedAllocationMove implements AutoCloseable {
         private final CoverageShare share; private final Demand.Snapshot before; private final StockRegion destination; private final int maximum; private final UUID split;
@@ -1093,7 +1133,11 @@ public final class SupplyRegistry {
         PreparedRestore prepared = new PreparedRestore(snapshot);
         try {
             for (var d : ds.values()) prepared.admitted.put(d.id(), replacement.reserve(d.colonyId(), d.lane(), Map.of(Resource.DEMANDS, 1)));
-            for (var s : staged.values()) prepared.admitted.put(s.id(), replacement.reserve(s.colonyId(), ds.get(s.demandId()).lane(), Map.of(Resource.COVERAGE_SHARES, 1)));
+            for (var s : staged.values()) {
+                Lane lane = s.obligationId() != null && as.containsKey(s.obligationId()) ? as.get(s.obligationId()).lane()
+                        : s.obligationId() != null && rs.containsKey(s.obligationId()) ? rs.get(s.obligationId()).lane() : ds.get(s.demandId()).lane();
+                prepared.admitted.put(s.id(), replacement.reserve(s.colonyId(), lane, Map.of(Resource.COVERAGE_SHARES, 1)));
+            }
             for (var p : ps.values()) prepared.admitted.put(p.id(), replacement.reserve(p.colonyId(), p.lane(), Map.of(Resource.DELIVERIES_AND_PRODUCTION_ORDERS, 1)));
             for (var l : ls.values()) prepared.admitted.put(l.id(), replacement.reserve(l.colonyId(), l.lane(), Map.of(Resource.DELIVERIES_AND_PRODUCTION_ORDERS, 1)));
         } catch (RuntimeException failure) { prepared.close(); throw failure; }
@@ -1110,7 +1154,7 @@ public final class SupplyRegistry {
             demands.clear(); snapshot.demands().forEach(s -> demands.put(s.id(), new Demand(s)));
             productions.clear(); productionIds.clear(); snapshot.productionOrders().forEach(p -> { productions.put(p.id(), p); productionIds.add(p.id()); });
             clearShares(); snapshot.shares().forEach(s -> putShare(s.id(), s)); dirtyObligations.clear();
-            deliveries.clear(); deliveryIds.clear(); deliveryOffsets.clear(); snapshot.deliveries().forEach(SupplyRegistry.this::addDelivery); snapshot = null;
+            deliveries.clear(); deliveryIds.clear(); deliveryOffsets.clear(); criticalDeliveryIds.clear(); criticalDeliveryOffsets.clear(); snapshot.deliveries().forEach(SupplyRegistry.this::addDelivery); snapshot = null;
         }
         @Override public void close() { registry.requireOwner(); if (snapshot != null) { admitted.values().forEach(AdmissionLedger.Lease::close); admitted.clear(); snapshot = null; } }
     }

@@ -172,7 +172,7 @@ public final class ProductionOutputRoutingGameTests {
             producer=(CitizenEntity)BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.parse("colonyloom:citizen")).create(level);
             if(producer==null) throw new IllegalStateException("Citizen unavailable");
             producer.initializeIdentity(citizen,1); producer.moveTo(start.getX()+0.5,start.getY(),start.getZ()+0.5,0,0);
-            core.registry().addCitizen(new CitizenRecord(citizen,colony,producer.getUUID(),1,null,workshop.id(),null,"colonyloom:carpenter",Map.of(),Map.of("food",20),CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.READY,0,Map.of("food",10000L),position(start),1),record -> {
+            core.registry().addCitizen(new CitizenRecord(citizen,colony,producer.getUUID(),1,null,workshop.id(),null,"colonyloom:carpenter",Map.of(),Map.of("food",20),CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.READY,0,Map.of("food",1200L),position(start),1),record -> {
                 if(!level.addFreshEntity(producer)) throw new IllegalStateException("Producer spawn refused");
             });
             core.bindings().observe(citizen,producer.getUUID(),1); producer.setQuarantined(false);
@@ -183,7 +183,7 @@ public final class ProductionOutputRoutingGameTests {
                 courier=(CitizenEntity)BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.parse("colonyloom:citizen")).create(level);
                 if(courier==null)throw new IllegalStateException("Courier unavailable");
                 courier.initializeIdentity(courierId,1);courier.moveTo(courierStart.getX()+0.5,courierStart.getY(),courierStart.getZ()+0.5,0,0);
-                core.registry().addCitizen(new CitizenRecord(courierId,colony,courier.getUUID(),1,null,null,null,"colonyloom:courier",Map.of(),Map.of("food",20),CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.READY,0,Map.of("food",10000L),position(courierStart),1),record -> {
+                core.registry().addCitizen(new CitizenRecord(courierId,colony,courier.getUUID(),1,null,null,null,"colonyloom:courier",Map.of(),Map.of("food",20),CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.READY,0,Map.of("food",1200L),position(courierStart),1),record -> {
                     if(!level.addFreshEntity(courier))throw new IllegalStateException("Courier spawn refused");
                 });
                 core.bindings().observe(courierId,courier.getUUID(),1);courier.setQuarantined(false);

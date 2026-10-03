@@ -11,8 +11,21 @@ import java.util.UUID;
 /** Evidence, not a transaction across Minecraft chunks, entities and colony SavedData. */
 public record EffectRecord(UUID operationId, UUID colonyId, UUID workId, UUID citizenId,
         long bindingEpoch, ActionContext.Kind kind, WorldPosition target, String expectedBlock,
-        String itemId, int countBefore, int countAfter, State state, long revision, Transfer transfer, Craft craft) {
+        String itemId, int countBefore, int countAfter, State state, long revision, Transfer transfer, Craft craft, Food food) {
     public enum State { PREPARED, OBSERVED, AMBIGUOUS, ACCEPTED }
+    public record Food(StockRegion slot, ItemDescriptor item, UUID shareId, UUID demandId,
+            int foodBefore, int foodAfter, long timerBefore, long timerAfter) {
+        public Food {
+            Objects.requireNonNull(slot); Objects.requireNonNull(item); Objects.requireNonNull(shareId); Objects.requireNonNull(demandId);
+            if (!item.itemId().equals("minecraft:bread") || foodBefore < 0 || foodBefore > 20 || foodAfter < 0 || foodAfter > 20
+                    || timerBefore < 0 || timerAfter < 0) throw new IllegalArgumentException("Invalid food evidence");
+        }
+        public boolean sameAttempt(Food next) {
+            return next != null && slot.equals(next.slot) && item.equals(next.item) && shareId.equals(next.shareId)
+                    && demandId.equals(next.demandId) && foodBefore == next.foodBefore && timerBefore == next.timerBefore;
+        }
+        public boolean unchanged() { return foodBefore == foodAfter && timerBefore == timerAfter; }
+    }
     /** Canonical physical participants and measured deltas, never a replayable inventory command. */
     public enum CraftPhase { PREPARED, INPUTS_CONSUMED, OUTPUT_INSERTED, FACT_OBSERVED }
     /** Exact canonical slot states; a changed component map remains evidence rather than being hidden. */
@@ -88,12 +101,6 @@ public record EffectRecord(UUID operationId, UUID colonyId, UUID workId, UUID ci
                     recipeId,recipeVersion,recipeDigest,sources,output,outputCount,destinations,nextPhase);
         }
     }
-    /** Non-craft physical actions have no recipe evidence. */
-    public EffectRecord(UUID operationId,UUID colonyId,UUID workId,UUID citizenId,long bindingEpoch,
-            ActionContext.Kind kind,WorldPosition target,String expectedBlock,String itemId,int countBefore,int countAfter,
-            State state,long revision,Transfer transfer) {
-        this(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,itemId,countBefore,countAfter,state,revision,transfer,null);
-    }
     public record Transfer(StockRegion source, StockRegion destination, ItemDescriptor item,
             int sourceBefore, int sourceAfter, int destinationBefore, int destinationAfter,
             int maximum, int extracted, int inserted, int returned) {
@@ -148,24 +155,35 @@ public record EffectRecord(UUID operationId, UUID colonyId, UUID workId, UUID ci
                 || countBefore!=craft.outputBefore() || countAfter!=craft.outputAfter()
                 || state==State.PREPARED && !craft.unchanged() || state==State.OBSERVED && !craft.complete()))
             throw new IllegalArgumentException("Craft evidence does not match physical effect");
+        if ((kind == ActionContext.Kind.FOOD_CONSUME) != (food != null) || food != null && (workId == null || transfer != null || craft != null
+                || !itemId.equals(food.item().itemId()) || !food.slot().storage().identity().equals(citizenId)
+                || food.slot().storage().bindingEpoch() != bindingEpoch || !food.slot().storage().dimension().equals(target.dimension())
+                || state == State.PREPARED && !food.unchanged()
+                || state == State.OBSERVED && (countBefore - countAfter != 1 || food.foodAfter() != Math.min(20, food.foodBefore() + 5) || food.timerBefore() != food.timerAfter())))
+            throw new IllegalArgumentException("Food evidence does not match physical consumption");
     }
     public EffectRecord observed(int after, boolean ambiguous) {
         return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,
-                itemId,countBefore,after,ambiguous ? State.AMBIGUOUS : State.OBSERVED,Math.incrementExact(revision),transfer,craft);
+                itemId,countBefore,after,ambiguous ? State.AMBIGUOUS : State.OBSERVED,Math.incrementExact(revision),transfer,craft,food);
     }
     public EffectRecord observedTransfer(Transfer fact, boolean ambiguous) {
         if (transfer == null || !transfer.sameAttempt(fact)) throw new IllegalArgumentException("Transfer attempt changed");
         return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,
-                itemId,countBefore,fact.sourceAfter(),ambiguous ? State.AMBIGUOUS : State.OBSERVED,Math.incrementExact(revision),fact,craft);
+                itemId,countBefore,fact.sourceAfter(),ambiguous ? State.AMBIGUOUS : State.OBSERVED,Math.incrementExact(revision),fact,craft,food);
     }
     public EffectRecord observedCraft(Craft fact,boolean ambiguous) {
         if(craft==null || !craft.sameAttempt(fact) || fact.phase().ordinal()<craft.phase().ordinal())
             throw new IllegalArgumentException("Craft attempt changed or phase rewound");
         return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,
-                itemId,countBefore,fact.outputAfter(),ambiguous?State.AMBIGUOUS:State.OBSERVED,Math.incrementExact(revision),transfer,fact);
+                itemId,countBefore,fact.outputAfter(),ambiguous?State.AMBIGUOUS:State.OBSERVED,Math.incrementExact(revision),transfer,fact,food);
+    }
+    public EffectRecord observedFood(Food fact, int after, boolean ambiguous) {
+        if (food == null || !food.sameAttempt(fact)) throw new IllegalArgumentException("Food attempt changed");
+        return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,
+                itemId,countBefore,after,ambiguous?State.AMBIGUOUS:State.OBSERVED,Math.incrementExact(revision),transfer,craft,fact);
     }
     public EffectRecord accepted() {
         return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,
-                itemId,countBefore,countAfter,State.ACCEPTED,Math.incrementExact(revision),transfer,craft);
+                itemId,countBefore,countAfter,State.ACCEPTED,Math.incrementExact(revision),transfer,craft,food);
     }
 }

@@ -36,7 +36,7 @@ public final class ConstructionPersistenceGameTests {
         var pin=blueprint(4);
         var evidence=List.of(effect(100,30,EffectRecord.State.PREPARED),effect(101,30,EffectRecord.State.OBSERVED),
                 effect(102,30,EffectRecord.State.AMBIGUOUS),effect(103,30,EffectRecord.State.ACCEPTED),
-                new EffectRecord(id(104),id(1),null,id(20),1,ActionContext.Kind.DEATH,position(),"vanilla_drops","minecraft:oak_stairs",4,0,EffectRecord.State.OBSERVED,1,null));
+                new EffectRecord(id(104),id(1),null,id(20),1,ActionContext.Kind.DEATH,position(),"vanilla_drops","minecraft:oak_stairs",4,0,EffectRecord.State.OBSERVED,1,null,null,null));
         var source=snapshot(pin,WorkOrder.State.PLANNED,false,false,evidence);
         var root=encode(helper,source);
         var encodedPin=root.getList("pinnedDefinitions",Tag.TAG_COMPOUND).getCompound(0);
@@ -151,10 +151,10 @@ public final class ConstructionPersistenceGameTests {
     public static void immutableEvidenceAndMonotonicConstructionRejectRewrites(GameTestHelper helper) {
         var pin=blueprint(4); var before=effect(100,30,EffectRecord.State.PREPARED);
         var registry=new ColonyRegistry(() -> {}); registry.restore(snapshot(pin,WorkOrder.State.PLANNED,false,false,List.of(before)));
-        var changed=new EffectRecord(before.operationId(),before.colonyId(),before.workId(),before.citizenId(),1,before.kind(),before.target(),"different_state",before.itemId(),4,3,EffectRecord.State.OBSERVED,1,null);
+        var changed=new EffectRecord(before.operationId(),before.colonyId(),before.workId(),before.citizenId(),1,before.kind(),before.target(),"different_state",before.itemId(),4,3,EffectRecord.State.OBSERVED,1,null,null,null);
         reject(helper,() -> registry.effects().update(changed),"Immutable expected state rewritten");
         var observed=before.observed(3,false); registry.effects().update(observed);
-        reject(helper,() -> registry.effects().update(new EffectRecord(observed.operationId(),observed.colonyId(),observed.workId(),observed.citizenId(),1,observed.kind(),observed.target(),observed.expectedBlock(),observed.itemId(),4,4,EffectRecord.State.PREPARED,2,null)),"Observed fact rewound");
+        reject(helper,() -> registry.effects().update(new EffectRecord(observed.operationId(),observed.colonyId(),observed.workId(),observed.citizenId(),1,observed.kind(),observed.target(),observed.expectedBlock(),observed.itemId(),4,4,EffectRecord.State.PREPARED,2,null,null,null)),"Observed fact rewound");
         var progressed=new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),1,1,1,1,false); registry.construction().update(progressed);
         reject(helper,() -> registry.construction().update(new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),1,2,1,2,false)),"Consumed material increased without progress");
         registry.construction().update(new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),1,1,1,2,true));
@@ -165,7 +165,7 @@ public final class ConstructionPersistenceGameTests {
     private static RegistrySnapshot snapshot(BlueprintDefinition pin,WorkOrder.State state,boolean assigned,boolean closed,List<EffectRecord> effects) {
         var colony=new ColonyRuntime(id(1),"Construction",new Territory("minecraft:overworld",0,0,63,63),id(10),Map.of(),0,0,false,null,false);
         var citizen=new CitizenRecord(id(20),id(1),id(21),1,null,null,assigned?id(30):null,"colonyloom:builder",Map.of(),Map.of("food",20),CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.UNKNOWN,0,Map.of(),position(),0);
-        var work=new WorkOrder.Snapshot(WorkOrder.CONSTRUCTION,id(30),id(1),position(),"colonyloom:builder",0,Lane.NORMAL,state,assigned?id(20):null,"construction",0,List.of(),WorkOrder.Reason.NONE,0,0);
+        var work=new WorkOrder.Snapshot(WorkOrder.CONSTRUCTION,id(30),id(1),position(),"colonyloom:builder",0,Lane.NORMAL,state,assigned?id(20):null,"construction",0,List.of(),WorkOrder.Reason.NONE,0,0,null,false);
         var site=new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),0,0,1,0,closed);
         var claims=closed?List.<io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot>of():List.of(new io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot(id(30),id(1),null,"minecraft:overworld",0,64,0,63,79,63,1));
         return new RegistrySnapshot(List.of(colony),List.of(citizen),List.of(),List.of(),List.of(),List.of(work),claims,effects,List.of(site),List.of(pin),io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty(),io.github.kpuctajluk.colonyloom.core.supply.SupplySnapshot.empty());
@@ -176,7 +176,7 @@ public final class ConstructionPersistenceGameTests {
         return BlueprintDefinition.create("colonyloom:test_persistence",1,blocks,Map.of("work_origin",new BlockOffset(0,0,1)));
     }
     private static BlockDescriptor stairs() { return new BlockDescriptor("minecraft:oak_stairs",Map.of("facing","north","half","bottom","shape","straight","waterlogged","false"),"minecraft:oak_stairs"); }
-    private static EffectRecord effect(long operation,long work,EffectRecord.State state) { return new EffectRecord(id(operation),id(1),id(work),id(20),1,ActionContext.Kind.BLOCK_PLACE,position(),"north_bottom_straight","minecraft:oak_stairs",4,state==EffectRecord.State.PREPARED?4:3,state,0,null); }
+    private static EffectRecord effect(long operation,long work,EffectRecord.State state) { return new EffectRecord(id(operation),id(1),id(work),id(20),1,ActionContext.Kind.BLOCK_PLACE,position(),"north_bottom_straight","minecraft:oak_stairs",4,state==EffectRecord.State.PREPARED?4:3,state,0,null,null,null); }
     private static UUID id(long value) { return new UUID(0,value); }
     private static WorldPosition position() { return new WorldPosition("minecraft:overworld",0,64,0); }
     private static CompoundTag encode(GameTestHelper helper,RegistrySnapshot snapshot) { return ColonySavedData.empty(snapshot).save(new CompoundTag(),helper.getLevel().registryAccess()); }

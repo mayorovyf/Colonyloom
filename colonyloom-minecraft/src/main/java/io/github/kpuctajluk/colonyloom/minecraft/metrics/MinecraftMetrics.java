@@ -36,6 +36,8 @@ public final class MinecraftMetrics {
                 resources.put(resource.name(),data);
             }
             result.put("admission",resources);
+            result.put("criticalCapacityViolations",admission.criticalCapacityViolations());
+            result.put("normalAdmissionBlocked",admission.normalAdmissionBlocked());
             result.put("pins",core.registry().construction().pinDiagnostics());
             result.put("fairnessScope","serviceCount is actual timer progression or physical-executor invocation (which may enter a resource wait), not proof of completion. maxServiceGap includes idle intervals. Per-work ready delay and continuously-ready colony dispatch delay are separate; the200tick barrier applies to colony dispatch. Diagnostics scan bounded admitted state only at report/command boundaries.");
             result.put("evidenceRecords",core.registry().effects().size());
@@ -43,7 +45,7 @@ public final class MinecraftMetrics {
             if(runtime.navigation()!=null) result.put("navigation",runtime.navigation().diagnostics());
             result.put("navigationBackend",runtime.navigationBackendMetrics());
             result.put("timingScopes",timingScopes());
-            result.put("futureMetrics","graph/native storage timings implemented; counts remain experimental pending full profile calibration. Views/critical food chains not implemented. Supported pending-production migration preserves its original checkpoint. No JVM allocation profiler attached. No separable broad vanilla world block-change timer.");
+            result.put("futureMetrics","graph/native storage timings implemented; counts remain experimental pending full profile calibration. Views not implemented. Supported pending-production migration preserves its original checkpoint. No JVM allocation profiler attached. No separable broad vanilla world block-change timer.");
         }
         Map<String,Long> citizens=new LinkedHashMap<>();
         for(var citizen:core.registry().citizensView()) {
@@ -51,6 +53,9 @@ public final class MinecraftMetrics {
             citizens.merge("lifecycle."+citizen.lifecycle().name(),1L,Long::sum);
             citizens.merge("readiness."+citizen.readiness().name(),1L,Long::sum);
             citizens.merge("admission."+citizen.admission().name(),1L,Long::sum);
+            if(citizen.needs().get("food")<=6)citizens.merge("hunger.lowFood",1L,Long::sum);
+            if(citizen.needs().get("food")==0)citizens.merge("hunger.starved",1L,Long::sum);
+            if(runtime.needs()!=null)citizens.merge("hunger.reason."+runtime.needs().reason(citizen.citizenId()).name(),1L,Long::sum);
         }
         result.put("citizens",citizens);
         return Map.copyOf(result);
@@ -63,7 +68,7 @@ public final class MinecraftMetrics {
         scopes.put("NAVIGATION_UNIT","one backend portion, at most 256 A* expansions; inclusive external checks, not whole query or navigation tick");
         scopes.put("NAVIGATION_EXTERNAL","one bounded backend.search portion including collision/support checks and final bounded route construction; exact noninterruptible max separately visible");
         scopes.put("BLUEPRINT_UNIT","one spatial claim comparison portion or one construction target matches call");
-        scopes.put("PHYSICAL_UNIT","one placement executor call, inclusive validation, item interaction, block aftermath and verification");
+        scopes.put("PHYSICAL_UNIT","one native placement, transfer, craft or food executor call, inclusive validation and observed aftermath");
         scopes.put("CHUNK_UNIT","one ticket acquire call; same scope as CHUNK_EXTERNAL because ticket API exposes no separable internal portion");
         scopes.put("DIRTY_RESCAN_UNIT","one scheduler dirty root rescan or one citizen-admission cursor portion");
         scopes.put("GRAPH_UNIT","one admitted lazy DFS expansion including at most16 indexed candidate checks; not entire root planning or kit admission");

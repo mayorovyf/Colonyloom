@@ -95,7 +95,7 @@ final class IdentityPlatform {
             bridge.persistence().ensureSessionDirty();
             int before=0; for(int slot=0;slot<CitizenEntity.INVENTORY_SIZE;slot++) before+=citizen.inventory().getItem(slot).getCount();
             var inventory=new net.minecraft.nbt.CompoundTag(); net.minecraft.world.ContainerHelper.saveAllItems(inventory,citizen.inventory().getItems(),server.registryAccess());
-            var effect=new io.github.kpuctajluk.colonyloom.core.action.EffectRecord(UUID.randomUUID(),record.colonyId(),record.assignedWorkId(),record.citizenId(),record.bindingEpoch(),io.github.kpuctajluk.colonyloom.core.action.ActionContext.Kind.DEATH,position((ServerLevel)citizen.level(),citizen.blockPosition()),"inventoryHash:"+Integer.toHexString(inventory.hashCode()),"colonyloom:inventory",before,before,io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.PREPARED,0,null);
+            var effect=new io.github.kpuctajluk.colonyloom.core.action.EffectRecord(UUID.randomUUID(),record.colonyId(),record.assignedWorkId(),record.citizenId(),record.bindingEpoch(),io.github.kpuctajluk.colonyloom.core.action.ActionContext.Kind.DEATH,position((ServerLevel)citizen.level(),citizen.blockPosition()),"inventoryHash:"+Integer.toHexString(inventory.hashCode()),"colonyloom:inventory",before,before,io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.PREPARED,0,null,null,null);
             bridge.core().registry().effects().prepare(effect,io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);
             citizen.observeDeathInventory(remaining -> {
                 try {

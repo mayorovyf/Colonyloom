@@ -47,9 +47,11 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
     private final java.util.function.Supplier<UUID> checkpoint;
     private final Map<UUID,Active> active=new HashMap<>();
     private final MinecraftConstructionSupply supply;
+    private final io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService storage;
     private NavigationService navigation;
     public MinecraftConstructionService(net.minecraft.server.MinecraftServer server,ColonyRegistry registry,ConstructionController controller,ChunkDemandManager chunks,BlockPlacementExecutor placement,java.util.function.Supplier<UUID> checkpoint,io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService storage,io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor transfer) {
         this.registry=registry; this.controller=controller; this.chunks=chunks; this.placement=placement; this.checkpoint=java.util.Objects.requireNonNull(checkpoint);
+        this.storage=java.util.Objects.requireNonNull(storage);
         this.supply=new MinecraftConstructionSupply(server,registry,storage,transfer,placement);
     }
     public void navigation(NavigationService navigation) { registry.requireOwner(); if(this.navigation!=null) throw new IllegalStateException("Navigation already attached"); this.navigation=navigation; }
@@ -95,7 +97,7 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         if(allocation==null) {
             var buffered=supply.buffered(work,state.materials,target.expected().itemId());
             if(buffered==null) {waitFor(work,WorkOrder.Reason.MATERIALS);return;}
-            var buffer=supply.buffer(work,state.layout);
+            var buffer=storage.locate(buffered.slot().storage());
             if(buffer==null) {waitFor(work,WorkOrder.Reason.RECONCILING);return;}
             var pickup=new WorldPosition(buffer.dimension(),buffer.x(),buffer.y(),buffer.z()+1);
             if(!pickup.equals(state.waypoint)) {navigation.cancel(work.id());state.waypoint=pickup;state.generation++;state.lastCursor=-1;state.arrived=false;}
@@ -129,7 +131,7 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         try(consumption) {
         var colony=registry.colony(work.colonyId());
         var context=new ActionContext(work.colonyId(),citizen.citizenId(),ActionContext.Kind.BLOCK_PLACE,target.position(),ActionContext.AuthorityMode.COLONY,site.initiatorId(),colony.authorityRevision());
-        var effect=new EffectRecord(UUID.randomUUID(),work.colonyId(),work.id(),citizen.citizenId(),citizen.bindingEpoch(),ActionContext.Kind.BLOCK_PLACE,target.position(),MinecraftConstructionGeometry.state(target.expected()).toString(),target.expected().itemId(),before,before,EffectRecord.State.PREPARED,0,null);
+        var effect=new EffectRecord(UUID.randomUUID(),work.colonyId(),work.id(),citizen.citizenId(),citizen.bindingEpoch(),ActionContext.Kind.BLOCK_PLACE,target.position(),MinecraftConstructionGeometry.state(target.expected()).toString(),target.expected().itemId(),before,before,EffectRecord.State.PREPARED,0,null,null,null);
         try { registry.effects().prepare(effect,work.lane()); } catch(AdmissionLedger.AdmissionException denied) { waitFor(work,WorkOrder.Reason.STATE_LIMIT); return; }
         // The verified session-dirty marker is durable already; this evidence joins ordinary SavedData checkpoints.
         // No observer saves implicitly, so fault fixtures can deliberately persist only one physical side.

@@ -25,7 +25,8 @@ public final class EffectRegistry {
         if (records.size()>=MAX_RECORDS || records.containsKey(effect.operationId()) || registry.usedId(effect.operationId()))
             throw new IllegalArgumentException("Physical evidence identity or envelope unavailable");
         if (effect.state()!=EffectRecord.State.PREPARED || effect.revision()!=0 || effect.countBefore()!=effect.countAfter()
-                || effect.transfer()!=null && !effect.transfer().unchanged() || effect.craft()!=null && !effect.craft().unchanged())
+                || effect.transfer()!=null && !effect.transfer().unchanged() || effect.craft()!=null && !effect.craft().unchanged()
+                || effect.food()!=null && !effect.food().unchanged())
             throw new IllegalArgumentException("Effect must start prepared and unchanged");
         var citizen=registry.citizen(effect.citizenId());
         if (!citizen.colonyId().equals(effect.colonyId()) || citizen.bindingEpoch()!=effect.bindingEpoch()) throw new IllegalArgumentException("Effect binding mismatch");
@@ -43,16 +44,17 @@ public final class EffectRegistry {
                 || (old.transfer()==null ? effect.transfer()!=null : !old.transfer().sameAttempt(effect.transfer()))
                 || (old.craft()==null ? effect.craft()!=null : !old.craft().sameAttempt(effect.craft())
                         || old.craft().phase().ordinal()>effect.craft().phase().ordinal())
+                || (old.food()==null ? effect.food()!=null : !old.food().sameAttempt(effect.food()))
                 || !validTransition(old,effect))
             throw new IllegalArgumentException("Effect evidence changed identity or revision");
         registry.beforeMutation(); records.put(effect.operationId(),effect);
     }
     private static boolean validTransition(EffectRecord old,EffectRecord next) {
-        if (old.state()!=EffectRecord.State.PREPARED && (!Objects.equals(old.transfer(),next.transfer()) || !Objects.equals(old.craft(),next.craft()))) return false;
+        if (old.state()!=EffectRecord.State.PREPARED && (!Objects.equals(old.transfer(),next.transfer()) || !Objects.equals(old.craft(),next.craft()) || !Objects.equals(old.food(),next.food()))) return false;
         return switch(old.state()) {
             case PREPARED -> next.state()==EffectRecord.State.OBSERVED || next.state()==EffectRecord.State.AMBIGUOUS
                     || next.state()==EffectRecord.State.ACCEPTED && old.countAfter()==next.countAfter()
-                            && Objects.equals(old.transfer(),next.transfer()) && Objects.equals(old.craft(),next.craft());
+                            && Objects.equals(old.transfer(),next.transfer()) && Objects.equals(old.craft(),next.craft()) && Objects.equals(old.food(),next.food());
             case OBSERVED -> (next.state()==EffectRecord.State.AMBIGUOUS || next.state()==EffectRecord.State.ACCEPTED) && old.countAfter()==next.countAfter();
             case AMBIGUOUS -> next.state()==EffectRecord.State.ACCEPTED && old.countAfter()==next.countAfter();
             case ACCEPTED -> false;
@@ -89,7 +91,7 @@ public final class EffectRegistry {
         try {
             for(var effect:saved) {
                 if(staged.putIfAbsent(effect.operationId(),effect)!=null) throw new IllegalArgumentException("Duplicate effect");
-                admitted.put(effect.operationId(),replacement.reserve(effect.colonyId(),Lane.NORMAL,Map.of(Resource.EVIDENCE,1)));
+                admitted.put(effect.operationId(),replacement.reserve(effect.colonyId(),effect.food() != null ? Lane.CRITICAL : Lane.NORMAL,Map.of(Resource.EVIDENCE,1)));
             }
         } catch(RuntimeException failure) { admitted.values().forEach(AdmissionLedger.Lease::close); throw failure; }
         return new PreparedRestore(staged,admitted);

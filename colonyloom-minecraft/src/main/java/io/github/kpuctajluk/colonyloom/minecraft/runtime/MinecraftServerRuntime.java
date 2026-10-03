@@ -28,6 +28,8 @@ public final class MinecraftServerRuntime {
     private io.github.kpuctajluk.colonyloom.core.supply.SupplyPlanner supplyPlanner;
     private io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftDeliveryService deliveryService;
     private io.github.kpuctajluk.colonyloom.minecraft.production.MinecraftProductionService productionService;
+    private io.github.kpuctajluk.colonyloom.gameplay.needs.NeedsController needs;
+    private io.github.kpuctajluk.colonyloom.minecraft.needs.MinecraftNeedsService needsService;
     private java.util.Map<String,io.github.kpuctajluk.colonyloom.gameplay.production.ProcessDefinition> processes=java.util.Map.of();
     private long metricsTickStart;
     public void metricsTickStarted() { runtime.requireOwnerThread(); metricsTickStart=System.nanoTime(); }
@@ -89,12 +91,13 @@ public final class MinecraftServerRuntime {
         configureSupply();
     }
     public io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService storage() { runtime.requireOwnerThread(); return storage; }
+    public io.github.kpuctajluk.colonyloom.gameplay.needs.NeedsController needs() {runtime.requireOwnerThread();return needs;}
     private void configureSupply() {
         if(storage==null)return;
         if(supplyPlanner==null)supplyPlanner=new io.github.kpuctajluk.colonyloom.core.supply.SupplyPlanner(runtime.registry(),runtime.registry().supply(),runtime.budgets());
         supplyPlanner.configure(new io.github.kpuctajluk.colonyloom.gameplay.production.ProductionCatalog(runtime.registry(),processes),new io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftSupplyAccess(runtime.registry(),storage));
         runtime.commands().delivery(new io.github.kpuctajluk.colonyloom.gameplay.logistics.DeliveryController(runtime.registry(),new io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftDeliveryAccess(runtime.registry(),storage)));
-        runtime.registry().setAfterRestore(() -> {runtime.scheduler().rebuild();supplyPlanner.rebuild();});
+        runtime.registry().setAfterRestore(() -> {runtime.scheduler().rebuild();supplyPlanner.rebuild();if(needs!=null)needs.rebuild();});
     }
     public void configurePhysical(io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager.ChunkAccess access,
             io.github.kpuctajluk.colonyloom.minecraft.construction.BlockPlacementExecutor.ItemInteraction interaction,
@@ -102,7 +105,9 @@ public final class MinecraftServerRuntime {
             io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor.Protection transferProtection,
             io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor.FaultObserver transferObserver,
             io.github.kpuctajluk.colonyloom.minecraft.production.RecipeExecutor.Protection recipeProtection,
-            io.github.kpuctajluk.colonyloom.minecraft.production.RecipeExecutor.FaultObserver recipeObserver) {
+            io.github.kpuctajluk.colonyloom.minecraft.production.RecipeExecutor.FaultObserver recipeObserver,
+            io.github.kpuctajluk.colonyloom.minecraft.needs.FoodConsumptionExecutor.Protection foodProtection,
+            io.github.kpuctajluk.colonyloom.minecraft.needs.FoodConsumptionExecutor.FaultObserver foodObserver) {
         runtime.requireOwnerThread();
         if (chunks != null) throw new IllegalStateException("Physical services already configured");
         chunks = new io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager(runtime.registry(), runtime.budgets(), access);
@@ -110,10 +115,13 @@ public final class MinecraftServerRuntime {
         var transfer=new io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor(server,runtime.registry(),storage,transferProtection,persistence::checkpointId,transferObserver);
         constructionService=new io.github.kpuctajluk.colonyloom.minecraft.construction.MinecraftConstructionService(server,runtime.registry(),construction,chunks,placement,persistence::checkpointId,storage,transfer);
         deliveryService=new io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftDeliveryService(server,runtime.registry(),storage,transfer,chunks);
+        var foodExecutor=new io.github.kpuctajluk.colonyloom.minecraft.needs.FoodConsumptionExecutor(server,runtime.registry(),storage,foodProtection,persistence::checkpointId,foodObserver);
+        needsService=new io.github.kpuctajluk.colonyloom.minecraft.needs.MinecraftNeedsService(runtime.registry(),storage,deliveryService,foodExecutor);
+        needs=new io.github.kpuctajluk.colonyloom.gameplay.needs.NeedsController(runtime.registry(),needsService);needsService.needs(needs);
         var recipeExecutor=new io.github.kpuctajluk.colonyloom.minecraft.production.RecipeExecutor(server,runtime.registry(),storage,recipeProtection,persistence::checkpointId,recipeObserver);
         productionService=new io.github.kpuctajluk.colonyloom.minecraft.production.MinecraftProductionService(runtime.registry(),storage,recipeExecutor,chunks);
         io.github.kpuctajluk.colonyloom.core.navigation.NavigationService.GoalAuthority goals=(work,request) ->
-                io.github.kpuctajluk.colonyloom.core.work.WorkOrder.DELIVERY.equals(work.typeId())?deliveryService.current(work,request):
+                (work.criticalService()||io.github.kpuctajluk.colonyloom.core.work.WorkOrder.DELIVERY.equals(work.typeId()))?deliveryService.current(work,request):
                 io.github.kpuctajluk.colonyloom.core.work.WorkOrder.PRODUCTION.equals(work.typeId())?productionService.current(work,request):constructionService.current(work,request);
         navigationBackend = new io.github.kpuctajluk.colonyloom.minecraft.navigation.MinecraftNavigationBackend(server, runtime.registry(), chunks,goals);
         navigation = new io.github.kpuctajluk.colonyloom.core.navigation.NavigationService(runtime.registry(), runtime.budgets(), chunks,navigationBackend,goals);
@@ -123,6 +131,7 @@ public final class MinecraftServerRuntime {
         runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.PRODUCTION,productionService);
         runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.DELIVERY,deliveryService);
         runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.CONSTRUCTION,constructionService);
+        runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.FOOD,needsService);
         citizens = new CitizenAdmissionService(server, runtime, chunks);
         runtime.scheduler().beforeWork(tick -> {
             // Rotate every physical consumer, including stock, under the same guard.
@@ -134,6 +143,7 @@ public final class MinecraftServerRuntime {
             }
             runtime.registry().targetClaims().tick();
             runtime.registry().supply().reconcile(tick,runtime.budgets());
+            needs.tick(tick);
             if(supplyPlanner!=null)supplyPlanner.tick(tick);
             if(deliveryService!=null)deliveryService.tick(tick);
             if(productionService!=null)productionService.tick();

@@ -29,5 +29,5 @@ public final class MinecraftDeliveryAccess implements DeliveryController.Port {
                 .orElseThrow(() -> new IllegalStateException("Register return buffer before deliveries"));
         registration(colony,buffer.address());
     }
-    @Override public long tick() {return registry.budgets().tick();}
+    @Override public long tick() {return Math.max(0,registry.budgets().tick());}
 }

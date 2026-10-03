@@ -65,11 +65,22 @@ public final class WorkBoard {
     public WorkOrder createProduction(UUID id, UUID colony, WorldPosition target, String profession, int priority, Lane lane) {
         return create(id, colony, target, profession, priority, lane, WorkOrder.PRODUCTION, "production", 0);
     }
+    public WorkOrder createFood(UUID id, UUID citizenId) {
+        CitizenRecord citizen = registry.citizen(citizenId);
+        return create(id, citizen.colonyId(), citizen.lastKnownPosition(), null, 10, Lane.CRITICAL, WorkOrder.FOOD, "food", 0, citizenId);
+    }
+    public WorkOrder createCitizenDelivery(UUID id, UUID citizenId, WorldPosition target, int priority, Lane lane) {
+        CitizenRecord citizen = registry.citizen(citizenId);
+        return create(id, citizen.colonyId(), target, null, priority, lane, WorkOrder.DELIVERY, "delivery", 0, citizenId);
+    }
     private WorkOrder create(UUID id, UUID colony, WorldPosition target, String profession, int priority, Lane lane, String type, String stage, long duration) {
+        return create(id, colony, target, profession, priority, lane, type, stage, duration, null);
+    }
+    private WorkOrder create(UUID id, UUID colony, WorldPosition target, String profession, int priority, Lane lane, String type, String stage, long duration, UUID subjectId) {
         registry.requireOwner();
         if (!registry.colony(colony).territory().contains(target) || works.containsKey(id) || registry.usedId(id)) throw new IllegalArgumentException("Invalid work identity or target");
         if (registry.colony(colony).recoveryBlocked() || registry.colony(colony).contentBlocked()) throw new IllegalStateException("Colony unavailable");
-        WorkOrder value = WorkOrder.restore(new WorkOrder.Snapshot(type,id,colony,target,profession,priority,lane,WorkOrder.State.PLANNED,null,stage,0,List.of(),WorkOrder.Reason.NONE,duration,0));
+        WorkOrder value = WorkOrder.restore(new WorkOrder.Snapshot(type,id,colony,target,profession,priority,lane,WorkOrder.State.PLANNED,null,stage,0,List.of(),WorkOrder.Reason.NONE,duration,0,subjectId,false));
         Lease lease = ledger.reserveRoot(colony,lane,ROOT);
         try { registry.beforeMutation(); } catch (RuntimeException failure) { lease.close(); throw failure; }
         works.put(id,value); leases.put(id,lease); changed.accept(id); return value;
@@ -102,8 +113,8 @@ public final class WorkBoard {
         try {
             for (WorkOrder value : staged.values()) {
                 WorkOrder old = works.get(value.id());
-                if (replacement == ledger && old != null && old.colonyId().equals(value.colonyId()) && old.lane() == value.lane() && old.dependencies().equals(value.dependencies()) && old.terminal() == value.terminal()) admitted.put(value.id(),leases.get(value.id()));
-                else admitted.put(value.id(),value.terminal() ? replacement.reserve(value.colonyId(),value.lane(),TERMINAL) : replacement.reserveRoot(value.colonyId(),value.lane(),value.dependencies().isEmpty() ? ROOT : Map.of(Resource.WORKS,1,Resource.WAIT_REGISTRATIONS,1+value.dependencies().size())));
+                if (replacement == ledger && old != null && old.colonyId().equals(value.colonyId()) && old.admissionLane() == value.admissionLane() && old.dependencies().equals(value.dependencies()) && old.terminal() == value.terminal()) admitted.put(value.id(),leases.get(value.id()));
+                else admitted.put(value.id(),value.terminal() ? replacement.reserve(value.colonyId(),value.admissionLane(),TERMINAL) : replacement.reserveRoot(value.colonyId(),value.admissionLane(),value.dependencies().isEmpty() ? ROOT : Map.of(Resource.WORKS,1,Resource.WAIT_REGISTRATIONS,1+value.dependencies().size())));
             }
         } catch (RuntimeException failure) {
             for (Map.Entry<UUID,Lease> entry : admitted.entrySet()) if (entry.getValue() != leases.get(entry.getKey())) entry.getValue().close();
@@ -168,6 +179,8 @@ public final class WorkBoard {
     }
     public boolean assign(UUID id, UUID citizenId) {
         WorkOrder value = work(id); CitizenRecord citizen = registry.citizen(citizenId);
+        if (value.subjectId() != null && !value.subjectId().equals(citizenId) || !allowsOrdinaryWork(value, citizen)) return false;
+        if (value.subjectId() == null && !value.criticalService() && foodPending(citizenId)) return false;
         var delivery = registry.supply().deliveryForWork(id);
         if (delivery != null && registry.supply().hasCargo(delivery.id()) && !citizenId.equals(delivery.citizenId())) return false;
         if (value.state() != WorkOrder.State.READY || citizen.assignedWorkId() != null || !citizen.colonyId().equals(value.colonyId()) || citizen.lifecycle() != CitizenRecord.Lifecycle.ALIVE || citizen.admission() != CitizenRecord.Admission.ACTIVE || citizen.readiness() != CitizenRecord.Readiness.READY) return false;
@@ -181,6 +194,33 @@ public final class WorkBoard {
     public void releaseAssignment(UUID id) {
         WorkOrder value = work(id); if (value.assignee() == null) return;
         transition(id,WorkOrder.State.WAITING,WorkOrder.Reason.RECONCILING,value.stage());
+    }
+    /** Urgency changes never cancel the ordinary consumer or discard its physical obligations. */
+    public boolean requestFoodPreemption(UUID citizenId) {
+        CitizenRecord citizen = registry.citizen(citizenId);
+        if (citizen.assignedWorkId() == null) return true;
+        WorkOrder current = work(citizen.assignedWorkId());
+        if (current.subjectId() != null && current.subjectId().equals(citizenId)) return true;
+        var delivery = registry.supply().deliveryForWork(current.id());
+        boolean cargo = delivery != null && registry.supply().hasCargo(delivery.id());
+        for (var share : registry.supply().shares()) if (share.stage() == io.github.kpuctajluk.colonyloom.core.supply.CoverageShare.Stage.ALLOCATED
+                && share.slot().storage().identity().equals(citizenId) && share.slot().storage().bindingEpoch() == citizen.bindingEpoch()) cargo = true;
+        if (cargo) {
+            if (!current.criticalService()) { registry.beforeMutation(); current.criticalService(true); changed.accept(current.id()); }
+            if (delivery != null && registry.supply().hasCargo(delivery.id())) registry.supply().returnDelivery(delivery.id());
+            return false;
+        }
+        if (current.criticalService()) { registry.beforeMutation(); current.criticalService(false); changed.accept(current.id()); }
+        transition(current.id(), WorkOrder.State.WAITING, citizen.food() == 0 ? WorkOrder.Reason.MATERIALS : WorkOrder.Reason.WORKER, current.stage());
+        return true;
+    }
+    public static boolean allowsOrdinaryWork(WorkOrder work, CitizenRecord citizen) {
+        return citizen.food() > 0 || work.criticalService() || work.subjectId() != null && work.subjectId().equals(citizen.citizenId());
+    }
+    public boolean foodPending(UUID citizenId) {
+        registry.requireOwner();
+        for (WorkOrder work : works.values()) if (WorkOrder.FOOD.equals(work.typeId()) && !work.terminal() && citizenId.equals(work.subjectId())) return true;
+        return false;
     }
     /** Called by registry before replacing a citizen that clears its old assignment. No recursive registry write. */
     public void citizenDetached(UUID citizenId) {
@@ -209,6 +249,7 @@ public final class WorkBoard {
     public void retire(UUID id) {
         WorkOrder value = work(id);
         if (!value.terminal() || !(WorkOrder.ACTIVE_WAIT.equals(value.typeId()) || WorkOrder.MOVE.equals(value.typeId())
+                || WorkOrder.FOOD.equals(value.typeId()) && registry.supply().demands().stream().noneMatch(d -> d.snapshot().ownerId().equals(id))
                 || WorkOrder.CONSTRUCTION.equals(value.typeId()) && registry.construction().site(id)==null
                 || WorkOrder.DELIVERY.equals(value.typeId()) && !registry.supply().hasDeliveryWork(id)
                 || WorkOrder.PRODUCTION.equals(value.typeId()) && registry.supply().productionForWork(id) == null)) throw new IllegalStateException("Work has retained obligations");

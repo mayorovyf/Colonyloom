@@ -14,6 +14,7 @@ public final class WorkOrder {
     public static final String CONSTRUCTION = "colonyloom:construction";
     public static final String DELIVERY = "colonyloom:delivery";
     public static final String PRODUCTION = "colonyloom:production";
+    public static final String FOOD = "colonyloom:food";
     public static final int MAX_DEPENDENCIES = 16;
     public enum State { PLANNED, READY, ASSIGNED, RUNNING, WAITING, COMPLETED, CANCELLED, FAILED }
     public enum Reason { NONE, MATERIALS, TOOL, WORKER, CAPACITY, UNREACHABLE, CHUNK_NOT_READY,
@@ -23,7 +24,7 @@ public final class WorkOrder {
     public record Snapshot(String typeId, UUID id, UUID colonyId, WorldPosition target,
             String professionId, int priority, Lane lane, State state, UUID assignee,
             String stage, long revision, List<UUID> dependencies, Reason waitingReason,
-            long remainingActiveTicks, long ageActiveTicks) {
+            long remainingActiveTicks, long ageActiveTicks, UUID subjectId, boolean criticalService) {
         public Snapshot {
             Objects.requireNonNull(typeId, "typeId");
             ProfessionDefinition.validateId(typeId);
@@ -46,6 +47,8 @@ public final class WorkOrder {
                 throw new IllegalArgumentException("Work state cannot hold an assignment");
             if (state == State.WAITING && waitingReason == Reason.NONE)
                 throw new IllegalArgumentException("Waiting work has no reason");
+            if (FOOD.equals(typeId) && (subjectId == null || lane != Lane.CRITICAL || professionId != null)
+                    || subjectId != null && assignee != null && !subjectId.equals(assignee)) throw new IllegalArgumentException("Invalid prescribed work subject");
         }
     }
     private final String typeId;
@@ -54,6 +57,8 @@ public final class WorkOrder {
     private final String professionId;
     private final Lane lane;
     private final List<UUID> dependencies;
+    private final UUID subjectId;
+    private boolean criticalService;
     private int priority;
     private State state;
     private UUID assignee;
@@ -67,14 +72,18 @@ public final class WorkOrder {
         professionId = value.professionId(); priority = value.priority(); lane = value.lane(); state = value.state();
         assignee = value.assignee(); stage = value.stage(); revision = value.revision(); dependencies = value.dependencies();
         waitingReason = value.waitingReason(); remainingActiveTicks = value.remainingActiveTicks(); ageActiveTicks = value.ageActiveTicks();
+        subjectId = value.subjectId(); criticalService = value.criticalService();
     }
     public static WorkOrder restore(Snapshot value) { return new WorkOrder(Objects.requireNonNull(value)); }
     public Snapshot snapshot() { return snapshot(ageActiveTicks); }
     Snapshot snapshot(long age) { return snapshot(age,remainingActiveTicks); }
-    Snapshot snapshot(long age, long remaining) { return new Snapshot(typeId,id,colonyId,target,professionId,priority,lane,state,assignee,stage,revision,dependencies,waitingReason,remaining,age); }
+    Snapshot snapshot(long age, long remaining) { return new Snapshot(typeId,id,colonyId,target,professionId,priority,lane,state,assignee,stage,revision,dependencies,waitingReason,remaining,age,subjectId,criticalService); }
     public String typeId() { return typeId; } public UUID id() { return id; } public UUID colonyId() { return colonyId; }
     public WorldPosition target() { return target; } public String professionId() { return professionId; }
-    public int priority() { return priority; } public Lane lane() { return lane; } public State state() { return state; }
+    public int priority() { return priority; } public Lane lane() { return criticalService ? Lane.CRITICAL : lane; } public State state() { return state; }
+    public Lane admissionLane() { return lane; }
+    public UUID subjectId() { return subjectId; }
+    public boolean criticalService() { return criticalService; }
     public UUID assignee() { return assignee; } public String stage() { return stage; } public long revision() { return revision; }
     public List<UUID> dependencies() { return dependencies; } public Reason waitingReason() { return waitingReason; }
     public long remainingActiveTicks() { return remainingActiveTicks; } public long ageActiveTicks() { return ageActiveTicks; }
@@ -85,6 +94,7 @@ public final class WorkOrder {
     void acknowledge(long value) { processedRevision = Math.max(processedRevision, value); dirty = revision > processedRevision; }
     void priority(int value) { priority = value; invalidate(); }
     void assignment(UUID value) { assignee = value; invalidate(); }
+    void criticalService(boolean value) { criticalService = value; invalidate(); }
     void transition(State next, Reason reason, String nextStage) {
         if (terminal() && next != state) throw new IllegalStateException("Terminal work cannot transition");
         boolean allowed = next == state || terminal(next) || switch (state) {

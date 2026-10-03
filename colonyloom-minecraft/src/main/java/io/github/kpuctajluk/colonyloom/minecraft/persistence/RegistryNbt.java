@@ -68,7 +68,7 @@ final class RegistryNbt {
             for (Tag element : entries) {
                 CompoundTag entry = (CompoundTag) element;
                 String type = string(entry, "typeId");
-                if (type.equals(KNOWN_TYPES.get(key)) || key.equals("works") && (type.equals(WorkOrder.MOVE) || type.equals(WorkOrder.CONSTRUCTION) || type.equals(WorkOrder.DELIVERY) || type.equals(WorkOrder.PRODUCTION))
+                if (type.equals(KNOWN_TYPES.get(key)) || key.equals("works") && (type.equals(WorkOrder.MOVE) || type.equals(WorkOrder.CONSTRUCTION) || type.equals(WorkOrder.DELIVERY) || type.equals(WorkOrder.PRODUCTION) || type.equals(WorkOrder.FOOD))
                         || key.equals("evidence") && (type.equals(ConstructionNbt.SITE) || type.equals(ConstructionNbt.EFFECT))
                         || StorageNbt.known(key,type) || SupplyNbt.known(key,type) || key.equals("pinnedDefinitions") && type.equals(ConstructionNbt.PIN)) {
                     if (key.equals("pinnedDefinitions") && type.equals(ConstructionNbt.PIN) && !ConstructionNbt.knownBlueprintSchema(entry)
@@ -167,6 +167,8 @@ final class RegistryNbt {
             if(colonyIds.contains(uuid(entry,"colonyId")) && availableRegistrations.contains(uuid(entry,"registrationId"))) workshopIds.add(id);
             else unknownWorkshops.add(id);
         }
+        Set<UUID> opaqueFoodCitizens=new HashSet<>();
+        for(var entry:retained.get("evidence"))if(entry.contains("food",Tag.TAG_COMPOUND)&&entry.hasUUID("citizenId"))opaqueFoodCitizens.add(uuid(entry,"citizenId"));
         List<CitizenRecord> citizens = new ArrayList<>();
         Set<UUID> entityIds = new HashSet<>();
         for (CompoundTag entry : known.get("citizens")) {
@@ -175,7 +177,7 @@ final class RegistryNbt {
             if (!colonyIds.contains(citizen.colonyId()) ||
                     (citizen.homeId() != null && !buildingIds.contains(citizen.homeId())) ||
                     (citizen.workplaceId() != null && !buildingIds.contains(citizen.workplaceId()) && !workshopIds.contains(citizen.workplaceId())) ||
-                    (citizen.assignedWorkId() != null && !workIds.contains(citizen.assignedWorkId()))) {
+                    (citizen.assignedWorkId() != null && !workIds.contains(citizen.assignedWorkId())) || opaqueFoodCitizens.contains(citizen.citizenId())) {
                 if (!colonyIds.contains(citizen.colonyId()) && !unknownColonies.contains(citizen.colonyId())) throw invalid("Citizen references missing colony");
                 if (citizen.homeId() != null && !buildingIds.contains(citizen.homeId()) && !unknownBuildings.contains(citizen.homeId())) throw invalid("Citizen references missing home");
                 if (citizen.workplaceId() != null && !buildingIds.contains(citizen.workplaceId()) && !workshopIds.contains(citizen.workplaceId()) && !unknownBuildings.contains(citizen.workplaceId()) && !unknownWorkshops.contains(citizen.workplaceId())) throw invalid("Citizen references missing workplace");
@@ -198,6 +200,7 @@ final class RegistryNbt {
             var value = work(entry);
             for (var dependency : value.dependencies()) if (!allWorkIds.contains(dependency)) throw invalid("Work references missing dependency");
             if (value.assignee()!=null && !knownCitizenIds.contains(value.assignee()) && !unknownCitizens.contains(value.assignee())) throw invalid("Work references missing citizen");
+            if (value.subjectId()!=null && !knownCitizenIds.contains(value.subjectId()) && !unknownCitizens.contains(value.subjectId())) throw invalid("Work references missing food recipient");
         }
         boolean changed;
         do {
@@ -227,7 +230,8 @@ final class RegistryNbt {
                     opaqueDependency |= unknownWorks.contains(dependency);
                 }
                 if (work.assignee() != null && !knownCitizenIds.contains(work.assignee()) && !unknownCitizens.contains(work.assignee())) throw invalid("Work references missing citizen");
-                if (opaqueDependency || opaqueSiteWorks.contains(work.id()) || work.assignee() != null && unknownCitizens.contains(work.assignee())) {
+                if (work.subjectId()!=null && !knownCitizenIds.contains(work.subjectId()) && !unknownCitizens.contains(work.subjectId())) throw invalid("Work references missing food recipient");
+                if (opaqueDependency || opaqueSiteWorks.contains(work.id()) || work.assignee() != null && unknownCitizens.contains(work.assignee()) || work.subjectId()!=null && unknownCitizens.contains(work.subjectId())) {
                     retained.get("works").add(originalWorks.get(work.id()).copy()); unknownWorks.add(work.id());
                     workIds.remove(work.id()); iterator.remove(); blocked.add(work.colonyId()); changed = true;
                 }
@@ -355,6 +359,20 @@ final class RegistryNbt {
             for(String key:List.of("reservations","allocations")) for(var entry:known.get(key)) if(opaqueSupplyColonies.contains(uuid(entry,"colonyId")) && !retained.get(key).contains(entry)) retained.get(key).add(entry.copy());
             storage=new io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot(registrations,reservations.stream().filter(value -> !opaqueSupplyColonies.contains(value.colonyId())).toList(),allocations.stream().filter(value -> !opaqueSupplyColonies.contains(value.colonyId())).toList(),workshops,retired);
         }
+        var demandIds=new HashSet<UUID>();for(var value:supply.demands())demandIds.add(value.id());
+        var shareIds=new HashSet<UUID>();for(var value:supply.shares())shareIds.add(value.id());
+        var unknownDemands=referencedIds(retained.get("demands"),"id");
+        var unknownShares=referencedIds(retained.get("evidence"),"id");
+        for(var iterator=effects.iterator();iterator.hasNext();) {
+            var value=iterator.next();if(value.food()==null)continue;
+            boolean opaque=unknownDemands.contains(value.food().demandId())||unknownShares.contains(value.food().shareId());
+            if(!demandIds.contains(value.food().demandId())&&!unknownDemands.contains(value.food().demandId()))throw invalid("Food effect references missing demand");
+            if(value.state()!=io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.ACCEPTED&&!shareIds.contains(value.food().shareId())&&!unknownShares.contains(value.food().shareId()))throw invalid("Food effect references missing coverage");
+            if(opaque) {
+                for(var entry:known.get("evidence"))if(entry.hasUUID("operationId")&&entry.getUUID("operationId").equals(value.operationId())) {retained.get("evidence").add(entry.copy());break;}
+                blocked.add(value.colonyId());iterator.remove();
+            }
+        }
         blocked.retainAll(colonyIds);
         return new Decoded(new RegistrySnapshot(colonies, citizens, buildings, tombstones, observations, works, claims, effects, sites, pins, storage,supply), retained, blocked);
     }
@@ -425,7 +443,7 @@ final class RegistryNbt {
                 integer(entry, "priority"), AdmissionLedger.Lane.valueOf(string(entry, "lane")),
                 WorkOrder.State.valueOf(string(entry, "state")), optionalUuid(entry, "assignee"), string(entry, "stage"),
                 number(entry, "revision"), dependencies, WorkOrder.Reason.valueOf(string(entry, "waitingReason")),
-                number(entry, "remainingActiveTicks"), number(entry, "ageActiveTicks"));
+                number(entry, "remainingActiveTicks"), number(entry, "ageActiveTicks"), optionalUuid(entry,"subjectId"), entry.contains("criticalService") && bool(entry,"criticalService"));
     }
 
     private static CompoundTag work(WorkOrder.Snapshot value) {
@@ -438,6 +456,7 @@ final class RegistryNbt {
         entry.putString("stage", value.stage()); entry.putLong("revision", value.revision());
         entry.putString("waitingReason", value.waitingReason().name());
         entry.putLong("remainingActiveTicks", value.remainingActiveTicks()); entry.putLong("ageActiveTicks", value.ageActiveTicks());
+        optionalUuid(entry,"subjectId",value.subjectId()); entry.putBoolean("criticalService",value.criticalService());
         ListTag dependencies = new ListTag();
         for (UUID id : value.dependencies()) { CompoundTag reference = new CompoundTag(); reference.putUUID("workId", id); dependencies.add(reference); }
         entry.put("dependencies", dependencies);

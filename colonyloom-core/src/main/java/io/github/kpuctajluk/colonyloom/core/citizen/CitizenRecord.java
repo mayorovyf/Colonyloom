@@ -2,6 +2,7 @@ package io.github.kpuctajluk.colonyloom.core.citizen;
 
 import io.github.kpuctajluk.colonyloom.core.colony.WorldPosition;
 import java.util.Map;
+import java.util.HashMap;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -13,6 +14,8 @@ public record CitizenRecord(UUID citizenId, UUID colonyId, UUID entityId, long b
     public enum Lifecycle { ALIVE, DEAD, REMOVED }
     public enum Admission { ACTIVE, INACTIVE }
     public enum Readiness { UNKNOWN, RECONCILING, READY, BLOCKED }
+    public static final String FOOD_TIMER = "food";
+    public static final long FOOD_INTERVAL = 1200;
     public CitizenRecord {
         Objects.requireNonNull(citizenId, "citizenId");
         Objects.requireNonNull(colonyId, "colonyId");
@@ -34,7 +37,26 @@ public record CitizenRecord(UUID citizenId, UUID colonyId, UUID entityId, long b
     }
     public CitizenRecord withActiveTime(long ticks) {
         if (ticks < activeTimeTicks) throw new IllegalArgumentException("Active time cannot reverse");
-        return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, needs, lifecycle, admission, readiness, ticks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));
+        long elapsed = ticks - activeTimeTicks;
+        long remaining = foodDecayTicks();
+        long losses = 0;
+        if (elapsed > 0 && elapsed >= remaining) {
+            long afterFirst = elapsed - remaining;
+            losses = 1 + afterFirst / FOOD_INTERVAL;
+            remaining = FOOD_INTERVAL - afterFirst % FOOD_INTERVAL;
+        } else remaining -= elapsed;
+        var nextNeeds = new HashMap<>(needs);
+        nextNeeds.put("food", (int)Math.max(0, food() - losses));
+        var timers = new HashMap<>(remainingTimers);
+        timers.put(FOOD_TIMER, remaining);
+        return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, nextNeeds, lifecycle, admission, readiness, ticks, timers, lastKnownPosition, Math.incrementExact(revision));
+    }
+    public int food() { return needs.get("food"); }
+    public long foodDecayTicks() { return remainingTimers.getOrDefault(FOOD_TIMER, FOOD_INTERVAL); }
+    public CitizenRecord withFood(int food) {
+        if (food < 0 || food > 20) throw new IllegalArgumentException("Citizen food must be 0..20");
+        var nextNeeds = new HashMap<>(needs); nextNeeds.put("food", food);
+        return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, nextNeeds, lifecycle, admission, readiness, activeTimeTicks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));
     }
     public CitizenRecord withAdmission(Admission value) {
         return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, needs, lifecycle, value, readiness, activeTimeTicks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));

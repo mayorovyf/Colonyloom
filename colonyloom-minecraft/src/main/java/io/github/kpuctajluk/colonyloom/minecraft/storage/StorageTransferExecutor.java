@@ -78,9 +78,10 @@ public final class StorageTransferExecutor {
         WorkOrder work=citizen.assignedWorkId()==null?null:registry.workBoard().work(citizen.assignedWorkId());
         var fact=new EffectRecord.Transfer(source,destination,item,sourceBefore,sourceBefore,destinationBefore,destinationBefore,current.amount(),0,0,0);
         var effect=new EffectRecord(UUID.randomUUID(),context.colonyId(),work==null?null:work.id(),context.citizenId(),epoch,
-                ActionContext.Kind.STORAGE_TRANSFER,context.target(),"native_inventory",item.itemId(),sourceBefore,sourceBefore,EffectRecord.State.PREPARED,0,fact);
+                ActionContext.Kind.STORAGE_TRANSFER,context.target(),"native_inventory",item.itemId(),sourceBefore,sourceBefore,EffectRecord.State.PREPARED,0,fact,null,null);
         try { registry.effects().prepare(effect,work==null?Lane.NORMAL:work.lane()); }
-        catch (AdmissionLedger.AdmissionException | IllegalArgumentException denied) { return denied(WorkOrder.Reason.STATE_LIMIT); }
+        catch (AdmissionLedger.AdmissionException full) { return denied(full.reason()==AdmissionLedger.Reason.CRITICAL_CAPACITY?WorkOrder.Reason.CRITICAL_CAPACITY:WorkOrder.Reason.STATE_LIMIT); }
+        catch (IllegalArgumentException denied) { return denied(WorkOrder.Reason.STATE_LIMIT); }
         ItemStack remaining=ItemStack.EMPTY;
         int extracted=0, inserted=0, returned=0;
         try {
@@ -88,14 +89,14 @@ public final class StorageTransferExecutor {
             // Evidence admission/dirty marker and test observers cannot grant stale authority.
             reason=guard(context,epoch,source,destination);
             Preflight finalState=reason==WorkOrder.Reason.NONE?preflight(context,epoch,source,destination,item,maximum):null;
-            if (reason!=WorkOrder.Reason.NONE || !same(current,finalState)) {
+            if (reason!=WorkOrder.Reason.NONE || !same(current,finalState) || !assignmentCurrent(citizen,work)) {
                 registry.effects().discardUnchanged(effect.operationId());
                 return denied(reason==WorkOrder.Reason.NONE?WorkOrder.Reason.TARGET_CONFLICT:reason);
             }
             boolean allowed=protection==null || protection.allow(context,current.principal(),source,destination,current.amount());
             reason=guard(context,epoch,source,destination);
             finalState=reason==WorkOrder.Reason.NONE?preflight(context,epoch,source,destination,item,maximum):null;
-            if (reason!=WorkOrder.Reason.NONE || !same(current,finalState)) {
+            if (reason!=WorkOrder.Reason.NONE || !same(current,finalState) || !assignmentCurrent(citizen,work)) {
                 registry.effects().discardUnchanged(effect.operationId());
                 return denied(reason==WorkOrder.Reason.NONE?WorkOrder.Reason.TARGET_CONFLICT:reason);
             }
@@ -143,7 +144,7 @@ public final class StorageTransferExecutor {
                 throw new IllegalStateException("Native transfer counters are not conserved");
             effect=effect.observedTransfer(fact,false); registry.effects().update(effect);
             observe(FaultPoint.AFTER_FACT_BEFORE_NOTIFY,context);
-            if (guard(context,epoch,source,destination)!=WorkOrder.Reason.NONE
+            if (guard(context,epoch,source,destination)!=WorkOrder.Reason.NONE || !assignmentCurrent(citizen,work)
                     || storage.currentContainer(source)!=current.source() || storage.currentContainer(destination)!=current.destination()
                     || exactCount(current.source(),source.slot(),item)!=sourceAfter
                     || exactCount(current.destination(),destination.slot(),item)!=destinationAfter)
@@ -166,6 +167,11 @@ public final class StorageTransferExecutor {
             registry.storage().index().unknown(source); registry.storage().index().unknown(destination);
             return new Result(inserted,WorkOrder.Reason.RECOVERY_AMBIGUOUS,true);
         }
+    }
+    private boolean assignmentCurrent(io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord before,WorkOrder work) {
+        var citizen=registry.citizen(before.citizenId());
+        return Objects.equals(citizen.assignedWorkId(),before.assignedWorkId())
+                &&(work==null||!work.terminal()&&citizen.citizenId().equals(work.assignee()));
     }
     private Preflight preflight(ActionContext context,long epoch,StockRegion source,StockRegion destination,ItemDescriptor item,int maximum) {
         CitizenEntity courier=storage.currentCitizen(context.citizenId(),epoch,source.storage().dimension());

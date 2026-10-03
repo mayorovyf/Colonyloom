@@ -76,7 +76,7 @@ public final class SupplyPlanner implements AutoCloseable {
                 Demand demand = finalizingStock && stockSearchRoot != null ? supply.demand(stockSearchRoot.id()) : next();
                 if (demand == null) return;
                 if (!budgets.tryConsume(Budget.GRAPH_EXPANSIONS, demand.snapshot().lane())) return;
-                if (demand != null && demand.snapshot().goalKind() == Demand.GoalKind.DELIVERY) {
+                if (demand.snapshot().goalKind() == Demand.GoalKind.DELIVERY || supply.foodConsumer(demand.id())) {
                     try {
                         if (!reserveAvailableStock(demand, tick)) return;
                         supply.status(demand.id(), Demand.Status.WAITING);

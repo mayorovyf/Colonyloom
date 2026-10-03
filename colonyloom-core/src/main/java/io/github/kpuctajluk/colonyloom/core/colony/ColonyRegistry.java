@@ -168,10 +168,14 @@ public final class ColonyRegistry {
         for (BindingRegistry.Observation value : snapshot.observations()) if (!observedIds.add(value.entityId())) throw new IllegalArgumentException("Duplicate observed entity UUID");
         Map<UUID, WorkOrder.Snapshot> newWorks = new LinkedHashMap<>();
         Set<UUID> assignedCitizens = new HashSet<>();
+        Set<UUID> foodSubjects = new HashSet<>();
         for (WorkOrder.Snapshot work : snapshot.works()) {
             ColonyRuntime colony = required(newColonies, work.colonyId(), "work colony");
-            if (!objectIds.add(work.id()) || !(WorkOrder.ACTIVE_WAIT.equals(work.typeId()) || WorkOrder.MOVE.equals(work.typeId()) || WorkOrder.CONSTRUCTION.equals(work.typeId()) || WorkOrder.DELIVERY.equals(work.typeId()) || WorkOrder.PRODUCTION.equals(work.typeId())) || !colony.territory().contains(work.target())) throw new IllegalArgumentException("Invalid work identity/type/target");
+            if (!objectIds.add(work.id()) || !(WorkOrder.ACTIVE_WAIT.equals(work.typeId()) || WorkOrder.MOVE.equals(work.typeId()) || WorkOrder.CONSTRUCTION.equals(work.typeId()) || WorkOrder.DELIVERY.equals(work.typeId()) || WorkOrder.PRODUCTION.equals(work.typeId()) || WorkOrder.FOOD.equals(work.typeId())) || !colony.territory().contains(work.target())) throw new IllegalArgumentException("Invalid work identity/type/target");
             newWorks.put(work.id(), work);
+            if (work.subjectId() != null && !required(newCitizens, work.subjectId(), "work subject").colonyId().equals(work.colonyId())) throw new IllegalArgumentException("Foreign work subject");
+            if (WorkOrder.FOOD.equals(work.typeId()) && work.state() != WorkOrder.State.COMPLETED && work.state() != WorkOrder.State.CANCELLED && work.state() != WorkOrder.State.FAILED
+                    && !foodSubjects.add(work.subjectId())) throw new IllegalArgumentException("Duplicate live food subject");
             if (work.assignee() != null) {
                 CitizenRecord citizen = required(newCitizens, work.assignee(), "work assignee");
                 if (!assignedCitizens.add(citizen.citizenId()) || !citizen.colonyId().equals(work.colonyId()) || !work.id().equals(citizen.assignedWorkId()) || citizen.lifecycle() != CitizenRecord.Lifecycle.ALIVE) throw new IllegalArgumentException("Invalid work/citizen assignment");
@@ -223,6 +227,22 @@ public final class ColonyRegistry {
             stockSlots.add(allocation.slot());
         }
         for(var demand:snapshot.supply().demands()) if(!objectIds.add(demand.id())) throw new IllegalArgumentException("Duplicate demand identity");
+        Set<UUID> foodDemandOwners = new HashSet<>();
+        for (var demand : snapshot.supply().demands()) {
+            var work = newWorks.get(demand.ownerId());
+            if (work == null || !WorkOrder.FOOD.equals(work.typeId())) continue;
+            if (!foodDemandOwners.add(work.id()) || !demand.colonyId().equals(work.colonyId()) || demand.lane() != AdmissionLedger.Lane.CRITICAL
+                    || demand.goalKind() != io.github.kpuctajluk.colonyloom.core.supply.Demand.GoalKind.CONSUMPTION || demand.required() != 1
+                    || !demand.matcher().itemId().equals("minecraft:bread")) throw new IllegalArgumentException("Invalid food demand");
+        }
+        for (var effect : snapshot.effects()) if (effect.food() != null) {
+            var work = required(newWorks, effect.workId(), "food effect work");
+            var demand = snapshot.supply().demands().stream().filter(d -> d.id().equals(effect.food().demandId())).findFirst().orElseThrow(() -> new IllegalArgumentException("Missing food evidence demand"));
+            var share = snapshot.supply().shares().stream().filter(s -> s.id().equals(effect.food().shareId())).findFirst().orElse(null);
+            if (!WorkOrder.FOOD.equals(work.typeId()) || !effect.citizenId().equals(work.subjectId()) || !demand.ownerId().equals(work.id())
+                    || share == null && effect.state() != io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.ACCEPTED
+                    || share != null && (!share.demandId().equals(demand.id()) || !share.item().equals(effect.food().item()))) throw new IllegalArgumentException("Food evidence owner mismatch");
+        }
         for(var share:snapshot.supply().shares()) if(!objectIds.add(share.id())) throw new IllegalArgumentException("Duplicate coverage identity");
         for(var order:snapshot.supply().productionOrders()) if(!objectIds.add(order.id())) throw new IllegalArgumentException("Duplicate production identity");
         for(var order:snapshot.supply().deliveries()) if(!objectIds.add(order.id())) throw new IllegalArgumentException("Duplicate delivery identity");

@@ -199,7 +199,7 @@ public final class SharedProductionGameTests {
             var entity=(CitizenEntity)BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.parse("colonyloom:citizen")).create(level);
             if(entity==null) throw new IllegalStateException("Citizen unavailable");
             entity.initializeIdentity(id,1); entity.moveTo(start.getX()+0.5,start.getY(),start.getZ()+0.5,0,0);
-            core.registry().addCitizen(new CitizenRecord(id,colony,entity.getUUID(),1,null,workplace,null,profession,Map.of(),Map.of("food",20),CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.READY,0,Map.of("food",10000L),position(start),1),record -> {
+            core.registry().addCitizen(new CitizenRecord(id,colony,entity.getUUID(),1,null,workplace,null,profession,Map.of(),Map.of("food",20),CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.READY,0,Map.of("food",1200L),position(start),1),record -> {
                 if(!level.addFreshEntity(entity)) throw new IllegalStateException("Citizen spawn refused");
             });
             core.bindings().observe(id,entity.getUUID(),1); entity.setQuarantined(false); citizens.add(entity);

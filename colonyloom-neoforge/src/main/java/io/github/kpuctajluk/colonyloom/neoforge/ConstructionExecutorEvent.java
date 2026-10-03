@@ -28,4 +28,9 @@ public final class ConstructionExecutorEvent extends Event {
         if(recipeObserver!=null)throw new IllegalStateException("Recipe observer already installed");recipeObserver=Objects.requireNonNull(observer);
     }
     public io.github.kpuctajluk.colonyloom.minecraft.production.RecipeExecutor.FaultObserver recipeObserver() {return recipeObserver;}
+    private io.github.kpuctajluk.colonyloom.minecraft.needs.FoodConsumptionExecutor.FaultObserver foodObserver;
+    public void foodObserver(io.github.kpuctajluk.colonyloom.minecraft.needs.FoodConsumptionExecutor.FaultObserver observer) {
+        if(foodObserver!=null)throw new IllegalStateException("Food observer already installed");foodObserver=Objects.requireNonNull(observer);
+    }
+    public io.github.kpuctajluk.colonyloom.minecraft.needs.FoodConsumptionExecutor.FaultObserver foodObserver() {return foodObserver;}
 }

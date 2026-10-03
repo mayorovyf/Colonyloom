@@ -19,7 +19,7 @@ final class SupplyNbt {
     static Set<UUID> opaqueColonies(Map<String,List<CompoundTag>> retained) {
         Set<UUID> result=new HashSet<>();
         for(String key:List.of("demands","productionOrders","deliveries","evidence")) for(var tag:retained.get(key)) {
-            if((!key.equals("evidence") || tag.hasUUID("demandId") || tag.hasUUID("ownerDemandId") || tag.hasUUID("productionId")) && tag.hasUUID("colonyId")) result.add(colony(tag));
+            if((!key.equals("evidence") || tag.hasUUID("demandId") || tag.hasUUID("ownerDemandId") || tag.hasUUID("productionId") || tag.contains("food",Tag.TAG_COMPOUND)) && tag.hasUUID("colonyId")) result.add(colony(tag));
         }
         return result;
     }
@@ -40,6 +40,7 @@ final class SupplyNbt {
             if(key.equals("evidence")&&!text(tag,"typeId").equals(SHARE))continue;
             if(!identities.add(id(tag)))throw new IllegalArgumentException("Duplicate supply identity");
             UUID colony=colony(tag);if(!colonies.contains(colony)){if(!unknownColonies.contains(colony))throw new IllegalArgumentException("Supply references missing colony");opaque.add(colony);}
+            if(key.equals("demands")&&tag.hasUUID("ownerId")&&unknownWorks.contains(RegistryNbt.uuid(tag,"ownerId")))opaque.add(colony);
             if(tag.hasUUID("ownerDemandId"))reference(tag,"ownerDemandId",demandIds,opaqueDemands,opaque);
             if(tag.hasUUID("demandId"))reference(tag,"demandId",demandIds,opaqueDemands,opaque);
             if(tag.hasUUID("sourceOrderId"))reference(tag,"sourceOrderId",orderIds,opaqueOrders,opaque);

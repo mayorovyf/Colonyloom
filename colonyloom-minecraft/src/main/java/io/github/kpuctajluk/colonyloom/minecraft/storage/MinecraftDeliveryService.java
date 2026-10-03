@@ -46,6 +46,7 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
     private final Map<UUID,Active> active=new HashMap<>();
     private NavigationService navigation;
     private int orderCursor;
+    private int criticalOrderCursor;
     private final List<net.minecraft.world.entity.Entity> waypointOccupants=new ArrayList<>(1);
     private net.minecraft.world.entity.Entity waypointCitizen;
     private final java.util.function.Predicate<net.minecraft.world.entity.Entity> waypointOccupied=entity -> entity!=waypointCitizen && entity.isPushable() && !entity.isSpectator();
@@ -60,11 +61,20 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         registry.requireOwner();
         var detached=registry.supply().unroutedReservation();
         if(detached!=null&&registry.colony(detached.colonyId()).available()&&registry.budgets().tryConsume(Budget.DIRTY_RESCAN_OBJECTS,registry.supply().demand(detached.demandId()).snapshot().lane())) {
-            try {if(!registry.supply().allocateLocalReservation(detached.id()))registry.supply().routeReservedStock(detached.id());}catch(AdmissionLedger.AdmissionException full) {return;}
+            try {if(!registry.supply().allocateLocalReservation(detached.id()))registry.supply().routeReservedStock(detached.id());}
+            catch(AdmissionLedger.AdmissionException full) {criticalFailure(detached.demandId(),full);}
         }
+        int critical=registry.supply().criticalDeliveryCount();
+        if(critical>0) {if(criticalOrderCursor>=critical)criticalOrderCursor=0;tickOrder(registry.supply().criticalDeliveryAt(criticalOrderCursor++));}
         int count=registry.supply().deliveryCount();if(count==0)return;
-        if(orderCursor>=count)orderCursor=0;var order=registry.supply().deliveryAt(orderCursor++);
-        if(!registry.colony(order.colonyId()).available()||!registry.budgets().tryConsume(Budget.DIRTY_RESCAN_OBJECTS,order.lane()))return;
+        if(orderCursor>=count)orderCursor=0;
+        var order=registry.supply().deliveryAt(orderCursor++);
+        if(order.lane()!=AdmissionLedger.Lane.CRITICAL)tickOrder(order);
+    }
+    private void tickOrder(DeliveryOrder order) {
+        var assignedWork=order.workId()==null?null:registry.workBoard().work(order.workId());
+        var lane=assignedWork==null?order.lane():assignedWork.lane();
+        if(!registry.colony(order.colonyId()).available()||!registry.budgets().tryConsume(Budget.DIRTY_RESCAN_OBJECTS,lane))return;
         if(order.terminal()) {
             if(order.workId()!=null) {var work=registry.workBoard().work(order.workId());if(!work.terminal()) {if(order.state()==DeliveryOrder.State.LOST)fail(work,WorkOrder.Reason.CARGO_LOST);else finish(work);}}
             return;
@@ -77,15 +87,22 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
             if(citizen.readiness()!=CitizenRecord.Readiness.READY||citizen.admission()!=CitizenRecord.Admission.ACTIVE) {
                 var state=active.computeIfAbsent(order.workId(),ignored -> new Active());var position=citizen.lastKnownPosition();
                 var key=new ChunkKey(position.dimension(),position.x()>>4,position.z()>>4);
-                try {chunks.request(state.loadOwner,order.colonyId(),List.of(key),ChunkDemandManager.Readiness.ENTITY_TICKING,order.lane(),order.priority(),true);}
+                try {chunks.request(state.loadOwner,order.colonyId(),List.of(key),ChunkDemandManager.Readiness.ENTITY_TICKING,lane,assignedWork==null?order.priority():assignedWork.priority(),true);}
                 catch(AdmissionLedger.AdmissionException full) {return;}
                 return;
             }
         }
         if(order.workId()==null) {
             var source=storage.locate(order.source().storage());if(source==null)return;
-            try {var work=registry.workBoard().createDelivery(UUID.randomUUID(),order.colonyId(),source,order.priority(),order.lane());registry.supply().assignDelivery(order.id(),null,work.id());}
-            catch(AdmissionLedger.AdmissionException full) {return;}
+            try {
+                UUID ownerId=registry.supply().demand(order.ownerDemandId()).snapshot().ownerId();
+                var owner=registry.workBoard().works().stream().filter(value -> value.id().equals(ownerId)).findFirst().orElse(null);
+                var work=owner!=null&&WorkOrder.FOOD.equals(owner.typeId())
+                        ?registry.workBoard().createCitizenDelivery(UUID.randomUUID(),owner.subjectId(),source,order.priority(),order.lane())
+                        :registry.workBoard().createDelivery(UUID.randomUUID(),order.colonyId(),source,order.priority(),order.lane());
+                registry.supply().assignDelivery(order.id(),null,work.id());
+            }
+            catch(AdmissionLedger.AdmissionException full) {criticalFailure(order.ownerDemandId(),full);return;}
         }
     }
     public void step(WorkOrder work,long tick) {
@@ -96,12 +113,16 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         if(supply.hasCargo(order.id())&&!citizen.citizenId().equals(order.citizenId())) {registry.workBoard().releaseAssignment(work.id());return;}
         if(!citizen.citizenId().equals(order.citizenId())) {supply.assignDelivery(order.id(),citizen.citizenId(),work.id());order=supply.delivery(order.id());}
         var state=active.computeIfAbsent(work.id(),ignored -> new Active());
+        if(work.criticalService()&&work.subjectId()==null&&supply.hasCargo(order.id())&&!order.returnRequired()) {
+            supply.returnDelivery(order.id());order=supply.delivery(order.id());
+        }
         var shares=supply.orderShares(order.id());
         CoverageShare cargo=shares.stream().filter(value -> value.stage()==CoverageShare.Stage.IN_TRANSIT).findFirst().orElse(null);
         if(cargo!=null) {deliver(work,order,cargo,state,tick);return;}
         if(order.returnRequired()) {finish(work);return;}
         var source=shares.stream().filter(value -> value.stage()==CoverageShare.Stage.RESERVED_STOCK).findFirst().orElse(null);
         if(source==null) {supply.returnDelivery(order.id());finish(work);return;}
+        if(work.subjectId()!=null) {selfPickup(work,order,source,state,tick);return;}
         boolean surplus=supply.productionSurplus(order.ownerDemandId());
         var destination=surplus?surplusDestination(work,order,state):registration(order.colonyId(),order.destination());
         if(surplus&&destination==null)return;
@@ -135,7 +156,7 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         var inventory=registry.storage().registrations(work.colonyId()).stream().filter(value -> value.storages().stream().anyMatch(id ->
                 id.identity().equals(citizen.citizenId())&&id.bindingEpoch()==citizen.bindingEpoch())).findFirst().orElse(null);
         if(inventory==null)try {inventory=storage.registerCitizen(work.colonyId(),citizen.citizenId(),"return");}
-        catch(AdmissionLedger.AdmissionException full) {waitFor(work,WorkOrder.Reason.STATE_LIMIT,"pickup");return;}
+        catch(AdmissionLedger.AdmissionException full) {waitFor(work,admissionReason(full),"pickup");return;}
         var cargoSlot=findSlot(work,state,inventory,order.item());
         if(cargoSlot==null) {if(state.scanFinished)waitFor(work,WorkOrder.Reason.CAPACITY,"pickup");return;}
         // The earlier empty-courier route proof is not a capacity promise: recheck both real buffers now.
@@ -148,7 +169,7 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         try(var prepared=supply.preparePickup(source.id(),order.id(),cargoSlot,maximum,tick)) {
             execute(work,prepared,location,citizen.bindingEpoch());
             if(supply.hasCargo(order.id()))waitFor(work,WorkOrder.Reason.BUDGET,"cargo");
-        } catch(AdmissionLedger.AdmissionException full) {waitFor(work,WorkOrder.Reason.STATE_LIMIT,"pickup");}
+        } catch(AdmissionLedger.AdmissionException full) {waitFor(work,admissionReason(full),"pickup");}
     }
     private void deliver(WorkOrder work,DeliveryOrder order,CoverageShare cargo,Active state,long tick) {
         var supply=registry.supply();boolean returning=order.returnRequired();
@@ -174,7 +195,7 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         if(!observeSource(work,cargo,tick))return;
         try(var prepared=returning?supply.prepareReturn(cargo.id(),slot,maximum,tick):supply.prepareTransfer(cargo.id(),slot,maximum,tick)) {
             execute(work,prepared,destination.address(),registry.citizen(work.assignee()).bindingEpoch());
-        } catch(AdmissionLedger.AdmissionException full) {waitFor(work,WorkOrder.Reason.STATE_LIMIT,returning?"returning":"cargo");}
+        } catch(AdmissionLedger.AdmissionException full) {waitFor(work,admissionReason(full),returning?"returning":"cargo");}
         if(work.waitingReason()==WorkOrder.Reason.PERMISSION_DENIED)advanceReturn(work,order,state,returning);
         if(supply.delivery(order.id()).terminal())finish(work);
     }
@@ -198,6 +219,65 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         var result=transfer.transfer(context,epoch,prepared.source(),prepared.destination(),prepared.item(),prepared.maximum(),prepared::commit);
         registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.PHYSICAL_UNIT,System.nanoTime()-started);
         if(result.moved()==0||result.ambiguous())waitFor(work,result.reason()==WorkOrder.Reason.NONE?WorkOrder.Reason.RECONCILING:result.reason(),work.stage());
+    }
+    private void selfPickup(WorkOrder work,DeliveryOrder order,CoverageShare source,Active state,long tick) {
+        var citizen=registry.citizen(work.assignee());
+        if(!citizen.citizenId().equals(work.subjectId())) {waitFor(work,WorkOrder.Reason.WORKER,"pickup");return;}
+        var location=storage.locate(source.slot().storage());
+        if(location==null) {waitFor(work,WorkOrder.Reason.RECONCILING,"pickup");return;}
+        if(!ready(work,state,location)||!move(work,state,location,"pickup"))return;
+        var inventory=registry.storage().registrations(work.colonyId()).stream().filter(value -> value.storages().stream().anyMatch(id ->
+                id.identity().equals(citizen.citizenId())&&id.bindingEpoch()==citizen.bindingEpoch())).findFirst().orElse(null);
+        try {if(inventory==null)inventory=storage.registerCitizen(work.colonyId(),citizen.citizenId(),"return");}
+        catch(AdmissionLedger.AdmissionException full) {waitFor(work,admissionReason(full),"pickup");return;}
+        var slot=findSlot(work,state,inventory,order.item());
+        if(slot==null) {if(state.scanFinished)waitFor(work,WorkOrder.Reason.CAPACITY,"pickup");return;}
+        if(!observeSource(work,source,tick))return;
+        try(var prepared=registry.supply().prepareSelfPickup(source.id(),order.id(),slot,1,tick)) {
+            execute(work,prepared,location,citizen.bindingEpoch());
+            if(registry.supply().delivery(order.id()).terminal())finish(work);
+        } catch(AdmissionLedger.AdmissionException full) {waitFor(work,admissionReason(full),"pickup");}
+    }
+    /** Uses the current assignment until every owned physical cargo stack reaches safe registered storage. */
+    public boolean requestFoodPreemption(CitizenRecord citizen) {
+        if(registry.workBoard().requestFoodPreemption(citizen.citizenId())) {
+            if(citizen.assignedWorkId()!=null)cancel(citizen.assignedWorkId());return true;
+        }
+        var current=registry.citizen(citizen.citizenId());
+        if(current.assignedWorkId()==null)return false;
+        var work=registry.workBoard().work(current.assignedWorkId());
+        var order=registry.supply().deliveryForWork(work.id());
+        if(order!=null&&registry.supply().hasCargo(order.id())) {
+            if(!order.returnRequired())registry.supply().returnDelivery(order.id());
+            return false; // The scheduler services the retained delivery assignment under its critical urgency.
+        }
+        var cargo=registry.supply().shares().stream().filter(share -> share.stage()==CoverageShare.Stage.ALLOCATED&&share.slot()!=null
+                &&share.slot().storage().identity().equals(citizen.citizenId())&&share.slot().storage().bindingEpoch()==citizen.bindingEpoch()).findFirst().orElse(null);
+        if(cargo==null)return registry.workBoard().requestFoodPreemption(citizen.citizenId());
+        var state=active.computeIfAbsent(work.id(),ignored -> new Active());var buffer=returnBuffer(work.colonyId());
+        if(buffer==null) {waitFor(work,WorkOrder.Reason.CAPACITY,"food-unload");return false;}
+        if(!ready(work,state,buffer.address())||!move(work,state,buffer.address(),"food-unload"))return false;
+        var slot=findSlot(work,state,buffer,cargo.item());
+        if(slot==null) {if(state.scanFinished)waitFor(work,WorkOrder.Reason.CAPACITY,"food-unload");return false;}
+        int maximum=(int)Math.min(cargo.quantity(),storage.capacity(slot,cargo.item()));
+        if(maximum<1||!observeSource(work,cargo,Math.max(0,registry.budgets().tick())))return false;
+        if(!registry.budgets().tryConsume(Budget.PHYSICAL_ACTIONS,work.lane())) {waitFor(work,WorkOrder.Reason.BUDGET,"food-unload");return false;}
+        try(var prepared=registry.supply().prepareAllocationMove(cargo.id(),slot,maximum,Math.max(0,registry.budgets().tick()))) {
+            var colony=registry.colony(work.colonyId());
+            var context=new ActionContext(work.colonyId(),citizen.citizenId(),ActionContext.Kind.STORAGE_TRANSFER,buffer.address(),ActionContext.AuthorityMode.COLONY,null,colony.authorityRevision());
+            var result=transfer.transfer(context,citizen.bindingEpoch(),prepared.source(),prepared.destination(),prepared.item(),prepared.maximum(),prepared::commit);
+            if(result.moved()==0||result.ambiguous())waitFor(work,result.reason(),"food-unload");
+        } catch(AdmissionLedger.AdmissionException full) {waitFor(work,admissionReason(full),"food-unload");}
+        return false;
+    }
+    private static WorkOrder.Reason admissionReason(AdmissionLedger.AdmissionException full) {
+        return full.reason()==AdmissionLedger.Reason.CRITICAL_CAPACITY?WorkOrder.Reason.CRITICAL_CAPACITY:WorkOrder.Reason.STATE_LIMIT;
+    }
+    private void criticalFailure(UUID demandId,AdmissionLedger.AdmissionException full) {
+        if(full.reason()!=AdmissionLedger.Reason.CRITICAL_CAPACITY)return;
+        UUID owner=registry.supply().demand(demandId).snapshot().ownerId();
+        var food=registry.workBoard().works().stream().filter(value -> value.id().equals(owner)&&WorkOrder.FOOD.equals(value.typeId())&&!value.terminal()).findFirst().orElse(null);
+        if(food!=null&&food.assignee()==null)registry.workBoard().transition(food.id(),WorkOrder.State.WAITING,WorkOrder.Reason.CRITICAL_CAPACITY,"food");
     }
     private StorageRegistry.Registration registration(UUID colony,WorldPosition address) {return registry.storage().registrations(colony).stream().filter(value -> value.address().equals(address)||value.positions().contains(address)).findFirst().orElse(null);}
     private StorageRegistry.Registration returnBuffer(UUID colony) {return registry.storage().registrations(colony).stream().filter(value -> value.role().equals("return")&&value.storages().stream().allMatch(id -> id.bindingEpoch()==0)).min(Comparator.comparing(StorageRegistry.Registration::id)).orElse(null);}
@@ -253,7 +333,7 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         if(state.requiredChunks.size()>=81&&!state.requiredChunks.contains(key)) {waitFor(work,WorkOrder.Reason.WORKING_SET_LIMIT,work.stage());return false;}
         state.requiredChunks.add(key);
         try {chunks.request(state.loadOwner,work.colonyId(),List.copyOf(state.requiredChunks),ChunkDemandManager.Readiness.ENTITY_TICKING,work.lane(),work.priority(),false);}
-        catch(AdmissionLedger.AdmissionException full){waitFor(work,WorkOrder.Reason.STATE_LIMIT,work.stage());return false;}
+        catch(AdmissionLedger.AdmissionException full){waitFor(work,admissionReason(full),work.stage());return false;}
         if(!chunks.ready(state.loadOwner)){waitFor(work,chunks.state(state.loadOwner)==ChunkDemandManager.State.BLOCKED?WorkOrder.Reason.WORKING_SET_LIMIT:WorkOrder.Reason.CHUNK_NOT_READY,work.stage());return false;}chunks.useful(state.loadOwner);return true;
     }
     private boolean move(WorkOrder work,Active state,WorldPosition target,String stage) {
@@ -279,7 +359,7 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         if(waypoint==null){waitFor(work,WorkOrder.Reason.UNREACHABLE,stage);return false;}
         if(!waypoint.equals(state.waypoint)) {navigation.cancel(work.id());state.waypoint=waypoint;state.generation++;}
         try {if(navigation.request(work.id(),work.colonyId(),citizen.citizenId(),citizen.bindingEpoch(),state.generation,waypoint,work.lane(),work.priority())==null){waitFor(work,WorkOrder.Reason.RECONCILING,stage);return false;}}
-        catch(AdmissionLedger.AdmissionException full){waitFor(work,WorkOrder.Reason.STATE_LIMIT,stage);return false;}
+        catch(AdmissionLedger.AdmissionException full){waitFor(work,admissionReason(full),stage);return false;}
         if(navigation.atTarget(work.id()))return true;
         if(navigation.state(work.id())==NavigationService.State.WAITING)waitFor(work,navigation.reason(work.id()),stage);return false;
     }

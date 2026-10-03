@@ -207,7 +207,7 @@ final class ConstructionScenario {
                         run.maintenanceSeeded=true;
                         while(registry.effects().size()<2048) {
                             UUID id=UUID.randomUUID();
-                            var effect=new io.github.kpuctajluk.colonyloom.core.action.EffectRecord(id,run.manifest.getUUID("colony"),null,npc.citizenId(),npc.bindingEpoch(),ActionContext.Kind.DEATH,new io.github.kpuctajluk.colonyloom.core.colony.WorldPosition("minecraft:overworld",8,64,14),"fixture-observed-empty","",0,0,io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.PREPARED,0,null);
+                            var effect=new io.github.kpuctajluk.colonyloom.core.action.EffectRecord(id,run.manifest.getUUID("colony"),null,npc.citizenId(),npc.bindingEpoch(),ActionContext.Kind.DEATH,new io.github.kpuctajluk.colonyloom.core.colony.WorldPosition("minecraft:overworld",8,64,14),"fixture-observed-empty","",0,0,io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.PREPARED,0,null,null,null);
                             registry.effects().prepare(effect,io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);
                             if(run.retainedPrepared==null) run.retainedPrepared=id;
                             else registry.effects().update(effect.observed(0,false));

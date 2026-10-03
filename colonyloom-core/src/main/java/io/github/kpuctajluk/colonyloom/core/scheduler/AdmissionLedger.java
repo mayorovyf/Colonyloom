@@ -34,6 +34,9 @@ public final class AdmissionLedger {
     private final int[] highWater = new int[RESOURCE_COUNT];
     private final long[] rejected = new long[RESOURCE_COUNT];
     private final Map<UUID, ColonyUsage> colonies = new HashMap<>();
+    private long criticalCapacityViolations;
+    private Resource criticalFailure;
+    private int failureUsed, failureCritical;
     private ColonyUsage activeHead;
 
     private static final class ColonyUsage {
@@ -62,6 +65,11 @@ public final class AdmissionLedger {
         Objects.requireNonNull(colony);
         Objects.requireNonNull(lane);
         Objects.requireNonNull(costs);
+        refreshCriticalBlockade();
+        if (lane == Lane.NORMAL && criticalFailure != null && (root || !costs.containsKey(Resource.READY_ENTRIES))) {
+            rejected[criticalFailure.ordinal()]++;
+            throw new AdmissionException(criticalFailure, Lane.CRITICAL);
+        }
         int[][] additions = new int[LANES.length][RESOURCE_COUNT];
         for (var entry : costs.entrySet()) {
             Resource resource = Objects.requireNonNull(entry.getKey());
@@ -77,7 +85,7 @@ public final class AdmissionLedger {
             throw new IllegalArgumentException("Per-owner caches must also account for global cache entries");
         }
         if (root) {
-            int[] cleanup = additions[Lane.SERVICE.ordinal()];
+            int[] cleanup = additions[(lane == Lane.CRITICAL ? Lane.CRITICAL : Lane.SERVICE).ordinal()];
             cleanup[Resource.WORKS.ordinal()] = Math.addExact(cleanup[Resource.WORKS.ordinal()], 1);
             cleanup[Resource.WAIT_REGISTRATIONS.ordinal()] = Math.addExact(cleanup[Resource.WAIT_REGISTRATIONS.ordinal()], 1);
         }
@@ -87,7 +95,7 @@ public final class AdmissionLedger {
             int failure = capacityFailure(colonyUsage, resource,
                     additions[Lane.NORMAL.ordinal()][index], additions[Lane.CRITICAL.ordinal()][index],
                     additions[Lane.SERVICE.ordinal()][index], lane);
-            if (failure >= 0) reject(resource, LANES[failure]);
+            if (failure >= 0) reject(resource, lane == Lane.CRITICAL ? Lane.CRITICAL : LANES[failure]);
         }
         if (colonyUsage == null) {
             colonyUsage = new ColonyUsage();
@@ -115,6 +123,7 @@ public final class AdmissionLedger {
 
     private void reject(Resource resource, Lane lane) {
         rejected[resource.ordinal()]++;
+        if (lane == Lane.CRITICAL) recordCriticalFailure(resource);
         throw new AdmissionException(resource, lane);
     }
 
@@ -141,6 +150,7 @@ public final class AdmissionLedger {
                     lane == Lane.CRITICAL ? amount : 0, lane == Lane.SERVICE ? amount : 0, lane);
             if (failure >= 0) {
                 rejected[resource.ordinal()]++;
+                if (lane == Lane.CRITICAL) recordCriticalFailure(resource);
                 return false;
             }
         }
@@ -232,12 +242,27 @@ public final class AdmissionLedger {
     public int overLimit(Resource resource) { ownerCheck.run(); return Math.max(0, used[resource.ordinal()] - limits.resource(resource)); }
     public void updateLimits(SimulationLimits limits) { ownerCheck.run(); this.limits = Objects.requireNonNull(limits); }
     public SimulationLimits limits() { ownerCheck.run(); return limits; }
+    public long criticalCapacityViolations() { ownerCheck.run(); return criticalCapacityViolations; }
+    public boolean normalAdmissionBlocked() { ownerCheck.run(); refreshCriticalBlockade(); return criticalFailure != null; }
+    private void recordCriticalFailure(Resource resource) {
+        criticalFailure = resource; criticalCapacityViolations++;
+        failureUsed = used[resource.ordinal()]; failureCritical = lanes[Lane.CRITICAL.ordinal()][resource.ordinal()];
+    }
+    private void refreshCriticalBlockade() {
+        if (criticalFailure != null && (used[criticalFailure.ordinal()] < failureUsed
+                || lanes[Lane.CRITICAL.ordinal()][criticalFailure.ordinal()] < failureCritical)) criticalFailure = null;
+    }
 
     /** Transfer diagnostic history after an authoritative replacement has been admitted. */
     public void inheritCounters(AdmissionLedger previous) {
         ownerCheck.run();
         Objects.requireNonNull(previous).ownerCheck.run();
         if (previous == this) return;
+        criticalCapacityViolations = Math.addExact(criticalCapacityViolations, previous.criticalCapacityViolations);
+        if (criticalFailure == null && previous.criticalFailure != null) {
+            criticalFailure = previous.criticalFailure; failureUsed = used[criticalFailure.ordinal()];
+            failureCritical = lanes[Lane.CRITICAL.ordinal()][criticalFailure.ordinal()];
+        }
         for (Resource resource : RESOURCES) {
             int index = resource.ordinal();
             highWater[index] = Math.max(highWater[index], previous.highWater[index]);
@@ -266,6 +291,13 @@ public final class AdmissionLedger {
             rootFinished = true;
             release(Resource.WAIT_REGISTRATIONS);
             if (closed) return;
+            if (rootLane == Lane.CRITICAL) {
+                int work = Resource.WORKS.ordinal(), critical = Lane.CRITICAL.ordinal();
+                int removable = Math.max(0, costs[critical][work] - 1);
+                costs[critical][work] -= removable; used[work] -= removable;
+                lanes[critical][work] -= removable; colonies.get(colony).lanes[critical][work] -= removable;
+                return;
+            }
             if (rootLane != Lane.SERVICE) {
                 release(Resource.WORKS, Lane.SERVICE);
                 return;
@@ -338,6 +370,7 @@ public final class AdmissionLedger {
             if (target == null) throw new IllegalStateException("Ready target must already own admitted state");
             if (sourceLane != targetLane && lanes[targetLane.ordinal()][ready] >= laneCapacity(Resource.READY_ENTRIES, targetLane)) {
                 rejected[ready]++;
+                if (targetLane == Lane.CRITICAL) recordCriticalFailure(Resource.READY_ENTRIES);
                 return false;
             }
             int targetUsed = target.lanes[targetLane.ordinal()][ready];

@@ -48,25 +48,28 @@ public final class AdmissionGameTests {
         var chunks=new ChunkDemandManager(core.registry(),core.budgets(),new NeoForgeChunkAccess(level.getServer(),new TicketController(ResourceLocation.parse("colonyloom:runtime"))));
         var admission=new CitizenAdmissionService(level.getServer(),core,chunks);
         core.scheduler().beforeWork(tick -> {chunks.tick(tick);admission.tick();});
-        int[] phase={0};long[] baseline={0},phaseTick={0};
+        int[] phase={0},foodBeforePause={0};long[] baseline={0},phaseTick={0},timerBeforePause={0};
         helper.onEachTick(() -> {
             core.tick(core.serverTick()+1);CitizenRecord record=core.registry().citizen(citizen);
             if(phase[0]==0&&record.activeTimeTicks()>=10) {
                 core.updateLimits(limits.withResource(Resource.LOADED_FOOTPRINT,1));chunks.limitsUpdated();phase[0]=1;
             } else if(phase[0]==1&&record.admission()==CitizenRecord.Admission.INACTIVE) {
-                baseline[0]=record.activeTimeTicks();phaseTick[0]=core.serverTick();phase[0]=2;
+                baseline[0]=record.activeTimeTicks();phaseTick[0]=core.serverTick();foodBeforePause[0]=record.food();timerBeforePause[0]=record.foodDecayTicks();phase[0]=2;
                 float before=entity.getHealth();entity.hurt(level.damageSources().generic(),2.0F);
                 helper.assertTrue(entity.getHealth()<before,"Inactive physical damage suppressed");
-            } else if(phase[0]==2&&core.serverTick()-phaseTick[0]>=60) {
-                helper.assertTrue(record.activeTimeTicks()==baseline[0],"Inactive own clock accumulated");
-                helper.assertTrue(record.remainingTimers().get("food")==1200L&&record.needs().get("food")==20&&entity.inventory().getItem(0).getCount()==3,"Inactive transition changed needs/timers/property");
+            } else if(phase[0]==2) {
+                for(int inactiveTick=0;inactiveTick<24000;inactiveTick++)core.tick(core.serverTick()+1);
+                record=core.registry().citizen(citizen);
+                helper.assertTrue(record.admission()==CitizenRecord.Admission.INACTIVE&&record.activeTimeTicks()==baseline[0],"Inactive manager accumulated own clock during 24000 ticks");
+                helper.assertTrue(record.foodDecayTicks()==timerBeforePause[0]&&record.food()==foodBeforePause[0]&&entity.inventory().getItem(0).getCount()==3,"Inactive interval changed food/residual/property");
                 core.updateLimits(limits);chunks.limitsUpdated();phase[0]=3;
             } else if(phase[0]==3&&record.admission()==CitizenRecord.Admission.ACTIVE) {
                 helper.assertTrue(record.activeTimeTicks()<=baseline[0]+1,"Readmission caught up inactive own time");
                 phaseTick[0]=core.serverTick();phase[0]=4;
             } else if(phase[0]==4&&core.serverTick()-phaseTick[0]>=10) {
                 helper.assertTrue(record.activeTimeTicks()>baseline[0]&&record.activeTimeTicks()<=baseline[0]+11,"Readmitted own time did not resume normally");
-                System.out.println("COLONYLOOM_INACTIVE_CLOCK pausedTicks=60 before="+baseline[0]+" after="+record.activeTimeTicks()+" physicalDamage=true property=3bread");
+                helper.assertTrue(record.foodDecayTicks()==timerBeforePause[0]-(record.activeTimeTicks()-baseline[0]),"Readmission food countdown caught up paused server ticks");
+                System.out.println("COLONYLOOM_INACTIVE_CLOCK pausedTicks=24000 before="+baseline[0]+" after="+record.activeTimeTicks()+" residual="+record.foodDecayTicks()+" physicalDamage=true property=3bread");
                 admission.close();chunks.close();entity.remove(Entity.RemovalReason.DISCARDED);core.beginStopping();core.stop();phase[0]=5;helper.succeed();
             }
         });

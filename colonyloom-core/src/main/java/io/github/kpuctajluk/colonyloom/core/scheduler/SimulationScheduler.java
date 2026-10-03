@@ -93,6 +93,7 @@ public final class SimulationScheduler {
         long queuedAt, schedulingSince;
         long activeSince = -1, accrued, waitRevision = -1;
         int score, queueIndex = -1;
+        Lane queuedLane;
         boolean queued, linked, changedWhileExecuting;
         boolean externallyInvalidated;
         Lease readyLease;
@@ -321,6 +322,7 @@ public final class SimulationScheduler {
         node.score = node.work.priority() + (node.work.lane() == Lane.NORMAL ? (int)Math.min(10,Math.max(0,clock-node.schedulingSince)/200) : 0);
         ArrayList<Node> queue = node.colony.queues[node.work.lane().ordinal()];
         if (node.work.lane()==Lane.NORMAL && queue.isEmpty()) node.colony.normalReadySince=tick;
+        node.queuedLane = node.work.lane();
         node.queueIndex = queue.size(); queue.add(node); node.queued = true; queueUp(queue,node.queueIndex);
         node.queuedAt=tick;
         if (!node.due.scheduled()) deadlines.schedule(node.due,tick+200);
@@ -338,11 +340,11 @@ public final class SimulationScheduler {
     }
     private void unqueue(Node node) {
         if (node.queued) {
-            ArrayList<Node> queue = node.colony.queues[node.work.lane().ordinal()]; int index = node.queueIndex;
+            ArrayList<Node> queue = node.colony.queues[node.queuedLane.ordinal()]; int index = node.queueIndex;
             Node last = queue.remove(queue.size()-1);
             if (index < queue.size()) { queue.set(index,last); last.queueIndex = index; if (index > 0 && compare(last,queue.get((index-1)/2)) < 0) queueUp(queue,index); else queueDown(queue,index); }
             node.queued = false; node.queueIndex = -1;
-            if (node.work.lane()==Lane.NORMAL && queue.isEmpty()) node.colony.normalReadySince=-1;
+            if (node.queuedLane==Lane.NORMAL && queue.isEmpty()) node.colony.normalReadySince=-1;
         }
         if (node.readyLease != null) { freeReady.add(node.readyLease); node.readyLease = null; }
     }
@@ -382,6 +384,11 @@ public final class SimulationScheduler {
                 WorkOrder required = board.work(dependency);
                 if (required.state() != State.COMPLETED) { park(node,Reason.RECONCILING); return; }
             }
+            if (work.criticalService() && !WorkOrder.DELIVERY.equals(work.typeId()) && work.assignee() != null) {
+                pause(node); board.waitAssigned(work.id(), Reason.MATERIALS, work.stage());
+                deadlines.schedule(node.due, tick + 1); return;
+            }
+            if (work.assignee() != null && !WorkBoard.allowsOrdinaryWork(work, board.registry().citizen(work.assignee()))) { park(node, Reason.MATERIALS); return; }
             if (work.assignee() != null && !eligible(node)) { pause(node); removeAssignment(node); board.transition(work.id(),State.WAITING,Reason.RECONCILING,work.stage()); park(node,Reason.RECONCILING); return; }
             if (work.state() == State.WAITING && work.assignee() != null && physical.containsKey(work.typeId())) board.resumeAssigned(work.id(),work.stage());
             if (work.state() == State.PLANNED || work.state() == State.WAITING) board.transition(work.id(),State.READY,Reason.NONE,work.stage());
@@ -421,6 +428,11 @@ public final class SimulationScheduler {
     private boolean assignmentBudgetDenied;
     private UUID candidate(WorkOrder work) {
         assignmentBudgetDenied = false;
+        if (work.subjectId() != null) {
+            if (!budgets.tryConsume(Budget.ASSIGNMENT_CANDIDATES, work.lane())) { assignmentBudgetDenied = true; return null; }
+            CitizenRecord subject = board.registry().citizen(work.subjectId());
+            return workerAvailable(subject) && work.target().dimension().equals(subject.lastKnownPosition().dimension()) ? subject.citizenId() : null;
+        }
         WorkerIndex index = workers.get(work.colonyId()); if (index == null) return null;
         WorkerBucket bucket = work.professionId() == null ? index.any : index.professions.get(work.professionId());
         if (bucket == null || bucket.ids.isEmpty()) return null;
@@ -440,7 +452,8 @@ public final class SimulationScheduler {
             long candidateStart = System.nanoTime();
             try {
                 UUID id = bucket.ids.get(bucket.cursor); bucket.cursor = (bucket.cursor+1) % bucket.ids.size(); CitizenRecord citizen = board.registry().citizen(id);
-                if (!workerAvailable(citizen) || !work.target().dimension().equals(citizen.lastKnownPosition().dimension())) continue;
+                if (!workerAvailable(citizen) || !WorkBoard.allowsOrdinaryWork(work, citizen) || !work.target().dimension().equals(citizen.lastKnownPosition().dimension())) continue;
+                if (!work.criticalService() && board.foodPending(id)) continue;
                 if(WorkOrder.DELIVERY.equals(work.typeId())) {
                     var order=board.registry().supply().deliveryForWork(work.id());
                     if(order!=null&&board.registry().supply().hasCargo(order.id())&&!id.equals(order.citizenId()))continue;
