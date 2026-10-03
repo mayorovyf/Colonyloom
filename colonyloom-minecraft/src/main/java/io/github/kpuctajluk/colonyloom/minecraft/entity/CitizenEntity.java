@@ -28,6 +28,8 @@ public final class CitizenEntity extends PathfinderMob {
     private long bindingEpoch;
     private boolean quarantined = true;
     private Runnable managedMovementGuard;
+    private io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics metrics;
+    public void runtimeMetrics(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics value) { requireServerThread(); metrics=Objects.requireNonNull(value); }
     private java.util.function.IntConsumer deathInventoryObserver;
     public void observeDeathInventory(java.util.function.IntConsumer observer) { requireServerThread(); deathInventoryObserver=Objects.requireNonNull(observer); }
 
@@ -87,11 +89,24 @@ public final class CitizenEntity extends PathfinderMob {
     public boolean isQuarantined() {
         return quarantined;
     }
-    /** Backend-owned safety check only; pathfinding and progression stay in global managed budgets. */
+    /** Backend-owned guarded native locomotion; path search stays in global managed budgets. */
     public void managedMovementGuard(Runnable guard) { requireServerThread(); managedMovementGuard = guard; }
     @Override public void tick() {
-        if (!level().isClientSide && managedMovementGuard != null) managedMovementGuard.run();
-        super.tick();
+        long start=metrics==null ? 0 : System.nanoTime();
+        try {
+            if (!level().isClientSide && managedMovementGuard != null) managedMovementGuard.run();
+            super.tick();
+        } finally { if(metrics!=null) metrics.record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.ENTITY_TICK,System.nanoTime()-start); }
+    }
+    @Override public void move(net.minecraft.world.entity.MoverType type,net.minecraft.world.phys.Vec3 movement) {
+        long start=metrics==null ? 0 : System.nanoTime();
+        try { super.move(type,movement); }
+        finally { if(metrics!=null) metrics.record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.MOVEMENT,System.nanoTime()-start); }
+    }
+    @Override public boolean hurt(net.minecraft.world.damagesource.DamageSource source,float amount) {
+        long start=metrics==null ? 0 : System.nanoTime();
+        try { return super.hurt(source,amount); }
+        finally { if(metrics!=null) metrics.record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.DAMAGE,System.nanoTime()-start); }
     }
 
     /** Runtime-only decision. Never loaded from NBT or accepted from a client. */

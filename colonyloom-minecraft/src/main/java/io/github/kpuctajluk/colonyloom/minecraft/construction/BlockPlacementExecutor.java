@@ -167,6 +167,7 @@ public final class BlockPlacementExecutor implements WorldAccess {
         float oldYaw = citizen.getYRot();
         if (desired.is(Blocks.OAK_STAIRS)) citizen.setYRot(desired.getValue(StairBlock.FACING).toYRot());
         InteractionResult result;
+        long interactionStart=System.nanoTime();
         try {
             result = interaction.use(level, citizen, principal, pos, source);
         } catch (RuntimeException failure) {
@@ -175,6 +176,9 @@ public final class BlockPlacementExecutor implements WorldAccess {
             citizen.inventory().setChanged();
             return Placement.AMBIGUOUS;
         } finally {
+            long nanos=System.nanoTime()-interactionStart;
+            registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.BLOCK_CHANGE,nanos);
+            registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.BLOCK_CHANGE_EXTERNAL,nanos);
             citizen.setYRot(oldYaw);
         }
         citizen.inventory().setChanged();

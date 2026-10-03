@@ -34,6 +34,7 @@ public final class ColonyPersistence {
     public static ColonyPersistence open(MinecraftServer server, ServerRuntime runtime,Runnable flushPendingIo) {
         ColonyPersistence persistence = new ColonyPersistence(server, runtime,flushPendingIo);
         persistence.requireThread();
+        long loadStart=System.nanoTime();
         try {
             boolean existing = DurableNbt.exists(persistence.statePath);
             ColonySavedData loaded = existing
@@ -61,9 +62,12 @@ public final class ColonyPersistence {
             // instead of computeIfAbsent, which could silently replace a failed load with empty data.
             server.overworld().getDataStorage().set(ColonySavedData.NAME, loaded);
             loaded.bindSnapshotSource(runtime.registry()::snapshot);
+            loaded.metrics(runtime.metrics());
         } catch (IOException | RuntimeException exception) {
             persistence.failureReason = "Colonyloom persistence blocked: " + exception.getMessage();
             persistence.data = null;
+        } finally {
+            runtime.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.LOAD,System.nanoTime()-loadStart);
         }
         return persistence;
     }
@@ -110,6 +114,8 @@ public final class ColonyPersistence {
 
     /** Forced DTO persistence, notably after explicit accept-world. Does not mark the world clean. */
     public void persistSnapshot() {
+        long saveStart=System.nanoTime();
+        try {
         ensureSessionDirty();
         capture();
         try {
@@ -117,10 +123,13 @@ public final class ColonyPersistence {
         } catch (IOException | RuntimeException exception) {
             fail(exception);
         }
+        } finally { runtime.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.SAVE,System.nanoTime()-saveStart); }
     }
 
     /** Stops on the server thread between steps; unlike shutdown this never marks the session clean. */
     public boolean checkpointForCompaction() {
+        long saveStart=System.nanoTime();
+        try {
         requireAvailable(); ensureSessionDirty();
         UUID checkpoint=UUID.randomUUID(); data.beginCheckpoint(checkpoint,runtime.registry().snapshot());
         CompoundTag expected=data.diskEnvelope(server.registryAccess());
@@ -131,10 +140,13 @@ public final class ColonyPersistence {
             DurableNbt.writeVerified(markerPath,marker(false,checkpoint),DurableNbt.MARKER_LIMIT);
             return true;
         } catch(IOException | RuntimeException error) { data.setDirty(); fail(error); return false; }
+        } finally { runtime.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.SAVE,System.nanoTime()-saveStart); }
     }
 
     /** Call after the parent has stopped command admission and finished the bounded server step. */
     public void checkpointAndClean() {
+        long saveStart=System.nanoTime();
+        try {
         requireAvailable();
         ensureSessionDirty();
         UUID checkpoint = UUID.randomUUID();
@@ -165,6 +177,7 @@ public final class ColonyPersistence {
             }
             fail(exception);
         }
+        } finally { runtime.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.SAVE,System.nanoTime()-saveStart); }
     }
 
     private boolean previousMarkerClean(UUID checkpoint) {

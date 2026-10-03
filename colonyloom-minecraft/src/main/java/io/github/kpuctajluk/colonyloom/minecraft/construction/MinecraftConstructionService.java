@@ -71,7 +71,10 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         }
         var target=state.layout.targets()[site.cursor()];
         if(!registry.budgets().tryConsume(Budget.BLUEPRINT_COMPARISONS,work.lane())) { waitFor(work,WorkOrder.Reason.BUDGET); return; }
-        if(placement.matches(target.position(),target.expected())) { controller.advance(work.id(),false); return; }
+        long comparisonStart=System.nanoTime(); boolean matches;
+        try { matches=placement.matches(target.position(),target.expected()); }
+        finally { registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.BLUEPRINT_UNIT,System.nanoTime()-comparisonStart); }
+        if(matches) { controller.advance(work.id(),false); return; }
         var citizen=registry.citizen(work.assignee());
         if(state.lastCursor!=site.cursor()) {
             navigation.cancel(work.id()); state.lastCursor=site.cursor(); state.generation=site.cursor(); state.arrived=false;
@@ -97,9 +100,10 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         // No observer saves implicitly, so fault fixtures can deliberately persist only one physical side.
         chunks.setProtection(state.chunkOwner,true,false,false);
         WorldAccess.Placement result;
+        long physicalStart=System.nanoTime();
         try { result=placement.place(context,citizen.bindingEpoch(),target.expected()); }
         catch(RuntimeException failure) { ambiguous(work,effect,before); throw failure; }
-        finally { chunks.setProtection(state.chunkOwner,false,false,false); }
+        finally { registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.PHYSICAL_UNIT,System.nanoTime()-physicalStart); chunks.setProtection(state.chunkOwner,false,false,false); }
         if(result==WorldAccess.Placement.PLACED || result==WorldAccess.Placement.AMBIGUOUS) {
             int after=placement.materialCount(citizen.citizenId(),citizen.bindingEpoch(),target.expected().itemId());
             if(after<0) after=before;

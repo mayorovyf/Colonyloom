@@ -11,6 +11,7 @@ import io.github.kpuctajluk.colonyloom.core.navigation.NavigationService.Request
 import io.github.kpuctajluk.colonyloom.core.navigation.NavigationService.Route;
 import io.github.kpuctajluk.colonyloom.core.work.WorkOrder;
 import io.github.kpuctajluk.colonyloom.minecraft.entity.CitizenEntity;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,9 +19,11 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.Mth;
@@ -29,28 +32,30 @@ import net.minecraft.world.entity.Mob;
 import net.minecraft.world.entity.ai.navigation.GroundPathNavigation;
 import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.PathNavigationRegion;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.material.FluidState;
 import net.minecraft.world.level.pathfinder.Node;
 import net.minecraft.world.level.pathfinder.Path;
-import net.minecraft.world.level.pathfinder.PathFinder;
-import net.minecraft.world.level.pathfinder.PathType;
-import net.minecraft.world.level.pathfinder.PathfindingContext;
-import net.minecraft.world.level.pathfinder.WalkNodeEvaluator;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.CollisionContext;
+import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
 
-/** One server's synchronous vanilla ground backend; never asks the world to load a search chunk. */
+/** Server-thread, portioned ground A*; search reads only admitted, entity-ticking chunks. */
 public final class MinecraftNavigationBackend implements NavigationService.Backend {
     private final MinecraftServer server;
     private final ColonyRegistry registry;
     private final ChunkDemandManager chunks;
     private final NavigationService.GoalAuthority goals;
     private final Map<UUID, Moving> moving=new HashMap<>();
+    private final Query[] queries=new Query[BoundedGroundSearch.MAX_QUERIES];
+    private final Query pathValidation=new Query(false);
+    private int concurrentQueries, queryHighWater, nodeHighWater, openHighWater, portionHighWater;
+    private long poolRejections, totalExpansions, searchPortions, completedQueries, exhaustedQueries, cancelledQueries, nodeLimitQueries;
     private static final class Moving {
         final Request request;
         final CitizenEntity entity;
@@ -64,7 +69,7 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
             this.request=request; this.entity=entity; this.guard=guard; this.navigation=navigation; this.validity=validity; lastPosition=entity.position();
         }
     }
-    private record VanillaRoute(UUID requestId,UUID entityId,long epoch,long goalRevision,Path path,Guard guard) implements Route {
+    private record GroundRoute(UUID requestId,UUID entityId,long epoch,long goalRevision,Path path,Guard guard) implements Route {
         @Override public int nodeCount() { return path.getNodeCount(); }
     }
     public MinecraftNavigationBackend(MinecraftServer server,ColonyRegistry registry,ChunkDemandManager chunks) {
@@ -97,44 +102,111 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
     }
     @Override public Route search(Request request,List<ChunkKey> admittedRegion) {
         CitizenEntity entity=entity(request);
-        if (entity==null || !chunks.admitted(request.workId()) || !chunks.ready(request.workId()) || admittedRegion.isEmpty() || admittedRegion.size()>81) return null;
-        if (entity.distanceToSqr(request.target().x()+0.5,request.target().y(),request.target().z()+0.5)>4096) return null;
-        ServerLevel level=(ServerLevel)entity.level();
-        Guard guard=new Guard(request,level,admittedRegion);
-        if (!guard.allReady()) return null;
-        int minX=Integer.MAX_VALUE,minZ=Integer.MAX_VALUE,maxX=Integer.MIN_VALUE,maxZ=Integer.MIN_VALUE;
-        for (ChunkKey key:admittedRegion) { minX=Math.min(minX,key.x());minZ=Math.min(minZ,key.z());maxX=Math.max(maxX,key.x());maxZ=Math.max(maxZ,key.z()); }
-        // Constructor calls getChunk: check its entire rectangular footprint first, with no yield.
-        for (int x=minX;x<=maxX;x++) for (int z=minZ;z<=maxZ;z++) if (!guard.allowedChunk(x,z)) return null;
-        GuardedRegion region=new GuardedRegion(level,new BlockPos(minX<<4,level.getMinBuildHeight(),minZ<<4),
-                new BlockPos((maxX<<4)+15,level.getMaxBuildHeight()-1,(maxZ<<4)+15),guard);
-        GuardedEvaluator evaluator=new GuardedEvaluator(guard);
-        evaluator.setCanPassDoors(true);
-        Path path;
-        try {
-            path=new PathFinder(evaluator,NavigationService.SEARCH_NODES).findPath(region,entity,
-                    Set.of(new BlockPos(request.target().x(),request.target().y(),request.target().z())),64.0F,0,1.0F);
-        } catch (UnsafeSearch denied) { evaluator.done(); return null; }
-        if (path==null || !path.canReach() || path.getNodeCount()>NavigationService.SEARCH_NODES || !validPath(path,guard,entity)) return null;
-        return new VanillaRoute(request.id(),entity.getUUID(),request.epoch(),request.goalRevision(),path,guard);
-    }
-    private static boolean validPath(Path path,Guard guard,CitizenEntity entity) {
-        for (int i=0;i<path.getNodeCount();i++) {
-            Node node=path.getNode(i);
-            if (!guard.node(node.x,node.y,node.z,entity.getBbWidth(),entity.getBbHeight())) return false;
+        Query query=query(request.workId());
+        if (query!=null && (!query.request.equals(request) || query.entity!=entity || !query.guard.region.equals(admittedRegion))) {
+            release(query); cancelledQueries++; query=null;
         }
-        return true;
+        if (entity==null || !chunks.admitted(request.workId()) || !chunks.ready(request.workId()) || admittedRegion.isEmpty() || admittedRegion.size()>81
+                || entity.distanceToSqr(request.target().x()+0.5,request.target().y(),request.target().z()+0.5)>4096) {
+            if (query!=null) { release(query); cancelledQueries++; }
+            return null;
+        }
+        try {
+            if (query==null) {
+                query=acquire();
+                if (query==null) { poolRejections++; return NavigationService.CAPACITY_WAIT_ROUTE; }
+                query.start(request,entity,new Guard(request,(ServerLevel)entity.level(),admittedRegion));
+                if (!query.guard.allReady() || !query.standable(query.startX,query.startY,query.startZ)
+                        || !query.standable(request.target().x(),request.target().y(),request.target().z())) {
+                    release(query); exhaustedQueries++; return null;
+                }
+            } else if (!query.guard.allReady() || !query.atStart()) {
+                release(query); cancelledQueries++; return null;
+            }
+            BoundedGroundSearch.Result result=query.search.advance(query);
+            searchPortions++; totalExpansions+=query.search.lastExpansions();
+            portionHighWater=Math.max(portionHighWater,query.search.lastExpansions());
+            nodeHighWater=Math.max(nodeHighWater,query.search.nodeCount());
+            openHighWater=Math.max(openHighWater,query.search.openHighWater());
+            if (result==BoundedGroundSearch.Result.PENDING) return NavigationService.PENDING_ROUTE;
+            if (query.search.nodeLimitHit()) nodeLimitQueries++;
+            if (result==BoundedGroundSearch.Result.EXHAUSTED) { release(query); exhaustedQueries++; return null; }
+            Path path=query.path();
+            if (path==null) { release(query); exhaustedQueries++; return null; }
+            Guard guard=query.guard;
+            boolean valid=validPath(path,guard,entity);
+            release(query);
+            if (!valid) { exhaustedQueries++; return null; }
+            completedQueries++;
+            return new GroundRoute(request.id(),entity.getUUID(),request.epoch(),request.goalRevision(),path,guard);
+        } catch (UnsafeSearch unavailable) {
+            if (query!=null && query.request!=null) { release(query); cancelledQueries++; }
+            return null;
+        } catch (RuntimeException | Error failure) {
+            if (query!=null && query.request!=null) release(query);
+            throw failure;
+        }
+    }
+    private Query query(UUID workId) {
+        for (Query query:queries) if (query!=null && query.request!=null && query.request.workId().equals(workId)) return query;
+        return null;
+    }
+    private Query acquire() {
+        for (int i=0;i<queries.length;i++) {
+            if (queries[i]==null) queries[i]=new Query();
+            if (queries[i].request==null) return queries[i];
+        }
+        return null;
+    }
+    private void release(Query query) {
+        query.request=null; query.entity=null; query.guard=null; query.context=null;
+        concurrentQueries--;
+    }
+    public Map<String,Object> diagnostics() {
+        owner(); Map<String,Object> result=new HashMap<>();
+        result.put("backend","portioned-ground-a-star");
+        result.put("maxExpansionsPerPortion",BoundedGroundSearch.MAX_EXPANSIONS);
+        result.put("maxNodesPerQuery",BoundedGroundSearch.MAX_NODES);
+        result.put("maxConcurrentQueries",BoundedGroundSearch.MAX_QUERIES);
+        result.put("maxPoolNodes",BoundedGroundSearch.MAX_QUERIES*BoundedGroundSearch.MAX_NODES);
+        result.put("concurrentQueries",concurrentQueries); result.put("queryHighWater",queryHighWater);
+        result.put("poolRejections",poolRejections); result.put("nodeHighWater",nodeHighWater);
+        result.put("openHighWater",openHighWater); result.put("portionExpansionHighWater",portionHighWater);
+        result.put("searchPortions",searchPortions); result.put("totalExpansions",totalExpansions);
+        result.put("completedQueries",completedQueries); result.put("exhaustedQueries",exhaustedQueries);
+        result.put("cancelledQueries",cancelledQueries); result.put("nodeLimitQueries",nodeLimitQueries);
+        return result;
+    }
+    private boolean validPath(Path path,Guard guard,CitizenEntity entity) {
+        if (!guard.allReady()) return false;
+        Query terrain=pathValidation;
+        terrain.entity=entity; terrain.guard=guard; terrain.context=CollisionContext.of(entity);
+        try {
+            for (int i=0;i<path.getNodeCount();i++) {
+                Node node=path.getNode(i);
+                if (!terrain.standable(node.x,node.y,node.z)) return false;
+                if (i>0) {
+                    Node previous=path.getNode(i-1);
+                    if (Math.abs(previous.x-node.x)+Math.abs(previous.z-node.z)!=1 || Math.abs(previous.y-node.y)>1
+                            || !terrain.transition(previous.x,previous.y,previous.z,node.x,node.y,node.z)) return false;
+                }
+            }
+            return true;
+        } catch (UnsafeSearch unavailable) { return false; }
+        finally { terrain.entity=null; terrain.guard=null; terrain.context=null; }
     }
     @Override public boolean apply(Request request,Route route,BooleanSupplier stillCurrent) {
         CitizenEntity entity=entity(request);
-        if (!(route instanceof VanillaRoute vanilla) || entity==null || !request.id().equals(vanilla.requestId())
-                || !entity.getUUID().equals(vanilla.entityId()) || request.epoch()!=vanilla.epoch()
-                || request.goalRevision()!=vanilla.goalRevision() || !stillCurrent.getAsBoolean() || !vanilla.guard().allReady()
-                || !validPath(vanilla.path(),vanilla.guard(),entity)) return false;
+        if (!(route instanceof GroundRoute ground) || entity==null || !request.id().equals(ground.requestId())
+                || !entity.getUUID().equals(ground.entityId()) || request.epoch()!=ground.epoch()
+                || request.goalRevision()!=ground.goalRevision() || !stillCurrent.getAsBoolean() || !ground.guard().allReady()
+                || !validPath(ground.path(),ground.guard(),entity)) return false;
+        Node start=ground.path().getNode(0);
+        if (entity.blockPosition().getX()!=start.x || entity.blockPosition().getY()!=start.y || entity.blockPosition().getZ()!=start.z) return false;
         stop(request);
         GroundPathNavigation navigation=new ControlledNavigation(entity,entity.level());
-        if (!navigation.moveTo(vanilla.path(),1.0)) return false;
-        Moving current=new Moving(request,entity,vanilla.guard(),navigation,stillCurrent);
+        if (!navigation.moveTo(ground.path(),1.0)) return false;
+        Moving current=new Moving(request,entity,ground.guard(),navigation,stillCurrent);
         moving.put(request.workId(),current);
         entity.managedMovementGuard(() -> safetyCheck(current));
         return true;
@@ -149,7 +221,7 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         if (current==null || !current.request.id().equals(request.id()) || current.entity!=entity || !current.guard.allReady()) {
             stop(request); return Motion.UNAVAILABLE;
         }
-        if (entity.distanceToSqr(request.target().x()+0.5,request.target().y(),request.target().z()+0.5)<=0.64
+        if (entity.distanceToSqr(request.target().x()+0.5,request.target().y(),request.target().z()+0.5)<=0.01
                 && Math.abs(entity.getY()-request.target().y())<=0.5) { stop(request); return Motion.ARRIVED; }
         Path path=current.navigation.getPath();
         if (path==null || current.navigation.isDone() || current.navigation.isStuck()
@@ -158,12 +230,14 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         if (!current.guard.node(next.getX(),next.getY(),next.getZ(),entity.getBbWidth(),entity.getBbHeight())) { stop(request); return Motion.UNAVAILABLE; }
         AABB body=entity.getBoundingBox().move(next.getX()+0.5-entity.getX(),next.getY()-entity.getY(),next.getZ()+0.5-entity.getZ());
         if (!current.guard.box(body.inflate(1.0))) { stop(request); return Motion.UNAVAILABLE; }
-        if (!entity.level().noCollision(entity,body)) { stop(request); return Motion.OBSTRUCTED; }
+        long collisionStart=System.nanoTime(); boolean collisionFree;
+        try { collisionFree=entity.level().noCollision(entity,body); }
+        finally { registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.COLLISION,System.nanoTime()-collisionStart); }
+        if (!collisionFree || !pathValidation.safeNext(path,entity,current.guard)) { stop(request); return Motion.OBSTRUCTED; }
         Vec3 position=entity.position();
         if (position.distanceToSqr(current.lastPosition)<0.0001) current.stalled++; else current.stalled=0;
         current.lastPosition=position;
         if (current.stalled>=20) { stop(request); return Motion.OBSTRUCTED; }
-        current.navigation.tick();
         return Motion.MOVING;
     }
     private void safetyCheck(Moving current) {
@@ -173,9 +247,12 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
                 || !current.guard.box(entity.getBoundingBox().expandTowards(entity.getDeltaMovement()).inflate(1.0))) {
             halt(current,Motion.UNAVAILABLE); return;
         }
+        if(entity.distanceToSqr(current.request.target().x()+0.5,current.request.target().y(),current.request.target().z()+0.5)<=0.01) {
+            halt(current,Motion.ARRIVED);return;
+        }
         Path path=current.navigation.getPath();
         if (path==null || path.isDone()) {
-            if (entity.distanceToSqr(current.request.target().x()+0.5,current.request.target().y(),current.request.target().z()+0.5)>0.64) {
+            if (entity.distanceToSqr(current.request.target().x()+0.5,current.request.target().y(),current.request.target().z()+0.5)>0.01) {
                 halt(current,Motion.OBSTRUCTED); return;
             }
             entity.stopInPlace();
@@ -188,7 +265,10 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         if (!current.guard.node(next.getX(),next.getY(),next.getZ(),entity.getBbWidth(),entity.getBbHeight()) || !current.guard.box(body.inflate(1))) {
             halt(current,Motion.UNAVAILABLE); return;
         }
-        if (!entity.level().noCollision(entity,body)) halt(current,Motion.OBSTRUCTED);
+        if (!entity.level().noCollision(entity,body) || !pathValidation.safeNext(path,entity,current.guard)) { halt(current,Motion.OBSTRUCTED); return; }
+        // Native locomotion advances with the physical entity, not with scarce dirty/status polling.
+        // Search portions and request/status reconciliation remain globally budgeted.
+        current.navigation.tick();
     }
     private void halt(Moving current,Motion reason) {
         current.stopped=reason; current.navigation.stop(); current.entity.managedMovementGuard(null); current.entity.stopInPlace();
@@ -197,90 +277,211 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         current.entity.setDeltaMovement(current.entity.getDeltaMovement().multiply(0,1,0));
     }
     @Override public void stop(Request request) {
-        owner(); Moving current=moving.get(request.workId());
+        owner(); Query query=query(request.workId());
+        if (query!=null && query.request.id().equals(request.id())) { release(query); cancelledQueries++; }
+        Moving current=moving.get(request.workId());
         if (current==null || !current.request.id().equals(request.id())) return;
         moving.remove(request.workId()); halt(current,Motion.UNAVAILABLE);
     }
-    /** The entity's default navigator stays idle. Only budgeted polls advance this vanilla controller. */
+    /** The default navigator stays idle; this controller advances only inside the guarded physical entity tick. */
     private static final class ControlledNavigation extends GroundPathNavigation {
         ControlledNavigation(Mob mob,Level level) { super(mob,level); }
         @Override public void recomputePath() { stop(); }
         @Override protected Path createPath(Set<BlockPos> targets,int accuracy,boolean offset,int range,float distance) { return null; }
         @Override protected void trimPath() { /* Search already validates the exact target; do not re-read arbitrary sky columns. */ }
+        @Override public boolean canCutCorner(net.minecraft.world.level.pathfinder.PathType type) { return false; }
+        @Override protected double getGroundY(Vec3 target) { return target.y; }
+        @Override protected void followThePath() {
+            if (path.getNextNodeIndex()!=path.getNodeCount()-1) { super.followThePath(); return; }
+            Node last=path.getNextNode();
+            if (mob.distanceToSqr(last.x+0.5,last.y,last.z+0.5)<=0.01) path.advance();
+            doStuckDetection(getTempMobPos());
+        }
     }
     private static final class UnsafeSearch extends RuntimeException {
         UnsafeSearch() { super(null,null,false,false); }
     }
-    private final class Guard {
+    private final class Guard implements BlockGetter {
         final Request request;
         final ServerLevel level;
         final List<ChunkKey> region;
+        final LevelChunk[] physicalChunks;
+        final int[] chunkTable=new int[256];
         final BlockPos.MutableBlockPos readinessPosition=new BlockPos.MutableBlockPos();
-        Guard(Request request,ServerLevel level,List<ChunkKey> region) { this.request=request;this.level=level;this.region=region; }
+        Guard(Request request,ServerLevel level,List<ChunkKey> region) {
+            this.request=request; this.level=level; this.region=List.copyOf(region);
+            physicalChunks=new LevelChunk[region.size()];
+            for (int i=0;i<region.size();i++) {
+                ChunkKey key=region.get(i);
+                physicalChunks[i]=level.getChunkSource().getChunkNow(key.x(),key.z());
+                int slot=chunkSlot(key.x(),key.z());
+                if (chunkTable[slot]!=0 || !key.dimension().equals(request.target().dimension())) throw new UnsafeSearch();
+                chunkTable[slot]=i+1;
+            }
+        }
+        int chunkSlot(int x,int z) {
+            int slot=(x*73428767 ^ z*912931 ^ (x>>>16) ^ (z>>>16)) & (chunkTable.length-1);
+            while (chunkTable[slot]!=0) {
+                ChunkKey key=region.get(chunkTable[slot]-1);
+                if (key.x()==x && key.z()==z) break;
+                slot=(slot+1) & (chunkTable.length-1);
+            }
+            return slot;
+        }
         boolean allowedChunk(int x,int z) {
-            ChunkKey selected=null;
-            for (ChunkKey key:region) if (key.x()==x && key.z()==z && key.dimension().equals(request.target().dimension())) { selected=key;break; }
-            return selected!=null && chunks.admitted(request.workId()) && chunks.admitted(selected)
-                    && chunks.ready(selected,ChunkDemandManager.Readiness.ENTITY_TICKING)
-                    && level.getChunkSource().getChunkNow(x,z)!=null && level.isPositionEntityTicking(readinessPosition.set(x<<4,request.target().y(),z<<4));
+            int index=chunkTable[chunkSlot(x,z)]-1;
+            if (index<0) return false;
+            ChunkKey key=region.get(index);
+            return chunks.admitted(request.workId()) && chunks.admitted(key)
+                    && chunks.ready(key,ChunkDemandManager.Readiness.ENTITY_TICKING) && physicalChunks[index]!=null
+                    && level.getChunkSource().getChunkNow(x,z)==physicalChunks[index]
+                    && level.isPositionEntityTicking(readinessPosition.set(x<<4,request.target().y(),z<<4));
         }
         boolean allReady() { for (ChunkKey key:region) if (!allowedChunk(key.x(),key.z())) return false;return true; }
-        boolean box(AABB box) { return area(box.minX,box.maxX,box.minZ,box.maxZ); }
+        boolean box(AABB box) {
+            return box.minY>=level.getMinBuildHeight() && box.maxY<=level.getMaxBuildHeight()
+                    && withinBorder(box.minX,box.maxX,box.minZ,box.maxZ) && area(box.minX,box.maxX,box.minZ,box.maxZ);
+        }
         boolean area(double fromX,double toX,double fromZ,double toZ) {
             int minX=Mth.floor(fromX)>>4,maxX=Mth.floor(toX)>>4,minZ=Mth.floor(fromZ)>>4,maxZ=Mth.floor(toZ)>>4;
             if ((long)(maxX-minX+1)*(maxZ-minZ+1)>81) return false;
             for (int x=minX;x<=maxX;x++) for (int z=minZ;z<=maxZ;z++) if (!allowedChunk(x,z)) return false;
             return true;
         }
+        // Search portions do not yield: allReady validates admission/readiness before native shape reads.
+        boolean searchArea(double fromX,double toX,double fromZ,double toZ) {
+            int minX=Mth.floor(fromX)>>4,maxX=Mth.floor(toX)>>4,minZ=Mth.floor(fromZ)>>4,maxZ=Mth.floor(toZ)>>4;
+            if ((long)(maxX-minX+1)*(maxZ-minZ+1)>81) return false;
+            for (int x=minX;x<=maxX;x++) for (int z=minZ;z<=maxZ;z++) if (chunkTable[chunkSlot(x,z)]==0) return false;
+            return true;
+        }
+        boolean withinBorder(double fromX,double toX,double fromZ,double toZ) {
+            return fromX>=level.getWorldBorder().getMinX() && toX<=level.getWorldBorder().getMaxX()
+                    && fromZ>=level.getWorldBorder().getMinZ() && toZ<=level.getWorldBorder().getMaxZ();
+        }
         boolean node(int x,int y,int z,float width,float height) {
             double half=width*0.5;
-            return y>=level.getMinBuildHeight()+1 && y+height<level.getMaxBuildHeight()
+            return y>=level.getMinBuildHeight()+1 && y+height<=level.getMaxBuildHeight()
+                    && withinBorder(x+0.5-half,x+0.5+half,z+0.5-half,z+0.5+half)
                     && area(x+0.5-half-1,x+0.5+half+1,z+0.5-half-1,z+0.5+half+1);
         }
         LevelChunk chunk(BlockPos pos) {
-            if (!allowedChunk(pos.getX()>>4,pos.getZ()>>4)) throw new UnsafeSearch();
-            return level.getChunkSource().getChunkNow(pos.getX()>>4,pos.getZ()>>4);
+            int index=chunkTable[chunkSlot(pos.getX()>>4,pos.getZ()>>4)]-1;
+            if (index<0 || physicalChunks[index]==null) throw new UnsafeSearch();
+            return physicalChunks[index];
         }
+        @Override public BlockState getBlockState(BlockPos pos) { return chunk(pos).getBlockState(pos); }
+        @Override public FluidState getFluidState(BlockPos pos) { return chunk(pos).getFluidState(pos); }
+        @Override public BlockEntity getBlockEntity(BlockPos pos) { return chunk(pos).getBlockEntity(pos); }
+        @Override public int getHeight() { return level.getHeight(); }
+        @Override public int getMinBuildHeight() { return level.getMinBuildHeight(); }
     }
-    /** Reject candidate coordinates and their body/neighbor footprint before vanilla reads anything. */
-    private static final class GuardedEvaluator extends WalkNodeEvaluator {
-        final Guard guard;
-        GuardedEvaluator(Guard guard) { this.guard=guard; }
-        @Override protected Node getNode(int x,int y,int z) {
-            if (nodes.size()>=NavigationService.SEARCH_NODES && !nodes.containsKey(Node.createHash(x,y,z))) throw new UnsafeSearch();
-            return super.getNode(x,y,z);
+    private final class Query implements BoundedGroundSearch.Terrain {
+        final BoundedGroundSearch search;
+        final BlockPos.MutableBlockPos position=new BlockPos.MutableBlockPos();
+        final Shapes.DoubleLineConsumer collisions=this::collisionBox;
+        final ArrayList<Entity> occupants=new ArrayList<>(1);
+        final java.util.function.Predicate<Entity> occupied=other -> other!=this.entity && other.isPushable() && !other.isSpectator();
+        Request request;
+        CitizenEntity entity;
+        Guard guard;
+        CollisionContext context;
+        int startX,startY,startZ,blockX,blockY,blockZ;
+        double minX,minY,minZ,maxX,maxY,maxZ;
+        boolean intersects;
+        Query() { this(true); }
+        Query(boolean allocateSearch) { search=allocateSearch ? new BoundedGroundSearch() : null; }
+        void start(Request request,CitizenEntity entity,Guard guard) {
+            this.request=request; this.entity=entity; this.guard=guard; context=CollisionContext.of(entity);
+            BlockPos start=entity.blockPosition(); startX=start.getX(); startY=start.getY(); startZ=start.getZ();
+            concurrentQueries++; queryHighWater=Math.max(queryHighWater,concurrentQueries);
+            search.begin(startX,startY,startZ,request.target().x(),request.target().y(),request.target().z());
         }
-        @Override public void prepare(PathNavigationRegion region,Mob mob) {
-            super.prepare(region,mob);
-            // Guard cache hits too; the base method updates loader-visible currentEvalPos.
-            currentContext=new PathfindingContext(region,mob) {
-                @Override public PathType getPathTypeFromState(int x,int y,int z) {
-                    guard.chunk(new BlockPos(x,y,z));
-                    return super.getPathTypeFromState(x,y,z);
-                }
-            };
+        boolean atStart() {
+            BlockPos current=entity.blockPosition();
+            return current.getX()==startX && current.getY()==startY && current.getZ()==startZ
+                    && Math.abs(entity.getY()-startY)<0.01;
         }
-        @Override protected Node findAcceptedNode(int x,int y,int z,int step,double floor,net.minecraft.core.Direction direction,PathType previous) {
-            if (!guard.node(x,y,z,mob.getBbWidth(),mob.getBbHeight())) return null;
-            return super.findAcceptedNode(x,y,z,step,floor,direction,previous);
+        @Override public boolean standable(int x,int y,int z) {
+            double half=entity.getBbWidth()*0.5;
+            if (y<guard.level.getMinBuildHeight()+1 || y+entity.getBbHeight()>guard.level.getMaxBuildHeight()
+                    || !guard.withinBorder(x+0.5-half,x+0.5+half,z+0.5-half,z+0.5+half)
+                    || !guard.searchArea(x+0.5-half-1,x+0.5+half+1,z+0.5-half-1,z+0.5+half+1)) return false;
+            position.set(x,y-1,z);
+            BlockState support=guard.getBlockState(position);
+            if (!support.getFluidState().isEmpty() || support.is(BlockTags.CLIMBABLE)
+                    || !support.isFaceSturdy(guard,position,Direction.UP)) return false;
+            VoxelShape shape=support.getCollisionShape(guard,position,context);
+            if (shape.isEmpty() || Math.abs(shape.max(Direction.Axis.Y)-1.0)>1.0E-7 || !Block.isFaceFull(shape,Direction.UP)) return false;
+            AABB body=new AABB(x+0.5-half,y,z+0.5-half,x+0.5+half,y+entity.getBbHeight(),z+0.5+half);
+            BlockPos occupiedStart=entity.blockPosition();
+            // Occupants are detour obstacles, not a permanent veto on reaching a shared goal.
+            // Native collision/push handling remains authoritative during the final approach.
+            boolean goal=request!=null && x==request.target().x() && y==request.target().y() && z==request.target().z();
+            if(request!=null && !goal && (x!=occupiedStart.getX() || y!=occupiedStart.getY() || z!=occupiedStart.getZ())) {
+                occupants.clear();
+                guard.level.getEntities(net.minecraft.world.level.entity.EntityTypeTest.forClass(Entity.class),body,occupied,occupants,1);
+                boolean blocked=!occupants.isEmpty();occupants.clear();
+                if(blocked) return false;
+            }
+            return clear(body.minX,body.minY,body.minZ,body.maxX,body.maxY,body.maxZ);
         }
-        @Override public PathType getPathTypeOfMob(PathfindingContext context,int x,int y,int z,Mob mob) {
-            return guard.node(x,y,z,mob.getBbWidth(),mob.getBbHeight()) ? super.getPathTypeOfMob(context,x,y,z,mob) : PathType.BLOCKED;
+        @Override public boolean transition(int fromX,int fromY,int fromZ,int x,int y,int z) {
+            double half=entity.getBbWidth()*0.5, height=entity.getBbHeight();
+            int horizontalY=Math.max(fromY,y);
+            if (y>fromY && !clear(fromX+0.5-half,fromY,fromZ+0.5-half,fromX+0.5+half,y+height,fromZ+0.5+half)) return false;
+            if (!clear(Math.min(fromX,x)+0.5-half,horizontalY,Math.min(fromZ,z)+0.5-half,
+                    Math.max(fromX,x)+0.5+half,horizontalY+height,Math.max(fromZ,z)+0.5+half)) return false;
+            return y>=fromY || clear(x+0.5-half,y,z+0.5-half,x+0.5+half,fromY+height,z+0.5+half);
         }
-    }
-    private static final class GuardedRegion extends PathNavigationRegion {
-        final Guard guard;
-        GuardedRegion(ServerLevel level,BlockPos from,BlockPos to,Guard guard) { super(level,from,to);this.guard=guard; }
-        @Override public BlockState getBlockState(BlockPos pos) { return guard.chunk(pos).getBlockState(pos); }
-        @Override public FluidState getFluidState(BlockPos pos) { return guard.chunk(pos).getFluidState(pos); }
-        @Override public BlockEntity getBlockEntity(BlockPos pos) { return guard.chunk(pos).getBlockEntity(pos); }
-        @Override public BlockGetter getChunkForCollisions(int x,int z) {
-            if (!guard.allowedChunk(x,z)) throw new UnsafeSearch();
-            return guard.level.getChunkSource().getChunkNow(x,z);
+        boolean clear(double minX,double minY,double minZ,double maxX,double maxY,double maxZ) {
+            if (minY<guard.level.getMinBuildHeight() || maxY>guard.level.getMaxBuildHeight()
+                    || !guard.withinBorder(minX,maxX,minZ,maxZ) || !guard.searchArea(minX-1,maxX+1,minZ-1,maxZ+1)) return false;
+            this.minX=minX; this.minY=minY; this.minZ=minZ; this.maxX=maxX; this.maxY=maxY; this.maxZ=maxZ;
+            int fromX=Mth.floor(minX-1.0E-7)-1,toX=Mth.floor(maxX+1.0E-7)+1;
+            int fromY=Math.max(guard.level.getMinBuildHeight(),Mth.floor(minY-1.0E-7)-1);
+            int toY=Math.min(guard.level.getMaxBuildHeight()-1,Mth.floor(maxY+1.0E-7)+1);
+            int fromZ=Mth.floor(minZ-1.0E-7)-1,toZ=Mth.floor(maxZ+1.0E-7)+1;
+            for (blockX=fromX;blockX<=toX;blockX++) for (blockY=fromY;blockY<=toY;blockY++) for (blockZ=fromZ;blockZ<=toZ;blockZ++) {
+                position.set(blockX,blockY,blockZ);
+                BlockState state=guard.getBlockState(position);
+                boolean bodyCell=blockX<maxX && blockX+1>minX && blockY<maxY && blockY+1>minY && blockZ<maxZ && blockZ+1>minZ;
+                if (bodyCell && (!state.getFluidState().isEmpty() || state.is(BlockTags.CLIMBABLE))) return false;
+                if (state.isAir()) continue;
+                VoxelShape shape=state.getCollisionShape(guard,position,context);
+                if (shape.isEmpty()) continue;
+                intersects=false; shape.forAllBoxes(collisions);
+                if (intersects) return false;
+            }
+            return true;
         }
-        @Override public List<VoxelShape> getEntityCollisions(Entity entity,AABB box) {
-            if (!guard.box(box.inflate(1.0))) throw new UnsafeSearch();
-            return super.getEntityCollisions(entity,box);
+        boolean safeNext(Path path,CitizenEntity entity,Guard guard) {
+            this.entity=entity; this.guard=guard; context=CollisionContext.of(entity);
+            try {
+                Node next=path.getNextNode();
+                return standable(next.x,next.y,next.z);
+            } catch (UnsafeSearch unavailable) { return false; }
+            finally { this.entity=null; this.guard=null; context=null; }
+        }
+        private void collisionBox(double fromX,double fromY,double fromZ,double toX,double toY,double toZ) {
+            if (blockX+toX>minX+1.0E-7 && blockX+fromX<maxX-1.0E-7 && blockY+toY>minY+1.0E-7
+                    && blockY+fromY<maxY-1.0E-7 && blockZ+toZ>minZ+1.0E-7 && blockZ+fromZ<maxZ-1.0E-7) intersects=true;
+        }
+        Path path() {
+            int count=0;
+            for (int node=search.found();node>=0;node=search.parent(node)) count++;
+            int routeCapacity=registry.admission().limits().resource(io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.CACHE_ENTRIES_PER_OWNER)
+                    -1-guard.region.size()*2;
+            if (count>routeCapacity) return null;
+            ArrayList<Node> nodes=new ArrayList<>(count);
+            for (int i=0;i<count;i++) nodes.add(null);
+            int index=count;
+            for (int node=search.found();node>=0;node=search.parent(node)) {
+                Node step=new Node(search.x(node),search.y(node),search.z(node));
+                step.type=net.minecraft.world.level.pathfinder.PathType.WALKABLE;
+                nodes.set(--index,step);
+            }
+            return new Path(nodes,new BlockPos(request.target().x(),request.target().y(),request.target().z()),true);
         }
     }
 }

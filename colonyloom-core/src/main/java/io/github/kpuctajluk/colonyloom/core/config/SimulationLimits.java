@@ -79,6 +79,50 @@ public final class SimulationLimits {
     public Map<Resource, Integer> resources() { return resources; }
     public Map<Budget, Integer> budgets() { return budgets; }
     public long maxManagedNanos() { return maxManagedNanos; }
+
+    /** Measured per-unit p99 is required for every implemented category; future executors stay experimental. */
+    public SimulationLimits calibrated(Map<Budget, Long> measuredP99UnitNanos) {
+        Objects.requireNonNull(measuredP99UnitNanos);
+        EnumMap<Budget, Integer> calibrated = new EnumMap<>(budgets);
+        for (Budget budget : Budget.values()) {
+            long target = calibrationTargetNanos(budget);
+            if (target == 0) continue;
+            Long p99 = measuredP99UnitNanos.get(budget);
+            if (p99 == null || p99 <= 0) throw new IllegalArgumentException("Missing positive measured p99: " + budget.key());
+            calibrated.put(budget, (int)Math.min(budget.development, Math.max(1L, target / p99)));
+        }
+        return new SimulationLimits(resources, calibrated, maxManagedNanos);
+    }
+
+    public static long calibrationTargetNanos(Budget budget) {
+        return switch (Objects.requireNonNull(budget)) {
+            case ASSIGNMENT_CANDIDATES, BLUEPRINT_COMPARISONS, CHUNK_REQUESTS -> 400_000;
+            case NAVIGATION_STARTS -> 1_000_000;
+            case PHYSICAL_ACTIONS -> 800_000;
+            case DIRTY_RESCAN_OBJECTS -> 200_000;
+            case GRAPH_EXPANSIONS, STORAGE_SLOT_CHECKS, VIEW_ROWS -> 0;
+        };
+    }
+
+    /** Explicit scale state envelope. Computational quanta never grow with population. */
+    public SimulationLimits scale300Capacity() {
+        EnumMap<Resource, Integer> scale = new EnumMap<>(resources);
+        for (Resource resource : Resource.values()) scale.put(resource, switch (resource) {
+            case COLONIES -> 3;
+            case CITIZENS -> 300;
+            case WORKS, STORAGE_SLOTS, DELIVERIES_AND_PRODUCTION_ORDERS, SPATIAL_INDEX_LINKS -> 8192;
+            case DEMANDS, GRAPH_NODES, CHUNK_DEMANDS -> 16384;
+            case COVERAGE_SHARES, GRAPH_EDGES, RESERVATIONS_AND_ALLOCATIONS, WAIT_REGISTRATIONS, CACHE_ENTRIES -> 32768;
+            case READY_ENTRIES -> 4096;
+            case PHYSICAL_TARGETS -> 512;
+            case EVIDENCE, TOMBSTONES -> 65536;
+            case CACHE_ENTRIES_PER_OWNER -> 128;
+            case LOADED_FOOTPRINT -> 768;
+            case BLOCK_TICKING -> 384;
+            case ENTITY_TICKING -> 192;
+        });
+        return new SimulationLimits(scale, budgets, maxManagedNanos);
+    }
     public SimulationLimits withResource(Resource resource, int value) {
         EnumMap<Resource, Integer> copy = new EnumMap<>(resources);
         copy.put(Objects.requireNonNull(resource), value);

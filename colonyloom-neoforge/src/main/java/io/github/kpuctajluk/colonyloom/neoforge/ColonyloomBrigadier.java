@@ -47,6 +47,9 @@ final class ColonyloomBrigadier {
         root.then(citizen);
         root.then(literal("status").then(argument("colony", UuidArgument.uuid()).executes(ctx -> execute(ctx, resolve, platform ->
                 platform.status(ctx.getSource(), uuid(ctx, "colony"))))));
+        root.then(literal("metrics")
+                .then(literal("server").requires(source -> source.hasPermission(2)).executes(ctx -> execute(ctx,resolve,platform -> platform.metrics(ctx.getSource(),null))))
+                .then(argument("colony",UuidArgument.uuid()).executes(ctx -> execute(ctx,resolve,platform -> platform.metrics(ctx.getSource(),uuid(ctx,"colony"))))));
         var work = literal("work");
         work.then(literal("wait").then(argument("colony", UuidArgument.uuid())
                 .then(argument("ticks", LongArgumentType.longArg(1, 1_000_000_000L)).executes(ctx -> execute(ctx, resolve, platform ->

@@ -51,7 +51,9 @@ public final class CitizenAdmissionService implements AutoCloseable {
         while (remaining-- > 0 && runtime.budgets().timeAvailable()
                 && runtime.budgets().tryConsume(Budget.DIRTY_RESCAN_OBJECTS, Lane.SERVICE)) {
             if (cursor >= entries.size()) cursor = 0;
-            reconcile(entries.get(cursor++));
+            long start=System.nanoTime();
+            try { reconcile(entries.get(cursor++)); }
+            finally { runtime.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.DIRTY_RESCAN_UNIT,System.nanoTime()-start); }
         }
     }
     private void reconcile(Entry entry) {
@@ -86,8 +88,10 @@ public final class CitizenAdmissionService implements AutoCloseable {
             }
             entry.center = center; entry.observedActive = chunks.activeTicks(entry.id);
         }
-        boolean routeReady = citizen.assignedWorkId() != null && chunks.admitted(citizen.assignedWorkId()) && chunks.ready(citizen.assignedWorkId()) && chunks.admitted(center);
-        boolean ready = chunks.admitted(entry.id) && chunks.ready(entry.id) || routeReady;
+        // A rollover can be covered by an already charged construction/navigation domain while
+        // this citizen's replacement demand awaits its cursor. Do not tear down that live domain.
+        boolean covered = chunks.admitted(center) && chunks.ready(center, ChunkDemandManager.Readiness.ENTITY_TICKING);
+        boolean ready = chunks.admitted(entry.id) && chunks.ready(entry.id) || covered;
         // A moving worker protects its occupied center until navigation has safely stopped.
         chunks.setProtection(entry.id, ready && citizen.assignedWorkId() != null, false, false);
         runtime.commands().updateCitizenAdmission(entry.id, ready ? CitizenRecord.Admission.ACTIVE : CitizenRecord.Admission.INACTIVE);

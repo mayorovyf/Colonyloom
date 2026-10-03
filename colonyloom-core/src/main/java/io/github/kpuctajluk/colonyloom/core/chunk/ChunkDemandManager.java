@@ -1,6 +1,7 @@
 package io.github.kpuctajluk.colonyloom.core.chunk;
 
 import io.github.kpuctajluk.colonyloom.core.colony.ColonyRegistry;
+import io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer;
 import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource;
 import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Budget;
 import io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger;
@@ -42,6 +43,8 @@ public final class ChunkDemandManager implements AutoCloseable {
     private final List<TreeSet<Ticket>> starts = List.of(new TreeSet<>(), new TreeSet<>(), new TreeSet<>());
     private final EnumMap<Resource, Integer> costs = new EnumMap<>(Resource.class);
     private Demand head, cursor;
+    private final java.util.ArrayDeque<Demand> pendingAdmissions=new java.util.ArrayDeque<>();
+    private boolean pendingTurn;
     private Plan plan;
     private long tick, revision, ticketSequence, ticketNanosHighWater;
 
@@ -81,6 +84,7 @@ public final class ChunkDemandManager implements AutoCloseable {
         Reason reason = Reason.WORKING_SET_LIMIT;
         boolean physicalStep, unsafeCargo, critical;
         long waitingSince, lastUseful;
+        boolean pendingQueued;
         long admittedAt, admittedTotal, activeTotal, sampledTick = -1;
         boolean sampledReady;
         Demand(UUID owner, UUID colony, List<ChunkKey> centers, ChunkKey[][] rings, Readiness readiness,
@@ -127,6 +131,7 @@ public final class ChunkDemandManager implements AutoCloseable {
         demands.put(ownerId, d);
         if (head == null) { head = cursor = d; d.previous = d.next = d; }
         else { d.previous = head.previous; d.next = head; head.previous.next = d; head.previous = d; }
+        pendingAdmissions.addLast(d);d.pendingQueued=true;
         if (!minimumFits(d)) { d.state = State.BLOCKED; d.reason = Reason.WORKING_SET_LIMIT; }
         revision++;
     }
@@ -167,7 +172,10 @@ public final class ChunkDemandManager implements AutoCloseable {
             if (lane == null || !budgets.tryConsume(Budget.DIRTY_RESCAN_OBJECTS, lane)) break;
             if (plan != null && plan.revision != revision) plan = null;
             if (plan != null) { advancePlan(); continue; }
-            Demand d = cursor; cursor = cursor.next;
+            Demand d;
+            pendingTurn=!pendingTurn;
+            if(pendingTurn && !pendingAdmissions.isEmpty()) { d=pendingAdmissions.removeFirst();d.pendingQueued=false; }
+            else { d=cursor;cursor=cursor.next; }
             if (d.state == State.ADMITTED) {
                 sampleClock(d);
                 if (overLimit() && !d.protectedNow()) withdraw(d);
@@ -176,6 +184,7 @@ public final class ChunkDemandManager implements AutoCloseable {
                 if (!overLimit() && canAdmit(d)) admit(d);
                 else if (!overLimit()) plan = new Plan(d, revision);
             } else { d.state = State.BLOCKED; d.reason = Reason.WORKING_SET_LIMIT; }
+            if(d.state!=State.ADMITTED && !d.pendingQueued) { pendingAdmissions.addLast(d);d.pendingQueued=true; }
         }
         startTickets();
     }
@@ -212,6 +221,7 @@ public final class ChunkDemandManager implements AutoCloseable {
             refreshLane(ticket);
         }
         d.state = State.ADMITTED; d.reason = Reason.CHUNK_NOT_READY; d.lastUseful = tick;
+        if(d.pendingQueued) { pendingAdmissions.remove(d);d.pendingQueued=false; }
         d.admittedAt = tick; d.sampledTick = -1; d.sampledReady = false;
         if (!d.protectedNow()) evictable.add(d);
         revision++;
@@ -290,6 +300,7 @@ public final class ChunkDemandManager implements AutoCloseable {
             if (cell.references[0] == 0 && cell.references[1] == 0 && cell.references[2] == 0) cells.remove(key);
         }
         d.state = State.WAITING; d.reason = Reason.WORKING_SET_LIMIT; d.waitingSince = tick;
+        if(!d.pendingQueued && demands.containsKey(d.owner)) { pendingAdmissions.addLast(d);d.pendingQueued=true; }
         revision++;
     }
     private void refreshLane(Ticket ticket) {
@@ -313,7 +324,12 @@ public final class ChunkDemandManager implements AutoCloseable {
             long started = System.nanoTime();
             boolean success;
             try { success = access.acquire(ticket.key.colony, ticket.key.center, ticket.readiness()); }
-            finally { ticketNanosHighWater = Math.max(ticketNanosHighWater, System.nanoTime() - started); }
+            finally {
+                long nanos=System.nanoTime()-started;
+                ticketNanosHighWater=Math.max(ticketNanosHighWater,nanos);
+                registry.metrics().record(Timer.CHUNK_EXTERNAL,nanos);
+                registry.metrics().record(Timer.CHUNK_UNIT,nanos);
+            }
             if (success) ticket.acquired = true;
             else { ticket.retryAt = tick + 100; starts.get(lane.ordinal()).add(ticket); }
         }
@@ -378,6 +394,7 @@ public final class ChunkDemandManager implements AutoCloseable {
         registry.requireOwner(); Demand d = demands.remove(owner);
         if (d == null) return;
         withdraw(d); d.lease.close();
+        if(d.pendingQueued) { pendingAdmissions.remove(d);d.pendingQueued=false; }
         if (d.next == d) { head = cursor = null; }
         else {
             d.previous.next = d.next; d.next.previous = d.previous;
@@ -399,5 +416,20 @@ public final class ChunkDemandManager implements AutoCloseable {
     public int blockTicking() { return registry.admission().used(Resource.BLOCK_TICKING); }
     public int entityTicking() { return registry.admission().used(Resource.ENTITY_TICKING); }
     public long ticketNanosHighWater() { registry.requireOwner(); return ticketNanosHighWater; }
+    public Map<String,Object> diagnostics(UUID onlyColony) {
+        registry.requireOwner(); long admitted=0, waiting=0, ready=0;
+        Map<String,Object> levels=new java.util.LinkedHashMap<>();
+        for (Readiness level : Readiness.values()) {
+            long count=0, levelReady=0;
+            for (Demand d : demands.values()) {
+                if ((onlyColony==null || onlyColony.equals(d.colony)) && d.readiness==level) {
+                    count++; if(d.state==State.ADMITTED) admitted++; else waiting++;
+                    if(ready(d.owner)) { levelReady++; ready++; }
+                }
+            }
+            levels.put(level.name(),Map.of("demands",count,"ready",levelReady));
+        }
+        return Map.of("admitted",admitted,"waiting",waiting,"ready",ready,"readiness",levels);
+    }
     @Override public void close() { registry.requireOwner(); while (head != null) release(head.owner); plan = null; }
 }

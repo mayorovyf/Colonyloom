@@ -193,7 +193,7 @@ final class ChunkDemandManagerTest {
         f.tick();
         assertEquals(16, f.budgets.used(Budget.DIRTY_RESCAN_OBJECTS));
         assertFalse(f.manager.admitted(new UUID(0, 5099)));
-        f.ticks(6);
+        for(int tick=0;tick<20;tick++) { f.tick();assertTrue(f.budgets.used(Budget.DIRTY_RESCAN_OBJECTS)<=16); }
         assertTrue(f.manager.ready(new UUID(0, 5099)));
         assertEquals(1, f.access.starts); assertEquals(25, f.manager.footprint());
     }
@@ -214,5 +214,15 @@ final class ChunkDemandManagerTest {
         assertEquals(1, f.access.starts); assertTrue(f.access.held.isEmpty());
         f.request(B, 0, Lane.NORMAL, false); f.tick();
         assertEquals(2, f.access.starts); assertTrue(f.manager.ready(B));
+    }
+    @Test void newPendingDomainReceivesTurnBeforeHundredIdleOwnerSweep() {
+        Fixture f=new Fixture(100,36,4);
+        for(int i=0;i<100;i++) f.request(new UUID(0,5000+i),0,Lane.NORMAL,false);
+        f.ticks(100);
+        f.budgets.updateLimits(f.budgets.limits().withBudget(Budget.DIRTY_RESCAN_OBJECTS,1));
+        f.request(B,1,Lane.NORMAL,true);f.ticks(4);
+        assertTrue(f.manager.ready(B));
+        assertTrue(f.manager.footprint()<=100);assertEquals(2,f.access.starts);
+        f.manager.release(B);f.ticks(4);assertEquals(1,f.access.releases);
     }
 }

@@ -21,6 +21,10 @@ public final class ConstructionRegistry {
     private final Map<String,BlueprintDefinition> pins=new LinkedHashMap<>();
     private final Map<UUID,AdmissionLedger.Lease> leases=new LinkedHashMap<>();
     private long pinnedBytes;
+    private long pinnedBytesHighWater, rejectedPins;
+    private int pinnedVersionsHighWater;
+    public Map<String,Object> pinDiagnostics() { registry.requireOwner(); return Map.of("bytes",pinnedBytes,"bytesHighWater",pinnedBytesHighWater,"byteCap",MAX_PINNED_BYTES,"versions",pins.size(),"versionsHighWater",pinnedVersionsHighWater,"versionCap",MAX_VERSIONS,"rejected",rejectedPins,"byteScope","conservative retained definition estimate; not JVM allocation measurement"); }
+    private void recordPins() { pinnedBytesHighWater=Math.max(pinnedBytesHighWater,pinnedBytes); pinnedVersionsHighWater=Math.max(pinnedVersionsHighWater,pins.size()); }
     public ConstructionRegistry(ColonyRegistry registry) { this.registry=Objects.requireNonNull(registry); }
     public int size() { registry.requireOwner(); return sites.size(); }
     public ConstructionSnapshot site(UUID workId) { registry.requireOwner(); return sites.get(workId); }
@@ -32,7 +36,8 @@ public final class ConstructionRegistry {
         registry.requireOwner();
         if(sites.size()>=MAX_SITES || sites.containsKey(site.workId()) || !site.blueprintDigest().equals(definition.digest())
                 || site.cursor()>definition.blocks().size() || !definition.markers().containsKey("work_origin")) throw new IllegalArgumentException("Construction envelope or identity unavailable");
-        validatePin(definition,pins,pinnedBytes);
+        try { validatePin(definition,pins,pinnedBytes); }
+        catch(IllegalArgumentException failure) { rejectedPins++; throw failure; }
     }
     public PreparedNew prepareNew(ConstructionSnapshot site,BlueprintDefinition definition) {
         validateNew(site,definition);
@@ -49,6 +54,7 @@ public final class ConstructionRegistry {
             var work=registry.workBoard().work(site.workId());
             if(!work.colonyId().equals(site.colonyId()) || !work.typeId().equals(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.CONSTRUCTION)) throw new IllegalArgumentException("Construction work owner/type mismatch");
             if(pins.putIfAbsent(definition.digest(),definition)==null) pinnedBytes+=estimatedBytes(definition);
+            recordPins();
             sites.put(site.workId(),site); leases.put(site.workId(),lease); lease=null;
         }
         public void close() { if(lease!=null) { lease.close(); lease=null; } }
@@ -126,7 +132,7 @@ public final class ConstructionRegistry {
         private Map<UUID,AdmissionLedger.Lease> admitted; private final long bytes;
         private PreparedRestore(Map<UUID,ConstructionSnapshot> staged,Map<String,BlueprintDefinition> pins,Map<UUID,AdmissionLedger.Lease> admitted,long bytes) { this.staged=staged; stagedPins=pins; this.admitted=admitted; this.bytes=bytes; }
         public void commit() { registry.requireOwner(); if(staged==null) throw new IllegalStateException("Restore already closed");
-            leases.values().forEach(AdmissionLedger.Lease::close); sites.clear(); sites.putAll(staged); pins.clear(); pins.putAll(stagedPins); leases.clear(); leases.putAll(admitted); pinnedBytes=bytes; staged=null; admitted=null; }
+            leases.values().forEach(AdmissionLedger.Lease::close); sites.clear(); sites.putAll(staged); pins.clear(); pins.putAll(stagedPins); leases.clear(); leases.putAll(admitted); pinnedBytes=bytes; recordPins(); staged=null; admitted=null; }
         public void close() { if(admitted!=null) { admitted.values().forEach(AdmissionLedger.Lease::close); admitted=null; staged=null; } }
     }
 }

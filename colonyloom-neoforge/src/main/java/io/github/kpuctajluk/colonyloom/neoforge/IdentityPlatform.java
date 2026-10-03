@@ -38,6 +38,7 @@ final class IdentityPlatform {
     }
     void join(Entity entity) {
         if (!(entity instanceof CitizenEntity citizen)) return;
+        citizen.runtimeMetrics(bridge.metrics());
         if (citizen.getUUID().equals(provisioningEntity)) return;
         citizen.setQuarantined(true);
         if (!bridge.persistence().isAvailable() || bridge.core().lifecycle()!=io.github.kpuctajluk.colonyloom.core.runtime.ServerRuntime.Lifecycle.RUNNING || citizen.citizenId()==null) return;
@@ -196,6 +197,11 @@ final class IdentityPlatform {
     String priorityWork(CommandSourceStack source,UUID workId,int priority) throws CommandSyntaxException {
         var work=bridge.core().commands().prioritizeWork(context(source),workId,priority);
         bridge.persistence().capture(); return "work="+work.id()+" priority="+work.priority();
+    }
+    String metrics(CommandSourceStack source,UUID colony) throws CommandSyntaxException {
+        if(colony==null) { if(!source.hasPermission(2)) throw new SecurityException("Server metrics require operator permission"); }
+        else bridge.core().commands().status(context(source),colony);
+        return bridge.minecraftMetrics().snapshot(colony).toString();
     }
     String status(CommandSourceStack source,UUID colony) throws CommandSyntaxException {
         var state=bridge.core().commands().status(context(source),colony);

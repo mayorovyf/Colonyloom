@@ -36,6 +36,32 @@ public final class NavigationGameTests {
     public static void vanillaWalkCancellationAndInactivePhysicalDamage(GameTestHelper helper) {
         walk(helper,helper.absolutePos(new BlockPos(1,1,1)));
     }
+    @GameTest(template = "identity_empty", batch = "stage06_navigation_step", timeoutTicks = 500)
+    public static void walkOverOneBlockRiseAndDrop(GameTestHelper helper) {
+        helper.onEachTick(walkStep(helper, helper.absolutePos(new BlockPos(1,1,1)), () -> {}, true));
+    }
+    @GameTest(template = "identity_empty", batch = "stage06_navigation_water", timeoutTicks = 700)
+    public static void waterBarrierWaitsUntilPhysicalDrain(GameTestHelper helper) {
+        helper.onEachTick(walkStep(helper, helper.absolutePos(new BlockPos(1,1,1)), () -> {}, false, true));
+    }
+    @GameTest(template = "identity_empty", batch = "stage06_navigation_sparse", timeoutTicks = 1000)
+    public static void nativeLocomotionContinuesBetweenBudgetedStatusPolls(GameTestHelper helper) {
+        helper.onEachTick(walkStep(helper,helper.absolutePos(new BlockPos(1,1,1)),() -> {},false,false,100));
+    }
+    @GameTest(template="identity_empty",batch="stage06_navigation_occupied",timeoutTicks=700)
+    public static void routeDetoursAroundStationaryPhysicalResident(GameTestHelper helper) {
+        BlockPos start=helper.absolutePos(new BlockPos(1,1,1));
+        CitizenEntity blocker=(CitizenEntity)BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.parse("colonyloom:citizen")).create(helper.getLevel());
+        if(blocker==null) throw new IllegalStateException("Physical blocker factory unavailable");
+        blocker.moveTo(start.getX()+4.5,start.getY(),start.getZ()+0.5,0,0);
+        blocker.inventory().setItem(0,new ItemStack(Items.OAK_STAIRS,4));
+        helper.getLevel().addFreshEntity(blocker);
+        Runnable step=walkStep(helper,start,() -> blocker.remove(Entity.RemovalReason.DISCARDED));
+        helper.onEachTick(() -> {
+            step.run();
+            helper.assertTrue(blocker.inventory().getItem(0).getCount()==4,"Routing modified idle resident property");
+        });
+    }
     @GameTest(template = "identity_empty", batch = "stage04_navigation", timeoutTicks = 500)
     public static void walkAcrossPositiveChunkBoundary(GameTestHelper helper) {
         BlockPos origin=helper.absolutePos(new BlockPos(1,1,1));
@@ -68,6 +94,15 @@ public final class NavigationGameTests {
         helper.onEachTick(walkStep(helper,start,releaseFixture));
     }
     private static Runnable walkStep(GameTestHelper helper,BlockPos start,Runnable releaseFixture) {
+        return walkStep(helper, start, releaseFixture, false);
+    }
+    private static Runnable walkStep(GameTestHelper helper,BlockPos start,Runnable releaseFixture,boolean raised) {
+        return walkStep(helper, start, releaseFixture, raised, false);
+    }
+    private static Runnable walkStep(GameTestHelper helper,BlockPos start,Runnable releaseFixture,boolean raised,boolean waterBarrier) {
+        return walkStep(helper,start,releaseFixture,raised,waterBarrier,1);
+    }
+    private static Runnable walkStep(GameTestHelper helper,BlockPos start,Runnable releaseFixture,boolean raised,boolean waterBarrier,int pollingInterval) {
         var level=helper.getLevel();
         BlockPos target = start.offset(7, 0, 0);
         for (int x = -2; x <= 10; x++) for (int z = -2; z <= 2; z++) {
@@ -75,6 +110,10 @@ public final class NavigationGameTests {
             level.setBlockAndUpdate(feet.below(), Blocks.STONE.defaultBlockState());
             for (int y = 0; y < 3; y++) level.setBlockAndUpdate(feet.above(y), Blocks.AIR.defaultBlockState());
         }
+        if (raised) for (int x = 3; x <= 4; x++) for (int z = -18; z <= 18; z++)
+            level.setBlockAndUpdate(start.offset(x, 0, z), Blocks.STONE.defaultBlockState());
+        if (waterBarrier) for (int x = 3; x <= 4; x++) for (int z = -18; z <= 18; z++)
+            level.setBlockAndUpdate(start.offset(x, 0, z), Blocks.WATER.defaultBlockState());
         ServerRuntime core = ServerRuntime.start(Thread.currentThread());
         core.configureCommands(() -> {}, List.of());
         core.updateLimits(core.admission().limits().withMaxManagedNanos(100_000_000L));
@@ -94,7 +133,7 @@ public final class NavigationGameTests {
         TicketController controller = new TicketController(ResourceLocation.parse("colonyloom:runtime"));
         ChunkDemandManager chunks = new ChunkDemandManager(core.registry(), core.budgets(), new NeoForgeChunkAccess(level.getServer(),controller));
         NavigationService navigation = new NavigationService(core.registry(),core.budgets(),chunks,new MinecraftNavigationBackend(level.getServer(),core.registry(),chunks));
-        core.scheduler().beforeWork(tick -> { chunks.tick(tick); navigation.tick(tick); });
+        core.scheduler().beforeWork(tick -> { chunks.tick(tick); if(tick % pollingInterval==0) navigation.tick(tick); });
         core.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.MOVE, new SimulationScheduler.PhysicalExecutor() {
             public void step(WorkOrder work,long tick) {
                 navigation.request(work.id(),colony,citizen,1,0,work.target(),work.lane(),work.priority());
@@ -105,8 +144,21 @@ public final class NavigationGameTests {
         });
         WorkOrder cancelled = core.workBoard().createMove(UUID.randomUUID(),colony,position(dimension,target),0,Lane.NORMAL);
         final int[] phase = {0}; final long[] cancelledTick = {0}; final double[] cancelledX = {0}; final WorkOrder[] arrival = {null};
+        final boolean[] observedRise = {false};
+        final boolean[] drained = {false};
         return () -> {
             core.tick(core.serverTick()+1);
+            if (entity.getY() > start.getY() + 0.75) observedRise[0] = true;
+            if (waterBarrier && !drained[0]) {
+                helper.assertTrue(cancelled.state()!=WorkOrder.State.COMPLETED && entity.getX()<start.getX()+3,"Water route executed without supported dry ground");
+                if (core.serverTick()<160) return;
+                for (int x = 3; x <= 4; x++) for (int z = -18; z <= 18; z++) {
+                    BlockPos water = start.offset(x,0,z);
+                    level.setBlockAndUpdate(water,Blocks.AIR.defaultBlockState());
+                    navigation.invalidate(new io.github.kpuctajluk.colonyloom.core.chunk.ChunkKey(dimension,water.getX()>>4,water.getZ()>>4));
+                }
+                drained[0]=true;
+            }
             if (phase[0] == 0 && entity.getX() > start.getX()+1.5) {
                 core.workBoard().cancel(cancelled.id()); cancelledX[0] = entity.getX(); cancelledTick[0] = core.serverTick(); phase[0] = 1;
             } else if (phase[0] == 1 && core.serverTick()-cancelledTick[0] >= 20) {
@@ -115,6 +167,7 @@ public final class NavigationGameTests {
                 arrival[0] = core.workBoard().createMove(UUID.randomUUID(),colony,position(dimension,target),0,Lane.NORMAL); phase[0]=2;
             } else if (phase[0] == 2 && arrival[0].state()==WorkOrder.State.COMPLETED) {
                 helper.assertTrue(entity.position().distanceToSqr(target.getX()+0.5,target.getY(),target.getZ()+0.5)<=1.1,"Logical arrival lacks physical target");
+                if (raised) helper.assertTrue(observedRise[0] && Math.abs(entity.getY()-start.getY())<0.5,"Route bypassed required physical rise/drop");
                 core.commands().updateCitizenAdmission(citizen,CitizenRecord.Admission.INACTIVE);
                 long before = core.registry().citizen(citizen).activeTimeTicks();
                 float health = entity.getHealth(); entity.hurt(level.damageSources().generic(),2.0F);

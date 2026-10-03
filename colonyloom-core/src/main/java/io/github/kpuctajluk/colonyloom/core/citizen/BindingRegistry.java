@@ -10,7 +10,8 @@ import java.util.UUID;
 
 /** Observes identity only; never owns entities or their inventories. */
 public final class BindingRegistry {
-    public static final int MAX_OBSERVATIONS = 256;
+    /** Up to 300 canonical embodiments plus bounded competing/retired observations. */
+    public static final int MAX_OBSERVATIONS = 600;
     public record Observation(UUID citizenId, UUID entityId, long bindingEpoch, boolean loaded, boolean quarantined, boolean retired) {
         public Observation {
             Objects.requireNonNull(entityId, "entityId");

@@ -211,7 +211,9 @@ public final class TargetClaimRegistry implements AutoCloseable {
                 continue;
             }
             idleVisits = 0;
-            compareOne(entry);
+            long comparisonStart=System.nanoTime();
+            try { compareOne(entry); }
+            finally { registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.BLUEPRINT_UNIT,System.nanoTime()-comparisonStart); }
         }
     }
 

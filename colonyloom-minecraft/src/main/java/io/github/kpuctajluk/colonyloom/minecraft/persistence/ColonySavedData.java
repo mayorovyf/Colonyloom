@@ -21,6 +21,8 @@ public final class ColonySavedData extends SavedData {
     private RegistrySnapshot snapshot;
     private UUID checkpointId;
     private java.util.function.Supplier<RegistrySnapshot> snapshotSource;
+    private io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics metrics;
+    public void metrics(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics value) { metrics=java.util.Objects.requireNonNull(value); }
 
     private ColonySavedData(RegistrySnapshot snapshot, UUID checkpointId,
             Map<String, List<CompoundTag>> retained, Set<UUID> contentBlockedColonies) {
@@ -80,10 +82,13 @@ public final class ColonySavedData extends SavedData {
 
     @Override
     public CompoundTag save(CompoundTag tag, HolderLookup.Provider registries) {
+        long start=metrics==null ? 0 : System.nanoTime();
+        try {
         if (snapshotSource != null) snapshot = snapshotSource.get();
         CompoundTag encoded = RegistryNbt.encode(snapshot, checkpointId, retained);
         tag.merge(encoded);
         return tag;
+        } finally { if(metrics!=null) metrics.record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.SAVE_ENCODE,System.nanoTime()-start); }
     }
 
     CompoundTag diskEnvelope(HolderLookup.Provider registries) {

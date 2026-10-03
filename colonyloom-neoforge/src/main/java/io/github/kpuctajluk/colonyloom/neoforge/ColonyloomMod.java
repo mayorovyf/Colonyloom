@@ -48,6 +48,8 @@ public final class ColonyloomMod {
         NeoForge.EVENT_BUS.addListener(net.neoforged.bus.api.EventPriority.LOWEST,false,this::onDeath);
         NeoForge.EVENT_BUS.addListener(this::onInteract);
         NeoForge.EVENT_BUS.addListener(this::onServerStarting);
+        NeoForge.EVENT_BUS.addListener(net.neoforged.bus.api.EventPriority.HIGHEST,false,this::onMetricsPreTick);
+        NeoForge.EVENT_BUS.addListener(net.neoforged.bus.api.EventPriority.LOWEST,false,this::onMetricsPostTick);
         NeoForge.EVENT_BUS.addListener(this::onServerPostTick);
         NeoForge.EVENT_BUS.addListener(this::onServerStopping);
         NeoForge.EVENT_BUS.addListener(this::onServerStopped);
@@ -76,6 +78,12 @@ public final class ColonyloomMod {
         }
         LOGGER.info("Colonyloom runtime started: session={}, world={}, activeRuntimes={}",
                 runtime.sessionId(), runtime.worldPath(), runtimes.size());
+    }
+    private synchronized void onMetricsPreTick(ServerTickEvent.Pre event) {
+        if(System.getProperty("colonyloom.test.platformScenario","").isEmpty()) requireRuntime(event.getServer()).metricsTickStarted();
+    }
+    private synchronized void onMetricsPostTick(ServerTickEvent.Post event) {
+        if(System.getProperty("colonyloom.test.platformScenario","").isEmpty()) requireRuntime(event.getServer()).metricsTickFinished();
     }
 
     private synchronized void onServerPostTick(ServerTickEvent.Post event) {

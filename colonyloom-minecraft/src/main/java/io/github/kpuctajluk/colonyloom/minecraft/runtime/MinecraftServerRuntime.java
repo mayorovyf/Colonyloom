@@ -20,9 +20,15 @@ public final class MinecraftServerRuntime {
     private final ColonyPersistence persistence;
     private io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager chunks;
     private io.github.kpuctajluk.colonyloom.core.navigation.NavigationService navigation;
+    private io.github.kpuctajluk.colonyloom.minecraft.navigation.MinecraftNavigationBackend navigationBackend;
     private CitizenAdmissionService citizens;
     private io.github.kpuctajluk.colonyloom.gameplay.construction.ConstructionController construction;
     private io.github.kpuctajluk.colonyloom.minecraft.construction.MinecraftConstructionService constructionService;
+    private long metricsTickStart;
+    public void metricsTickStarted() { runtime.requireOwnerThread(); metricsTickStart=System.nanoTime(); }
+    public void metricsTickFinished() { runtime.requireOwnerThread(); if(metricsTickStart!=0) { metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.MSPT,System.nanoTime()-metricsTickStart); metricsTickStart=0; } }
+    public io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics metrics() { return runtime.metrics(); }
+    public io.github.kpuctajluk.colonyloom.minecraft.metrics.MinecraftMetrics minecraftMetrics() { runtime.requireOwnerThread(); return new io.github.kpuctajluk.colonyloom.minecraft.metrics.MinecraftMetrics(this); }
 
     private MinecraftServerRuntime(MinecraftServer server,Runnable flushPendingIo) {
         this.server = server;
@@ -78,8 +84,8 @@ public final class MinecraftServerRuntime {
         chunks = new io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager(runtime.registry(), runtime.budgets(), access);
         var placement=new io.github.kpuctajluk.colonyloom.minecraft.construction.BlockPlacementExecutor(server,runtime.registry(),interaction,observer);
         constructionService=new io.github.kpuctajluk.colonyloom.minecraft.construction.MinecraftConstructionService(runtime.registry(),construction,chunks,placement,persistence::checkpointId);
-        navigation = new io.github.kpuctajluk.colonyloom.core.navigation.NavigationService(runtime.registry(), runtime.budgets(), chunks,
-                new io.github.kpuctajluk.colonyloom.minecraft.navigation.MinecraftNavigationBackend(server, runtime.registry(), chunks,constructionService),constructionService);
+        navigationBackend = new io.github.kpuctajluk.colonyloom.minecraft.navigation.MinecraftNavigationBackend(server, runtime.registry(), chunks,constructionService);
+        navigation = new io.github.kpuctajluk.colonyloom.core.navigation.NavigationService(runtime.registry(), runtime.budgets(), chunks,navigationBackend,constructionService);
         constructionService.navigation(navigation);
         runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.CONSTRUCTION,constructionService);
         citizens = new CitizenAdmissionService(server, runtime, chunks);
@@ -115,6 +121,7 @@ public final class MinecraftServerRuntime {
     }
     public io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager chunks() { runtime.requireOwnerThread(); return chunks; }
     public io.github.kpuctajluk.colonyloom.core.navigation.NavigationService navigation() { runtime.requireOwnerThread(); return navigation; }
+    public java.util.Map<String,Object> navigationBackendMetrics() { runtime.requireOwnerThread(); return navigationBackend == null ? java.util.Map.of() : navigationBackend.diagnostics(); }
     public void citizenObserved(UUID id) { runtime.requireOwnerThread(); if (citizens != null) citizens.observe(id); }
     public void physicalLimitsUpdated() { runtime.requireOwnerThread(); if (chunks != null) chunks.limitsUpdated(); }
 

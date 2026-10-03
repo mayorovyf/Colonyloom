@@ -39,12 +39,17 @@ public final class ConstructionGameTests {
     public static void cancellationAfterTwoRetainsBlocksAndRemainingMaterials(GameTestHelper helper) { run(helper,true); }
     @GameTest(template="identity_empty",batch="stage05_construction",timeoutTicks=600)
     public static void cancellationDuringPhysicalEffectBlocksStaleCursorCommit(GameTestHelper helper) { run(helper,false,true); }
+    @GameTest(template="identity_empty",batch="stage06_construction",timeoutTicks=600)
+    public static void approachingFromTargetSideReachesClearPlacementWaypoint(GameTestHelper helper) { run(helper,false,false,true); }
     private static void run(GameTestHelper helper,boolean cancel) {
         run(helper,cancel,false);
     }
     private static void run(GameTestHelper helper,boolean cancel,boolean staleCommit) {
+        run(helper,cancel,staleCommit,false);
+    }
+    private static void run(GameTestHelper helper,boolean cancel,boolean staleCommit,boolean approachAcrossTarget) {
         var level=helper.getLevel(); var origin=helper.absolutePos(new BlockPos(1,1,1));
-        for(int x=-6;x<=6;x++) for(int z=-2;z<=4;z++) {
+        for(int x=-6;x<=6;x++) for(int z=-5;z<=4;z++) {
             var pos=origin.offset(x,0,z); level.setBlockAndUpdate(pos.below(),Blocks.STONE.defaultBlockState());
             for(int y=0;y<3;y++) level.setBlockAndUpdate(pos.above(y),Blocks.AIR.defaultBlockState());
         }
@@ -55,7 +60,7 @@ public final class ConstructionGameTests {
         core.registry().addColony(new ColonyRuntime(colony,"Construction smoke",new Territory(dim,origin.getX()-16,origin.getZ()-16,origin.getX()+32,origin.getZ()+16),owner,Map.of(),1,1,false,null,false));
         var entity=(CitizenEntity)BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.parse("colonyloom:citizen")).create(level);
         if(entity==null) throw new IllegalStateException("Citizen unavailable");
-        var start=origin.offset(-4,0,1); entity.initializeIdentity(citizen,1); entity.moveTo(start.getX()+0.5,start.getY(),start.getZ()+0.5,0,0);
+        var start=origin.offset(-4,0,approachAcrossTarget ? -4 : 1); entity.initializeIdentity(citizen,1); entity.moveTo(start.getX()+0.5,start.getY(),start.getZ()+0.5,0,0);
         entity.inventory().setItem(0,new ItemStack(Items.OAK_STAIRS,4));
         core.registry().addCitizen(new CitizenRecord(citizen,colony,entity.getUUID(),1,null,null,null,"colonyloom:builder",Map.of(),Map.of("food",20),CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.UNKNOWN,0,Map.of(),position(dim,start),1),proposed -> { if(!level.addFreshEntity(entity)) throw new IllegalStateException("Spawn refused"); });
         core.bindings().observe(citizen,entity.getUUID(),1); entity.setQuarantined(false); core.commands().updateCitizenReadiness(citizen,CitizenRecord.Readiness.READY);

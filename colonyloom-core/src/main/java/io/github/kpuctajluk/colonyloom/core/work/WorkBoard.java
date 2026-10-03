@@ -176,7 +176,7 @@ public final class WorkBoard {
     /** Concrete obligations must have been checkpoint-compacted before their terminal work. */
     public void retire(UUID id) {
         WorkOrder value = work(id);
-        if (!value.terminal() || !(WorkOrder.ACTIVE_WAIT.equals(value.typeId()) || WorkOrder.CONSTRUCTION.equals(value.typeId()) && registry.construction().site(id)==null)) throw new IllegalStateException("Work has retained obligations");
+        if (!value.terminal() || !(WorkOrder.ACTIVE_WAIT.equals(value.typeId()) || WorkOrder.MOVE.equals(value.typeId()) || WorkOrder.CONSTRUCTION.equals(value.typeId()) && registry.construction().site(id)==null)) throw new IllegalStateException("Work has retained obligations");
         for (var effect : registry.effects().snapshots()) if (id.equals(effect.workId())) throw new IllegalStateException("Work has retained witness");
         for (var citizen : registry.citizensView()) if (id.equals(citizen.assignedWorkId())) throw new IllegalStateException("Work has retained assignment");
         for (var claim : registry.targetClaims().snapshots()) if (id.equals(claim.ownerId())) throw new IllegalStateException("Work has retained target");

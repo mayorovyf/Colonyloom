@@ -61,6 +61,7 @@ public final class ServerRuntime {
     public AdmissionLedger admission() { requireOwnerThread(); return registry.admission(); }
     public GlobalWorkBudgets budgets() { requireOwnerThread(); return budgets; }
     public SimulationScheduler scheduler() { requireOwnerThread(); return scheduler; }
+    public io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics metrics() { requireOwnerThread(); return registry.metrics(); }
     public void updateLimits(SimulationLimits limits) {
         requireLifecycle(Lifecycle.RUNNING);
         registry.admission().updateLimits(limits); budgets.updateLimits(limits); scheduler.limitsUpdated();

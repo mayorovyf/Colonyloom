@@ -40,6 +40,14 @@ final class SimulationSchedulerTest {
         WorkOrder timer(long number, UUID colony, long duration) { return board.createTimer(id(number),colony,new WorldPosition("minecraft:overworld",registry.colony(colony).territory().minX(),64,0),null,0,AdmissionLedger.Lane.NORMAL,duration); }
         void ticks(int count) { for (int i=0;i<count;i++) scheduler.tick(++tick); }
     }
+    @Test void platformMaintenanceCannotStarveDirtyWorkAtOneGlobalUnit() {
+        Fixture f=new Fixture();UUID colony=f.colony(1,0);f.citizen(11,colony);
+        f.budgets.updateLimits(LIMITS.withBudget(Budget.DIRTY_RESCAN_OBJECTS,1));
+        f.scheduler.beforeWork(tick -> f.budgets.tryConsume(Budget.DIRTY_RESCAN_OBJECTS,AdmissionLedger.Lane.SERVICE));
+        WorkOrder timer=f.timer(21,colony,10);f.ticks(100);
+        assertEquals(WorkOrder.State.COMPLETED,timer.state());
+        assertTrue(f.budgets.used(Budget.DIRTY_RESCAN_OBJECTS)<=1);
+    }
     @Test void physicalBackoffRetainsExactWorkerAndCancellationStopsImmediately() {
         Fixture f = new Fixture(); UUID colony = f.colony(1,0); UUID citizen = f.citizen(11,colony); f.citizen(12,colony);
         UUID[] held = {null}; int[] steps = {0}, stops = {0};
@@ -75,6 +83,22 @@ final class SimulationSchedulerTest {
         assertEquals(WorkOrder.State.COMPLETED,b1.state()); assertEquals(WorkOrder.State.COMPLETED,b2.state());
         assertNull(f.registry.citizen(id(11)).assignedWorkId()); assertNull(f.registry.citizen(id(12)).assignedWorkId());
         assertTrue(f.board.ledger().highWater(Resource.READY_ENTRIES) <= 2);
+    }
+    @Test void colonyReadyDelayRetainsUnservedDebtButExcludesIdleIntervals() {
+        Fixture f = new Fixture(); UUID colony = f.colony(1,0); f.citizen(11,colony);
+        WorkOrder work = f.timer(21,colony,1000); f.ticks(8);
+        f.scheduler.beforeWork(tick -> f.budgets.tryConsume(Budget.PHYSICAL_ACTIONS,AdmissionLedger.Lane.NORMAL));
+        f.ticks(30);
+        @SuppressWarnings("unchecked") var blocked = (Map<String,Object>) ((Map<?,?>)f.scheduler.diagnostics(colony).get("colonies")).get(colony.toString());
+        assertTrue(((Number)blocked.get("currentNormalColonyReadyServiceDelayTicks")).longValue()>=20);
+        f.scheduler.beforeWork(tick -> {}); f.ticks(10);
+        @SuppressWarnings("unchecked") var served = (Map<String,Object>) ((Map<?,?>)f.scheduler.diagnostics(colony).get("colonies")).get(colony.toString());
+        long maximum=((Number)served.get("maxNormalColonyReadyServiceDelayTicks")).longValue();
+        assertTrue(maximum>=20); assertTrue(((Number)served.get("currentNormalColonyReadyServiceDelayTicks")).longValue()<10);
+        f.board.cancel(work.id()); f.ticks(500);
+        f.timer(22,colony,100); f.ticks(10);
+        @SuppressWarnings("unchecked") var resumed = (Map<String,Object>) ((Map<?,?>)f.scheduler.diagnostics(colony).get("colonies")).get(colony.toString());
+        assertEquals(maximum,((Number)resumed.get("maxNormalColonyReadyServiceDelayTicks")).longValue());
     }
     @Test void invalidationDuringProcessingIsHandledWithoutAnotherNotification() {
         Fixture f = new Fixture(); UUID colony = f.colony(1,0); f.citizen(11,colony); WorkOrder work = f.timer(21,colony,3);

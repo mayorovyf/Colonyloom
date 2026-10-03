@@ -1,6 +1,7 @@
 package io.github.kpuctajluk.colonyloom.core.navigation;
 
 import io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager;
+import io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer;
 import io.github.kpuctajluk.colonyloom.core.chunk.ChunkKey;
 import io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord;
 import io.github.kpuctajluk.colonyloom.core.colony.ColonyRegistry;
@@ -35,8 +36,13 @@ public final class NavigationService implements AutoCloseable {
         }
     }
     public interface Route { int nodeCount(); }
+    /** Identity sentinel: this request needs another bounded search portion, not route application. */
+    public static final Route PENDING_ROUTE = () -> 0;
+    /** No search cursor was admitted; active portions must release bounded query capacity first. */
+    public static final Route CAPACITY_WAIT_ROUTE = () -> 0;
     public interface Backend {
         WorldPosition position(Request request);
+        /** Advances a portion; PENDING_ROUTE retains a cursor, CAPACITY_WAIT_ROUTE waits for admission, null is unreachable/unavailable. */
         Route search(Request request, List<ChunkKey> admittedRegion);
         boolean apply(Request request, Route route, BooleanSupplier stillCurrent);
         Motion poll(Request request);
@@ -46,11 +52,13 @@ public final class NavigationService implements AutoCloseable {
     public static boolean moveGoalCurrent(WorkOrder work,Request request) {
         return request.target().equals(work.target());
     }
-    /** Shared with the backend so the transient vanilla search pool is admitted before search. */
-    public static final int SEARCH_NODES=1024;
+    private static List<TreeSet<Entry>> startQueues() {
+        return List.of(new TreeSet<>(ORDER), new TreeSet<>(ORDER), new TreeSet<>(ORDER));
+    }
     private static final int[] RETRY = {20, 40, 80, 160, 200};
-    private static final Comparator<Entry> ORDER = Comparator.<Entry>comparingInt(e -> e.request.priority()).reversed()
-            .thenComparingLong(e -> e.created).thenComparing(e -> e.request.id());
+    private static final Comparator<Entry> ORDER = Comparator.<Entry,Boolean>comparing(e -> e.capacityWaiting)
+            .thenComparing(Comparator.<Entry>comparingInt(e -> e.request.priority()).reversed())
+            .thenComparingLong(e -> e.startOrder).thenComparingLong(e -> e.created).thenComparing(e -> e.request.id());
     private final ColonyRegistry registry;
     private final GlobalWorkBudgets budgets;
     private final ChunkDemandManager chunks;
@@ -58,11 +66,13 @@ public final class NavigationService implements AutoCloseable {
     private final GoalAuthority goals;
     private final Map<UUID, Entry> requests = new HashMap<>();
     private final Map<ChunkKey, Bucket> index = new HashMap<>();
-    private final List<TreeSet<Entry>> starts = List.of(new TreeSet<>(ORDER), new TreeSet<>(ORDER), new TreeSet<>(ORDER));
+    private final List<TreeSet<Entry>> starts = startQueues(), deferredStarts = startQueues();
     private Entry head;
     private final Entry[] laneHeads=new Entry[3], laneCursors=new Entry[3];
     private long now;
+    private long startOrder;
     private long lastSearchNanos, maxSearchNanos;
+    private long searchCount, staleResults, failedSearches;
     private static final class Bucket { long revision; int references; }
     private static final class Entry {
         final Request request;
@@ -74,9 +84,10 @@ public final class NavigationService implements AutoCloseable {
         final long[] revisions;
         Entry previous, next, lanePrevious, laneNext;
         long polledTick=Long.MIN_VALUE;
+        long searchedTick=Long.MIN_VALUE, startOrder;
         State state = State.WAITING;
         Reason reason = Reason.CHUNK_NOT_READY;
-        boolean queued;
+        boolean queued, deferred, capacityWaiting;
         int failures;
         long retryAt;
         BooleanSupplier validity;
@@ -163,7 +174,15 @@ public final class NavigationService implements AutoCloseable {
                 && request.colonyId().equals(work.colonyId());
     }
     public void tick(long tick) {
-        registry.requireOwner(); now=tick;
+        registry.requireOwner();
+        boolean advanced=now!=tick; now=tick;
+        // A yielded portion is eligible only on a later tick; its queue age rotates among peers.
+        if (advanced) for (int lane=0;lane<starts.size();lane++) {
+            TreeSet<Entry> deferred=deferredStarts.get(lane);
+            while (!deferred.isEmpty()) {
+                Entry entry=deferred.pollFirst(); entry.deferred=false; starts.get(lane).add(entry);
+            }
+        }
         int portions=Math.max(1,budgets.limits().budget(Budget.DIRTY_RESCAN_OBJECTS)/4);
         while (portions-->0 && budgets.timeAvailable()) {
             Lane lane=budgets.chooseLane(Budget.DIRTY_RESCAN_OBJECTS,pollable(1),pollable(2),pollable(0));
@@ -172,22 +191,27 @@ public final class NavigationService implements AutoCloseable {
             laneCursors[laneIndex]=entry.laneNext; entry.polledTick=now;
             if (entry.state==State.ARRIVED) continue;
             if (!authoritative(entry.request)) { cancel(entry.request.workId()); continue; }
-            boolean changed=false;
-            for (int i=0;i<entry.buckets.length;i++) if (entry.revisions[i]!=entry.buckets[i].revision) {
-                changed=true; entry.revisions[i]=entry.buckets[i].revision;
-            }
-            if (changed) { stop(entry); entry.failures=0; entry.retryAt=now; }
+            refreshRevisions(entry);
             if (entry.region.isEmpty()) continue;
             if (!chunks.admitted(entry.request.workId()) || !chunks.ready(entry.request.workId())) {
                 stop(entry); Reason reason=chunks.reason(entry.request.workId());
                 entry.reason=reason==Reason.NONE ? Reason.CHUNK_NOT_READY : reason; continue;
             }
             if (entry.state==State.MOVING) {
-                Motion motion=backend.poll(entry.request);
+                long pollStart = System.nanoTime();
+                Motion motion;
+                try { motion=backend.poll(entry.request); }
+                finally { registry.metrics().record(Timer.NAVIGATION_POLL,System.nanoTime()-pollStart); }
                 if (motion==Motion.ARRIVED) {
                     stop(entry); entry.state=State.ARRIVED; entry.reason=Reason.NONE; chunks.release(entry.request.workId());
                 } else if (motion==Motion.OBSTRUCTED) retry(entry);
-                else if (motion==Motion.UNAVAILABLE) { stop(entry); entry.reason=Reason.RECONCILING; }
+                else if (motion==Motion.UNAVAILABLE) {
+                    stop(entry); entry.reason=Reason.RECONCILING;
+                    WorldPosition displaced=backend.position(entry.request);
+                    if(displaced!=null && !region(displaced,entry.request.target()).equals(entry.region)) {
+                        Request request=entry.request;cancel(request.workId());request(request);
+                    }
+                }
                 else chunks.useful(entry.request.workId());
             } else if (now>=entry.retryAt) enqueue(entry);
         }
@@ -195,25 +219,45 @@ public final class NavigationService implements AutoCloseable {
             Lane lane=budgets.chooseLane(Budget.NAVIGATION_STARTS,!starts.get(1).isEmpty(),!starts.get(2).isEmpty(),!starts.get(0).isEmpty());
             if (lane==null || !budgets.tryConsume(Budget.NAVIGATION_STARTS,lane)) break;
             Entry entry=starts.get(lane.ordinal()).pollFirst(); entry.queued=false;
-            if (!current(entry) || !authoritative(entry.request) || !chunks.admitted(entry.request.workId()) || !chunks.ready(entry.request.workId())) continue;
-            AdmissionLedger.Lease searchLease;
-            try { searchLease=registry.admission().reserve(entry.request.workId(),entry.request.lane(),Map.of(Resource.CACHE_ENTRIES,SEARCH_NODES)); }
-            catch (AdmissionLedger.AdmissionException denied) { entry.reason=Reason.STATE_LIMIT; continue; }
+            if (!current(entry)) continue;
+            if (!authoritative(entry.request)) { cancel(entry.request.workId()); continue; }
+            refreshRevisions(entry);
+            if (!chunks.admitted(entry.request.workId()) || !chunks.ready(entry.request.workId())) {
+                stop(entry); Reason reason=chunks.reason(entry.request.workId());
+                entry.reason=reason==Reason.NONE ? Reason.CHUNK_NOT_READY : reason; continue;
+            }
             Route route;
+            long unitStart=System.nanoTime();
+            entry.searchedTick=now;
             try {
                 long begin=System.nanoTime();
-                route=backend.search(entry.request,entry.region);
-                lastSearchNanos=System.nanoTime()-begin; maxSearchNanos=Math.max(maxSearchNanos,lastSearchNanos);
-            } finally { searchLease.close(); }
-            boolean stale=!current(entry) || !authoritative(entry.request) || !chunks.ready(entry.request.workId());
-            for (int i=0;!stale && i<entry.buckets.length;i++) stale=entry.revisions[i]!=entry.buckets[i].revision;
-            if (stale) { if (current(entry)) { stop(entry); entry.retryAt=now; } continue; }
-            if (route==null) { retry(entry); continue; }
+                searchCount++;
+                try { route=backend.search(entry.request,entry.region); }
+                finally {
+                    lastSearchNanos=System.nanoTime()-begin; maxSearchNanos=Math.max(maxSearchNanos,lastSearchNanos);
+                    registry.metrics().record(Timer.NAVIGATION_EXTERNAL,lastSearchNanos);
+                }
+            } finally { registry.metrics().record(Timer.NAVIGATION_UNIT,System.nanoTime()-unitStart); }
+            boolean stale=!current(entry) || !authoritative(entry.request) || !chunks.admitted(entry.request.workId())
+                    || !chunks.ready(entry.request.workId()) || !valid(entry);
+            if (stale) {
+                staleResults++;
+                if (current(entry)) {
+                    stop(entry); entry.retryAt=now;
+                    if (!authoritative(entry.request)) cancel(entry.request.workId());
+                }
+                continue;
+            }
+            if (route==PENDING_ROUTE || route==CAPACITY_WAIT_ROUTE) {
+                entry.capacityWaiting=route==CAPACITY_WAIT_ROUTE; enqueue(entry); continue;
+            }
+            entry.capacityWaiting=false;
+            if (route==null) { failedSearches++; retry(entry); continue; }
             if (route.nodeCount()<1 || route.nodeCount()+1+entry.region.size()*2>registry.admission().limits().resource(Resource.CACHE_ENTRIES_PER_OWNER)) {
-                entry.reason=Reason.WORKING_SET_LIMIT; entry.retryAt=Long.MAX_VALUE; continue;
+                stop(entry); entry.reason=Reason.WORKING_SET_LIMIT; entry.retryAt=Long.MAX_VALUE; continue;
             }
             try { entry.routeLease=registry.admission().reserve(entry.request.workId(),entry.request.lane(),Map.of(Resource.CACHE_ENTRIES,route.nodeCount(),Resource.CACHE_ENTRIES_PER_OWNER,route.nodeCount())); }
-            catch (AdmissionLedger.AdmissionException denied) { entry.reason=Reason.STATE_LIMIT; continue; }
+            catch (AdmissionLedger.AdmissionException denied) { stop(entry); entry.reason=Reason.STATE_LIMIT; continue; }
             if (!backend.apply(entry.request,route,entry.validity)) { retry(entry); continue; }
             entry.state=State.MOVING; entry.reason=Reason.NONE;
             chunks.setProtection(entry.request.workId(),true,false,entry.request.lane()==Lane.CRITICAL);
@@ -227,11 +271,27 @@ public final class NavigationService implements AutoCloseable {
         for (int i=0;i<entry.buckets.length;i++) if (entry.revisions[i]!=entry.buckets[i].revision) return false;
         return true;
     }
-    private void enqueue(Entry entry) { if (!entry.queued) { starts.get(entry.request.lane().ordinal()).add(entry); entry.queued=true; entry.reason=Reason.BUDGET; } }
+    private void refreshRevisions(Entry entry) {
+        for (int i=0;i<entry.buckets.length;i++) if (entry.revisions[i]!=entry.buckets[i].revision) {
+            stop(entry);
+            for (int j=0;j<entry.buckets.length;j++) entry.revisions[j]=entry.buckets[j].revision;
+            entry.failures=0; entry.retryAt=now; return;
+        }
+    }
+    private void enqueue(Entry entry) {
+        if (entry.queued) return;
+        entry.startOrder=++startOrder; entry.deferred=entry.searchedTick==now;
+        (entry.deferred ? deferredStarts : starts).get(entry.request.lane().ordinal()).add(entry);
+        entry.queued=true; entry.reason=Reason.BUDGET;
+    }
     private void stop(Entry entry) {
         backend.stop(entry.request);
         if (entry.routeLease!=null) { entry.routeLease.close(); entry.routeLease=null; }
-        if (entry.queued) { starts.get(entry.request.lane().ordinal()).remove(entry); entry.queued=false; }
+        if (entry.queued) {
+            (entry.deferred ? deferredStarts : starts).get(entry.request.lane().ordinal()).remove(entry);
+            entry.queued=false; entry.deferred=false;
+        }
+        entry.capacityWaiting=false;
         entry.state=State.WAITING;
         chunks.setProtection(entry.request.workId(),false,false,entry.request.lane()==Lane.CRITICAL);
     }
@@ -261,5 +321,12 @@ public final class NavigationService implements AutoCloseable {
     public boolean atTarget(UUID workId) { return state(workId)==State.ARRIVED; }
     public long lastSearchNanos() { return lastSearchNanos; }
     public long maxSearchNanos() { return maxSearchNanos; }
+    public Map<String,Object> diagnostics() {
+        registry.requireOwner();
+        return Map.of("searchCount",searchCount,"staleResults",staleResults,"failedSearches",failedSearches,
+                "lastSearchNanos",lastSearchNanos,"maxSearchNanos",maxSearchNanos,"requests",requests.size(),
+                "queuedStarts",starts.get(0).size()+starts.get(1).size()+starts.get(2).size()
+                        +deferredStarts.get(0).size()+deferredStarts.get(1).size()+deferredStarts.get(2).size());
+    }
     @Override public void close() { registry.requireOwner(); while (head!=null) cancel(head.request.workId()); }
 }

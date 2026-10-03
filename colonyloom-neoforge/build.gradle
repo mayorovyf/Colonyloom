@@ -183,3 +183,145 @@ max-tick-time=120000
         logger.lifecycle('Construction dedicated crash/restart evidence: {}', report)
     }
 }
+
+// This launch is dev-only; the release jar never includes scenario code or resources.
+neoForge.runs {
+    platform {
+        server()
+        programArgument '--nogui'
+        gameDirectory = project.file('runs/platform')
+        loadedMods = [neoForge.mods.colonyloom, neoForge.mods.colonyloom_tests]
+        jvmArguments.addAll('-Xms4G', '-Xmx4G')
+    }
+}
+tasks.register('platformSmoke') {
+    group = 'verification'
+    description = 'Measures real disposable dedicated platform scenarios; full default is five-minute warmup and ten-minute observation per scenario.'
+    dependsOn provider {
+        def run = tasks.named('runPlatform', JavaExec).get()
+        run.taskDependencies.getDependencies(run)
+    }
+    doLast {
+        def run = tasks.named('runPlatform', JavaExec).get()
+        def eula = file(providers.gradleProperty('colonyloomEulaFile').getOrElse('runs/server/eula.txt'))
+        if (!eula.isFile() || !eula.readLines().any { it.trim() == 'eula=true' }) throw new GradleException('Provide an already owner-accepted disposable EULA with -PcolonyloomEulaFile=<path>; no automatic legal acceptance.')
+        boolean diagnostic = providers.gradleProperty('colonyloomPlatformDiagnostic').getOrElse('false').toBoolean()
+        long warmup = providers.gradleProperty('colonyloomPlatformWarmupSeconds').getOrElse('300').toLong()
+        long measure = providers.gradleProperty('colonyloomPlatformMeasureSeconds').getOrElse('600').toLong()
+        if (warmup <= 0 || measure <= 0 || (!diagnostic && (warmup != 300 || measure != 600))) throw new GradleException('Short durations require -PcolonyloomPlatformDiagnostic=true and are explicitly NON-ACCEPTANCE.')
+        def root = layout.buildDirectory.dir('reports/colonyloom/platform-' + java.time.Instant.now().toEpochMilli()).get().asFile
+        root.mkdirs()
+        def names = ['idle', 'movement-open', 'movement-obstructed', 'damage', 'block', 'chunks']
+        def scenarios = [[name: 'baseline', citizens: 0]]
+        [30, 100, 300].each { population -> names.each { name -> scenarios.add([name: name, citizens: population]) } }
+        if (providers.gradleProperty('colonyloomPlatformExtraDiagnostic').getOrElse('false').toBoolean()) scenarios.add([name: 'diagnostic', citizens: 300])
+        def selected = providers.gradleProperty('colonyloomPlatformScenario').getOrElse('all')
+        if (diagnostic && selected == 'diagnostic30') scenarios.add([name: 'diagnostic', citizens: 30]);
+        if (selected != 'all') {
+            if (!diagnostic) throw new GradleException('Acceptance requires the complete sequential baseline/30/100/300 matrix; scenario selection is diagnostic-only.')
+            def selection = new LinkedHashSet<String>(Arrays.asList(selected.split(',')))
+            scenarios = scenarios.findAll { selection.contains(it.name == 'baseline' ? 'baseline' : it.name + it.citizens) }
+            if (scenarios.size() != selection.size()) throw new GradleException('Unknown or duplicate platform scenario: ' + selected)
+        }
+        def results = []
+        def calibration = new File(root, 'frozen-profile.json')
+        def replayProfile = providers.gradleProperty('colonyloomPlatformProfile').getOrElse('')
+        if (!replayProfile.isEmpty()) {
+            if (!diagnostic) throw new GradleException('Existing profile replay is diagnostic-only; acceptance recalibrates the full thirty-citizen sequence.')
+            def existing = file(replayProfile)
+            if (!existing.isFile()) throw new GradleException('Measured profile file missing: ' + existing)
+            def recorded = new groovy.json.JsonSlurper().parse(existing)
+            if (recorded.thirtyCitizenBarrierPassed != true || recorded.acceptanceDuration != true) throw new GradleException('Replay requires genuine full-duration thirty-citizen frozen-profile, not an experimental estimate.')
+            java.nio.file.Files.copy(existing.toPath(), calibration.toPath())
+        }
+        def budgetTimers = [ASSIGNMENT_CANDIDATES: 'ASSIGNMENT_UNIT', NAVIGATION_STARTS: 'NAVIGATION_UNIT', BLUEPRINT_COMPARISONS: 'BLUEPRINT_UNIT', PHYSICAL_ACTIONS: 'PHYSICAL_UNIT', CHUNK_REQUESTS: 'CHUNK_UNIT', DIRTY_RESCAN_OBJECTS: 'DIRTY_RESCAN_UNIT']
+        def targets = [ASSIGNMENT_CANDIDATES: 400000L, NAVIGATION_STARTS: 1000000L, BLUEPRINT_COMPARISONS: 400000L, PHYSICAL_ACTIONS: 800000L, CHUNK_REQUESTS: 400000L, DIRTY_RESCAN_OBJECTS: 200000L]
+        def starting = [ASSIGNMENT_CANDIDATES: 64, NAVIGATION_STARTS: 2, BLUEPRINT_COMPARISONS: 256, PHYSICAL_ACTIONS: 4, CHUNK_REQUESTS: 1, DIRTY_RESCAN_OBJECTS: 64]
+        scenarios.each { scenario ->
+            String key = scenario.name == 'baseline' ? 'baseline' : scenario.name + scenario.citizens
+            if (scenario.citizens > 30 && !calibration.isFile()) {
+                def thirty = results.findAll { it.citizens == 30 }
+                if (diagnostic) throw new GradleException('Short diagnostics cannot establish the full-duration thirty-citizen barrier; provide a genuine measured replay profile for higher-population diagnostics.');
+                if (thirty.size() != names.size() || thirty.any { !it.passed }) throw new GradleException('Higher population blocked: all genuine thirty-citizen scenarios must pass before profile capacity increase.')
+                def costs = [:]; def samples = [:]; def computed = [:]
+                budgetTimers.each { budget, timer ->
+                    def observed = thirty.collect { it.measurementMetrics.timers[timer] }.findAll { it != null && it.count > 0 && it.p99Nanos > 0 }
+                    if (observed.isEmpty()) throw new GradleException('Calibration missing actual portions for ' + budget + '; cannot promote admission.')
+                    costs[budget] = observed.collect { it.p99Nanos as long }.max()
+                    samples[budget] = observed.sum { it.count as long }
+                    computed[budget] = Math.min(starting[budget], Math.max(1L, (long)(targets[budget] / costs[budget])))
+                }
+                calibration.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([thirtyCitizenBarrierPassed: true,
+                        acceptanceDuration: !diagnostic, measuredP99UnitNanos: costs, sampleCounts: samples, calibratedCounts: computed,
+                        percentilePolicy: 'Conservative maximum observed scenario p99 upper-bound (not falsely pooled raw samples)',
+                        experimentalUnmeasuredCounts: [GRAPH_EXPANSIONS: 128, STORAGE_SLOT_CHECKS: 256, VIEW_ROWS: 100],
+                        capacities: 'Explicit SimulationLimits.scale300Capacity; same computational counts for100and300']))
+            }
+            def instance = new File(root, key + '-instance'); def world = new File(instance, 'world'); world.mkdirs()
+            java.nio.file.Files.copy(eula.toPath(), new File(instance, 'eula.txt').toPath())
+            new File(world, 'colonyloom-test-world').text = 'Disposable Colonyloom platform runner: ' + key + '\n'
+            new File(instance, 'server.properties').text = '''level-name=world
+level-seed=424242
+level-type=minecraft:flat
+generator-settings={"biome":"minecraft:plains","layers":[{"block":"minecraft:bedrock","height":1},{"block":"minecraft:dirt","height":2},{"block":"minecraft:grass_block","height":1}]}
+online-mode=false
+server-port=0
+enable-rcon=false
+enable-query=false
+spawn-protection=0
+view-distance=6
+simulation-distance=6
+gamemode=survival
+difficulty=peaceful
+spawn-monsters=false
+spawn-animals=false
+max-tick-time=120000
+'''
+            // spawn-animals=false discards even explicitly added persistent sheep; doMobSpawning remains false in the fixture.
+            if (scenario.name == 'diagnostic') {
+                def properties = new File(instance, 'server.properties')
+                properties.text = properties.text.replace('spawn-animals=false', 'spawn-animals=true')
+            }
+            def output = new File(root, key + '.json'); def stdout = new File(root, key + '.stdout.log'); def stderr = new File(root, key + '.stderr.log')
+            def argv = [run.javaLauncher.get().executablePath.asFile.absolutePath]; argv.addAll(run.allJvmArgs)
+            argv.addAll(['-Dcolonyloom.test.identityAction=', '-Dcolonyloom.test.constructionScenario=', '-Dcolonyloom.testFaults=false',
+                    '-Dcolonyloom.test.platformScenario=' + scenario.name, '-Dcolonyloom.test.platformCitizens=' + scenario.citizens,
+                    '-Dcolonyloom.test.platformReport=' + output.absolutePath, '-Dcolonyloom.test.platformDiagnostic=' + diagnostic,
+                    '-Dcolonyloom.test.platformWarmupSeconds=' + warmup, '-Dcolonyloom.test.platformMeasureSeconds=' + measure,
+                    '-Dcolonyloom.test.platformProfile=' + (scenario.citizens > 30 ? calibration.absolutePath : '')])
+            def classpath = run.classpath + run.classpathProvider
+            if (!classpath.isEmpty()) argv.addAll(['-cp', classpath.asPath])
+            argv.add(run.mainClass.get()); argv.addAll(run.args)
+            def builder = new ProcessBuilder(argv.collect { it.toString() }).directory(instance)
+            run.environment.each { k, v -> builder.environment().put(k.toString(), v.toString()) }
+            run.environmentProperty.get().each { k, v -> builder.environment().put(k.toString(), v.toString()) }
+            builder.redirectOutput(stdout).redirectError(stderr)
+            long started = System.nanoTime(); def child = builder.start()
+            boolean exited = child.waitFor(warmup + measure + 540, java.util.concurrent.TimeUnit.SECONDS)
+            if (!exited) {
+                // Stop only this owned disposable process, requesting ordinary stop before escalation.
+                try { child.outputStream.write('stop\n'.getBytes('UTF-8')); child.outputStream.flush() } catch (IOException ignored) { }
+                if (!child.waitFor(45, java.util.concurrent.TimeUnit.SECONDS)) { child.destroy(); if (!child.waitFor(15, java.util.concurrent.TimeUnit.SECONDS)) child.destroyForcibly().waitFor(15, java.util.concurrent.TimeUnit.SECONDS) }
+            }
+            def observation = output.isFile() ? new groovy.json.JsonSlurper().parse(output) : [passed: false, failure: 'Scenario never wrote observations: missing measurement']
+            observation.putAll([scenario: scenario.name, citizens: scenario.citizens, timedOut: !exited, exit: child.isAlive() ? null : child.exitValue(),
+                    stdout: stdout.absolutePath, stderr: stderr.absolutePath, elapsedMillis: (System.nanoTime() - started) / 1000000L,
+                    launchMain: run.mainClass.get(), jvmArguments: run.allJvmArgs, acceptanceDuration: !diagnostic])
+            observation.passed = exited && !child.isAlive() && child.exitValue() == 0 && observation.passed == true && observation.observedCitizens == scenario.citizens && observation.measurementTicks > 0 && observation.measurementElapsedNanos >= measure * 1000000000L
+            output.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(observation)); results.add(observation)
+            new File(root, 'report.json').text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([acceptanceDuration: !diagnostic,
+                    barrierConfirmed: !diagnostic && selected == 'all' && results.size() >= 19 && results.every { it.passed },
+                    scenarios: results.collect { [scenario: it.scenario, citizens: it.citizens, passed: it.passed, needsPortionedNavigation: it.needsPortionedNavigation, failure: it.failure] }]))
+            if (!observation.passed) throw new GradleException("Platform ${key} failed; needsPortionedNavigation=${observation.needsPortionedNavigation}; scale progression paused. See ${output}")
+            if (scenario.citizens >= 100) {
+                def measuredConfig = observation.actualFinalProfile
+                new File(root, 'colonyloom-server.toml').text = '# Observed calibrated scale snapshot; computational counts frozen by full-duration thirty-citizen measurements. Graph/storage/views remain experimental.\n' +
+                        ['admission', 'chunks', 'budgets'].collect { section ->
+                            '[' + section + ']\n' + measuredConfig.findAll { configKey, value -> configKey.startsWith(section + '.') }.collect { configKey, value -> configKey.substring(section.length() + 1) + ' = ' + value }.join('\n')
+                        }.join('\n\n') + '\n'
+            }
+        }
+        logger.lifecycle('Platform {} evidence: {}', diagnostic ? 'NON-ACCEPTANCE diagnostic' : 'full duration', root)
+    }
+}
+

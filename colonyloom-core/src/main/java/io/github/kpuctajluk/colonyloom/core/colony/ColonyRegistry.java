@@ -26,6 +26,7 @@ public final class ColonyRegistry {
     private AdmissionLedger admission;
     private final WorkBoard workBoard;
     private final io.github.kpuctajluk.colonyloom.core.scheduler.GlobalWorkBudgets budgets;
+    private final io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics metrics;
     private final io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry targetClaims;
     private final io.github.kpuctajluk.colonyloom.core.action.EffectRegistry effects;
     private final io.github.kpuctajluk.colonyloom.core.construction.ConstructionRegistry construction;
@@ -43,6 +44,7 @@ public final class ColonyRegistry {
 
     public ColonyRegistry(Runnable ownerCheck) {
         this.ownerCheck = Objects.requireNonNull(ownerCheck, "ownerCheck");
+        metrics = new io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics(ownerCheck);
         admission = new AdmissionLedger(SimulationLimits.development(), ownerCheck);
         workBoard = new WorkBoard(this, admission);
         budgets = new io.github.kpuctajluk.colonyloom.core.scheduler.GlobalWorkBudgets(SimulationLimits.development());
@@ -59,6 +61,7 @@ public final class ColonyRegistry {
     public AdmissionLedger admission() { requireOwner(); return admission; }
     public WorkBoard workBoard() { requireOwner(); return workBoard; }
     public io.github.kpuctajluk.colonyloom.core.scheduler.GlobalWorkBudgets budgets() { requireOwner(); return budgets; }
+    public io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics metrics() { requireOwner(); return metrics; }
     public io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry targetClaims() { requireOwner(); return targetClaims; }
     public io.github.kpuctajluk.colonyloom.core.action.EffectRegistry effects() { requireOwner(); return effects; }
     public io.github.kpuctajluk.colonyloom.core.construction.ConstructionRegistry construction() { requireOwner(); return construction; }

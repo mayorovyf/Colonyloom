@@ -1,6 +1,7 @@
 package io.github.kpuctajluk.colonyloom.core.scheduler;
 
 import io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord;
+import io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer;
 import io.github.kpuctajluk.colonyloom.core.colony.ColonyRuntime;
 import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Budget;
 import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource;
@@ -63,6 +64,9 @@ public final class SimulationScheduler {
         final ArrayList<Node>[] queues;
         long activeClock;
         boolean active;
+        long serviceCount, lastServiceTick = -1, maxServiceGap;
+        long maxReadyServiceDelay, maxWorkAge;
+        long normalReadySince = -1, maxNormalColonyServiceDelay;
         final long[] deficit = new long[lanes.length];
         final ArrayList<Node> roots = new ArrayList<>();
         int wakeCursor;
@@ -86,6 +90,7 @@ public final class SimulationScheduler {
         final WakeupIndex.Ticket due;
         final ColonyQueue colony;
         final long birthClock;
+        long queuedAt;
         long activeSince = -1, accrued, waitRevision = -1;
         int score, queueIndex = -1;
         boolean queued, linked, changedWhileExecuting;
@@ -129,15 +134,22 @@ public final class SimulationScheduler {
         board.registry().requireOwner();
         if (monotonicTick <= tick) throw new IllegalArgumentException("Scheduler tick must increase");
         tick = monotonicTick; clock = Math.incrementExact(clock); budgets.beginTick(monotonicTick);
+        long managedStart = System.nanoTime();
+        try {
+        // A calibrated one-unit quota cannot be monopolized by platform hooks before dirty debt.
+        if ((monotonicTick & 1) == 0) {
+            for (int phase=0;phase<3;phase++) {
+                int selected=(int)((monotonicTick/2+phase)%3);
+                if (selected==0 ? rescanOne() : selected==1 ? fanoutOne() : wakeDueOne()) break;
+            }
+        }
         beforeWork.accept(monotonicTick);
         for (int i=0;i<colonies.size();i++) { ColonyQueue queue = colonies.get(i); if (queue.active) queue.activeClock++; }
         // Dirty debt gets the first managed portion, even when every ready entry is occupied.
         rescanOne();
         fanoutOne();
         while (budgets.timeAvailable()) {
-            WakeupIndex.Ticket due = deadlines.peek();
-            if (due == null || due.dueTick() > tick || !budgets.tryConsume(Budget.DIRTY_RESCAN_OBJECTS,Lane.SERVICE)) break;
-            deadlines.pollDue(tick); Node node = nodes.get(due.workId()); if (node != null) link(node);
+            if (!wakeDueOne()) break;
         }
         boolean mayRescan = true;
         while (budgets.timeAvailable()) {
@@ -147,6 +159,13 @@ public final class SimulationScheduler {
             if (!rescanned) mayRescan = false;
             if (!serviced && !rescanned) break;
         }
+        } finally { board.registry().metrics().record(Timer.MANAGED_TICK, System.nanoTime() - managedStart); }
+    }
+    private boolean wakeDueOne() {
+        WakeupIndex.Ticket due=deadlines.peek();
+        if (due==null || due.dueTick()>tick || !budgets.tryConsume(Budget.DIRTY_RESCAN_OBJECTS,Lane.SERVICE)) return false;
+        deadlines.pollDue(tick);Node node=nodes.get(due.workId());if(node!=null) link(node);
+        return true;
     }
     private ColonyQueue colony(UUID id) {
         ColonyQueue queue = colonyIndex.get(id);
@@ -277,12 +296,15 @@ public final class SimulationScheduler {
     private boolean rescanOne() {
         Node node = dirtyHead;
         if (node == null || !budgets.tryConsume(Budget.DIRTY_RESCAN_OBJECTS,Lane.SERVICE)) return false;
+        long start = System.nanoTime();
+        try {
         unlink(node); long revision = node.work.revision();
         if (node.work.terminal()) { unqueue(node); deadlines.remove(node.due); removeAssignment(node); board.acknowledge(node.work.id(),revision); return true; }
         unqueue(node);
         if (!enqueue(node)) link(node);
         // Admission is not processing: acknowledge only after the step.
         return true;
+        } finally { board.registry().metrics().record(Timer.DIRTY_RESCAN_UNIT, System.nanoTime() - start); }
     }
     private boolean enqueue(Node node) {
         for (int i=0;i<freeReady.size();i++) {
@@ -297,7 +319,9 @@ public final class SimulationScheduler {
         }
         node.score = node.work.priority() + (node.work.lane() == Lane.NORMAL ? (int)Math.min(10,age(node.work)/200) : 0);
         ArrayList<Node> queue = node.colony.queues[node.work.lane().ordinal()];
+        if (node.work.lane()==Lane.NORMAL && queue.isEmpty()) node.colony.normalReadySince=tick;
         node.queueIndex = queue.size(); queue.add(node); node.queued = true; queueUp(queue,node.queueIndex);
+        node.queuedAt=tick;
         if (!node.due.scheduled()) deadlines.schedule(node.due,tick+200);
         return true;
     }
@@ -317,6 +341,7 @@ public final class SimulationScheduler {
             Node last = queue.remove(queue.size()-1);
             if (index < queue.size()) { queue.set(index,last); last.queueIndex = index; if (index > 0 && compare(last,queue.get((index-1)/2)) < 0) queueUp(queue,index); else queueDown(queue,index); }
             node.queued = false; node.queueIndex = -1;
+            if (node.work.lane()==Lane.NORMAL && queue.isEmpty()) node.colony.normalReadySince=-1;
         }
         if (node.readyLease != null) { freeReady.add(node.readyLease); node.readyLease = null; }
     }
@@ -335,6 +360,12 @@ public final class SimulationScheduler {
             if (colony.deficit[ordinal] >= 1) { colony.deficit[ordinal]--; node = colony.queues[ordinal].get(0); break; }
         }
         if (node == null) return false;
+        if(node.work.lane()==Lane.NORMAL) node.colony.maxReadyServiceDelay=Math.max(node.colony.maxReadyServiceDelay,tick-node.queuedAt);
+        if (lane==Lane.NORMAL && node.colony.normalReadySince>=0) {
+            node.colony.maxNormalColonyServiceDelay=Math.max(node.colony.maxNormalColonyServiceDelay,tick-node.colony.normalReadySince);
+            node.colony.normalReadySince=tick;
+        }
+        node.colony.maxWorkAge=Math.max(node.colony.maxWorkAge,age(node.work));
         unqueue(node); deadlines.remove(node.due); process(node); return true;
     }
     private void process(Node node) {
@@ -362,6 +393,7 @@ public final class SimulationScheduler {
             if (work.state() == State.ASSIGNED) { board.transition(work.id(),State.RUNNING,Reason.NONE,work.stage()); node.activeSince = WorkOrder.ACTIVE_WAIT.equals(work.typeId()) ? node.colony.activeClock : -1; }
             if (physical.containsKey(work.typeId()) && work.state() == State.RUNNING) {
                 physical.get(work.typeId()).step(work, tick);
+                serviced(node);
                 if (!work.terminal()) deadlines.schedule(node.due, tick + 1);
                 else { removeAssignment(node); wakeDependents(work.id()); }
                 return;
@@ -371,6 +403,7 @@ public final class SimulationScheduler {
                 long elapsed = node.accrued + node.colony.activeClock-node.activeSince;
                 node.accrued = 0; node.activeSince = node.colony.activeClock;
                 board.progressTimer(work.id(),elapsed);
+                serviced(node);
                 if (work.terminal()) { pause(node); removeAssignment(node); deadlines.remove(node.due); wakeDependents(work.id()); }
                 else deadlines.schedule(node.due,tick+1);
             }
@@ -401,11 +434,14 @@ public final class SimulationScheduler {
             Lane selected = budgets.chooseLane(Budget.ASSIGNMENT_CANDIDATES,candidateAvailable[Lane.CRITICAL.ordinal()],candidateAvailable[Lane.SERVICE.ordinal()],candidateAvailable[Lane.NORMAL.ordinal()]);
             if (selected != work.lane() || !budgets.tryConsume(Budget.ASSIGNMENT_CANDIDATES,work.lane())) { assignmentBudgetDenied = true; break; }
             if (bucket.cursor >= bucket.ids.size()) bucket.cursor = 0;
-            UUID id = bucket.ids.get(bucket.cursor); bucket.cursor = (bucket.cursor+1) % bucket.ids.size(); CitizenRecord citizen = board.registry().citizen(id);
-            if (!workerAvailable(citizen) || !work.target().dimension().equals(citizen.lastKnownPosition().dimension())) continue;
-            long dx = (long)work.target().x()-citizen.lastKnownPosition().x(), dz = (long)work.target().z()-citizen.lastKnownPosition().z();
-            long distance = Math.abs(dx)+Math.abs(dz)+Math.abs((long)work.target().y()-citizen.lastKnownPosition().y());
-            if (winner == null || distance < bestDistance || distance == bestDistance && id.compareTo(winner) < 0) { winner = id; bestDistance = distance; }
+            long candidateStart = System.nanoTime();
+            try {
+                UUID id = bucket.ids.get(bucket.cursor); bucket.cursor = (bucket.cursor+1) % bucket.ids.size(); CitizenRecord citizen = board.registry().citizen(id);
+                if (!workerAvailable(citizen) || !work.target().dimension().equals(citizen.lastKnownPosition().dimension())) continue;
+                long dx = (long)work.target().x()-citizen.lastKnownPosition().x(), dz = (long)work.target().z()-citizen.lastKnownPosition().z();
+                long distance = Math.abs(dx)+Math.abs(dz)+Math.abs((long)work.target().y()-citizen.lastKnownPosition().y());
+                if (winner == null || distance < bestDistance || distance == bestDistance && id.compareTo(winner) < 0) { winner = id; bestDistance = distance; }
+            } finally { board.registry().metrics().record(Timer.ASSIGNMENT_UNIT, System.nanoTime() - candidateStart); }
         }
         return winner;
     }
@@ -423,5 +459,35 @@ public final class SimulationScheduler {
     }
     private void removeAssignment(Node node) {
         if (node.assignedCitizen != null) { assignments.remove(node.assignedCitizen,node); node.assignedCitizen = null; }
+    }
+    private void serviced(Node node) {
+        ColonyQueue queue = node.colony;
+        if (queue.lastServiceTick >= 0) queue.maxServiceGap = Math.max(queue.maxServiceGap, tick - queue.lastServiceTick);
+        queue.lastServiceTick = tick; queue.serviceCount++;
+    }
+    /** Only requested diagnostics scan bounded admitted work; the hot path records service in O(1). */
+    public Map<String,Object> diagnostics(UUID onlyColony) {
+        board.registry().requireOwner();
+        Map<String,Object> result = new LinkedHashMap<>();
+        for (ColonyQueue queue : colonies) {
+            if (onlyColony != null && !onlyColony.equals(queue.id)) continue;
+            long oldest = 0, ready = 0, waiting = 0, dirty = 0, readyDelay = 0;
+            for (Node node : queue.roots) {
+                if (node.work.terminal()) continue;
+                if (node.queued) { ready++; oldest = Math.max(oldest, age(node.work)); if(node.work.lane()==Lane.NORMAL) readyDelay=Math.max(readyDelay,tick-node.queuedAt); }
+                if (node.work.state() == State.WAITING) waiting++;
+                if (node.linked) dirty++;
+            }
+            Map<String,Object> data=new LinkedHashMap<>();
+            data.put("serviceCount",queue.serviceCount); data.put("lastServiceTick",queue.lastServiceTick);
+            data.put("maxServiceGapTicks",queue.maxServiceGap); data.put("currentServiceGapTicks",queue.lastServiceTick<0 ? tick : tick-queue.lastServiceTick);
+            data.put("maxWorkAgeTicks",Math.max(oldest,queue.maxWorkAge)); data.put("ready",ready); data.put("waiting",waiting); data.put("dirty",dirty);
+            data.put("maxNormalReadyServiceDelayTicks",queue.maxReadyServiceDelay); data.put("currentNormalReadyServiceDelayTicks",readyDelay);
+            data.put("maxNormalColonyReadyServiceDelayTicks",queue.maxNormalColonyServiceDelay);
+            data.put("currentNormalColonyReadyServiceDelayTicks",queue.normalReadySince<0 ? 0 : tick-queue.normalReadySince);
+            result.put(queue.id.toString(),data);
+        }
+        if(onlyColony!=null) return Map.of("colonies",result);
+        return Map.of("colonies", result, "deadlineEntries", deadlines.size());
     }
 }
