@@ -23,15 +23,15 @@ public final class StoragePersistenceGameTests {
         var runtime=ServerRuntime.start(Thread.currentThread());runtime.configureCommands(()->{},List.of());
         var colony=new ColonyRuntime(id(1),"Stocks",new Territory("minecraft:overworld",0,0,31,31),id(2),Map.of(),0,0,false,null,false);
         var old=runtime.registry().snapshot();
-        runtime.registry().restore(new io.github.kpuctajluk.colonyloom.core.persistence.RegistrySnapshot(List.of(colony),old.citizens(),old.buildings(),old.tombstones(),old.observations(),old.works(),old.targetClaims(),old.effects(),old.constructionSites(),old.pinnedBlueprints(),old.storage()));
+        runtime.registry().restore(new io.github.kpuctajluk.colonyloom.core.persistence.RegistrySnapshot(List.of(colony),old.citizens(),old.buildings(),old.tombstones(),old.observations(),old.works(),old.targetClaims(),old.effects(),old.constructionSites(),old.pinnedBlueprints(),old.storage(),io.github.kpuctajluk.colonyloom.core.supply.SupplySnapshot.empty()));
         return runtime;
     }
     private static CompoundTag stocked(GameTestHelper helper) {
         var runtime=fixture();var stocks=runtime.registry().storage();var storage=new StorageId(ADDRESS.dimension(),id(3),0);var slot=new StockRegion(storage,0);
         stocks.register(id(1),ADDRESS,"workshop",List.of(storage),List.of(slot),List.of(ADDRESS));
         var item=new ItemDescriptor("minecraft:oak_planks",new byte[]{10,0});stocks.index().observe(slot,item,64,0);
-        stocks.reservations().reserve(id(4),id(1),id(20),slot,item,16,0);
-        stocks.allocations().allocate(id(5),id(1),id(21),slot,item,32,0);
+        stocks.reservations().reserve(id(4),id(1),id(20),slot,item,16,0,io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);
+        stocks.allocations().allocate(id(5),id(1),id(21),slot,item,32,0,io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);
         stocks.retire(storage,id(1));
         return ColonySavedData.empty(runtime.registry().snapshot()).save(new CompoundTag(),helper.getLevel().registryAccess());
     }

@@ -38,6 +38,22 @@ final class ColonyCommandsTest {
         runtime.bindings().observe(citizen.citizenId(), citizen.entityId(), citizen.bindingEpoch());
         return citizen;
     }
+    @Test void workplaceAssignmentRequiresCurrentManagerAndLocalRegisteredWorkshop() {
+        ServerRuntime runtime=runtime();var local=colony(runtime,0);var foreign=colony(runtime,64);var citizen=citizen(runtime,local);
+        var stock=runtime.registry().storage();var a=new WorldPosition("minecraft:overworld",8,64,8);var b=new WorldPosition("minecraft:overworld",72,64,8);
+        var localId=new io.github.kpuctajluk.colonyloom.core.storage.StorageId(a.dimension(),UUID.randomUUID(),0);
+        var foreignId=new io.github.kpuctajluk.colonyloom.core.storage.StorageId(b.dimension(),UUID.randomUUID(),0);
+        var localRegistration=stock.register(local.colonyId(),a,"workshop",List.of(localId),List.of(new io.github.kpuctajluk.colonyloom.core.storage.StockRegion(localId,0)),List.of(a));
+        var foreignRegistration=stock.register(foreign.colonyId(),b,"workshop",List.of(foreignId),List.of(new io.github.kpuctajluk.colonyloom.core.storage.StockRegion(foreignId,0)),List.of(b));
+        var localWorkshop=stock.registerWorkshop(local.colonyId(),a,localRegistration.id());var foreignWorkshop=stock.registerWorkshop(foreign.colonyId(),b,foreignRegistration.id());
+        UUID viewer=UUID.randomUUID();runtime.commands().setMember(context(owner,false),local.colonyId(),viewer,MemberRank.VIEWER);
+        var before=runtime.registry().snapshot();
+        assertThrows(SecurityException.class,() -> runtime.commands().assignWorkplace(context(viewer,true),citizen.citizenId(),localWorkshop.id()));
+        assertThrows(SecurityException.class,() -> runtime.commands().assignWorkplace(context(owner,false),citizen.citizenId(),foreignWorkshop.id()));
+        assertEquals(before,runtime.registry().snapshot());
+        runtime.commands().assignWorkplace(context(owner,false),citizen.citizenId(),localWorkshop.id());
+        var restored=runtime();restored.registry().restore(runtime.registry().snapshot());assertEquals(localWorkshop.id(),restored.registry().citizen(citizen.citizenId()).workplaceId());
+    }
     @Test void scaleResidentsRetainIdentityAndCompetingEmbodimentAcrossRestore() {
         ServerRuntime runtime=runtime();
         runtime.registry().admission().updateLimits(runtime.registry().admission().limits().scale300Capacity());
@@ -236,7 +252,7 @@ final class ColonyCommandsTest {
         assertTrue(restored.bindings().activeEntity(citizen.citizenId()).isEmpty());
         assertThrows(IllegalStateException.class, () -> restored.commands().bind(context(owner, true), citizen.citizenId(), citizen.entityId()));
         RegistrySnapshot before = restored.registry().snapshot();
-        RegistrySnapshot invalid = new RegistrySnapshot(before.colonies(), List.of(citizen, citizen), before.buildings(), before.tombstones(), before.observations(), before.works(), before.targetClaims(), java.util.List.of(), java.util.List.of(), java.util.List.of(), io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty());
+        RegistrySnapshot invalid = new RegistrySnapshot(before.colonies(),List.of(citizen, citizen),before.buildings(),before.tombstones(),before.observations(),before.works(),before.targetClaims(),java.util.List.of(),java.util.List.of(),java.util.List.of(),io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty(),io.github.kpuctajluk.colonyloom.core.supply.SupplySnapshot.empty());
         assertThrows(IllegalArgumentException.class, () -> restored.registry().restore(invalid));
         assertEquals(before, restored.registry().snapshot());
     }

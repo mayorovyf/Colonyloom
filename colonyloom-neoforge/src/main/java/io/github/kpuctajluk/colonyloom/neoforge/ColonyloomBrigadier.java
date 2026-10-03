@@ -44,6 +44,9 @@ final class ColonyloomBrigadier {
         citizen.then(literal("assign").then(argument("citizen", UuidArgument.uuid())
                 .then(argument("profession", ResourceLocationArgument.id()).executes(ctx -> execute(ctx, resolve, platform ->
                         platform.assign(ctx.getSource(), uuid(ctx, "citizen"), ResourceLocationArgument.getId(ctx, "profession").toString()))))));
+        citizen.then(literal("workplace").then(argument("citizen",UuidArgument.uuid())
+                .then(argument("building",UuidArgument.uuid()).executes(ctx -> execute(ctx,resolve,platform ->
+                        platform.workplace(ctx.getSource(),uuid(ctx,"citizen"),uuid(ctx,"building")))))));
         root.then(citizen);
         root.then(literal("status").then(argument("colony", UuidArgument.uuid()).executes(ctx -> execute(ctx, resolve, platform ->
                 platform.status(ctx.getSource(), uuid(ctx, "colony"))))));

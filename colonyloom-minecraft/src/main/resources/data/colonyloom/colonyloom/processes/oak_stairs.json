@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "version": 1,
+  "profession": "colonyloom:carpenter",
+  "equipment": "minecraft:crafting_table",
+  "inputs": [{"item": "minecraft:oak_planks", "count": 6}],
+  "output": {"item": "minecraft:oak_stairs", "count": 4},
+  "durationTicks": 40
+}

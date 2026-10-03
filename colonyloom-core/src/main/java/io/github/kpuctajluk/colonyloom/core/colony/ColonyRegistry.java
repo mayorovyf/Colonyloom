@@ -31,6 +31,7 @@ public final class ColonyRegistry {
     private final io.github.kpuctajluk.colonyloom.core.action.EffectRegistry effects;
     private final io.github.kpuctajluk.colonyloom.core.construction.ConstructionRegistry construction;
     private final io.github.kpuctajluk.colonyloom.core.storage.StorageRegistry storage;
+    private final io.github.kpuctajluk.colonyloom.core.supply.SupplyRegistry supply;
     private Map<UUID, AdmissionLedger.Lease> colonyLeases = new LinkedHashMap<>();
     private Map<UUID, AdmissionLedger.Lease> citizenLeases = new LinkedHashMap<>();
     private Map<UUID, AdmissionLedger.Lease> tombstoneLeases = new LinkedHashMap<>();
@@ -54,6 +55,7 @@ public final class ColonyRegistry {
         construction = new io.github.kpuctajluk.colonyloom.core.construction.ConstructionRegistry(this);
         bindings = new BindingRegistry(this);
         storage = new io.github.kpuctajluk.colonyloom.core.storage.StorageRegistry(this);
+        supply = new io.github.kpuctajluk.colonyloom.core.supply.SupplyRegistry(this);
     }
     public void requireOwner() { ownerCheck.run(); }
     public void setBeforeMutation(Runnable hook) { requireOwner(); beforeMutation = Objects.requireNonNull(hook, "hook"); }
@@ -68,6 +70,7 @@ public final class ColonyRegistry {
     public io.github.kpuctajluk.colonyloom.core.action.EffectRegistry effects() { requireOwner(); return effects; }
     public io.github.kpuctajluk.colonyloom.core.construction.ConstructionRegistry construction() { requireOwner(); return construction; }
     public io.github.kpuctajluk.colonyloom.core.storage.StorageRegistry storage() { requireOwner(); return storage; }
+    public io.github.kpuctajluk.colonyloom.core.supply.SupplyRegistry supply() { requireOwner(); return supply; }
     public Collection<CitizenRecord> citizensView() { requireOwner(); return Collections.unmodifiableCollection(citizens.values()); }
     public List<ColonyRuntime> colonies() { requireOwner(); return List.copyOf(colonies.values()); }
     public List<CitizenRecord> citizens() { requireOwner(); return List.copyOf(citizens.values()); }
@@ -77,7 +80,7 @@ public final class ColonyRegistry {
     public CitizenRecord citizen(UUID id) { requireOwner(); return required(citizens, id, "citizen"); }
     public Optional<CitizenRecord> findCitizen(UUID id) { requireOwner(); return Optional.ofNullable(citizens.get(id)); }
     public List<CitizenRecord> citizens(UUID colonyId) { colony(colonyId); return citizens.values().stream().filter(value -> colonyId.equals(value.colonyId())).toList(); }
-    public boolean usedId(UUID id) { requireOwner(); return colonies.containsKey(id) || citizens.containsKey(id) || buildings.containsKey(id) || tombstones.containsKey(id) || storage.usedId(id) || effects.get(id)!=null || workBoard.works().stream().anyMatch(work -> work.id().equals(id)); }
+    public boolean usedId(UUID id) { requireOwner(); return colonies.containsKey(id) || citizens.containsKey(id) || buildings.containsKey(id) || tombstones.containsKey(id) || storage.usedId(id) || supply.usedId(id) || effects.get(id)!=null || workBoard.works().stream().anyMatch(work -> work.id().equals(id)); }
     public boolean entityIdUsed(UUID id) { requireOwner(); return citizens.values().stream().anyMatch(value -> value.entityId().equals(id)) || bindings.observations().stream().anyMatch(value -> value.entityId().equals(id)); }
 
     public void addColony(ColonyRuntime colony) {
@@ -93,7 +96,7 @@ public final class ColonyRegistry {
         requireOwner();
         colony(citizen.colonyId());
         if (usedId(citizen.citizenId()) || entityIdUsed(citizen.entityId())) throw new IllegalArgumentException("Citizen identity unavailable");
-        validateCitizen(citizen, colonies, buildings);
+        validateCitizen(citizen, colonies, buildings,storage.workshops());
         AdmissionLedger.Lease lease = admission.reserve(citizen.colonyId(), AdmissionLedger.Lane.NORMAL,
                 Map.of(SimulationLimits.Resource.CITIZENS, 1, SimulationLimits.Resource.TOMBSTONES, 1, SimulationLimits.Resource.EVIDENCE, 1));
         citizenLeases.put(citizen.citizenId(), lease);
@@ -105,7 +108,7 @@ public final class ColonyRegistry {
     public void updateCitizen(CitizenRecord citizen) {
         CitizenRecord old = citizen(citizen.citizenId());
         if (!old.colonyId().equals(citizen.colonyId())) throw new IllegalArgumentException("Citizen cannot change colony");
-        validateCitizen(citizen, colonies, buildings);
+        validateCitizen(citizen, colonies, buildings,storage.workshops());
         if (old.assignedWorkId() != null && !Objects.equals(old.assignedWorkId(), citizen.assignedWorkId())) workBoard.citizenDetached(old.citizenId());
         citizens.put(citizen.citizenId(), citizen);
         workBoard.markCitizenChanged(citizen.citizenId());
@@ -118,7 +121,7 @@ public final class ColonyRegistry {
         tombstones.put(tombstone.citizenId(), tombstone);
     }
     public RegistrySnapshot snapshot() {
-        return new RegistrySnapshot(colonies(), citizens(), buildings(), tombstones(), bindings.observations(), workBoard.snapshots(), targetClaims.snapshots(), effects.snapshots(), construction.snapshots(), construction.definitions(), storage.snapshot());
+        return new RegistrySnapshot(colonies(), citizens(), buildings(), tombstones(), bindings.observations(), workBoard.snapshots(), targetClaims.snapshots(), effects.snapshots(), construction.snapshots(), construction.definitions(), storage.snapshot(), supply.snapshot());
     }
 
     /** Validates the whole DTO before replacing any authoritative state. */
@@ -149,7 +152,7 @@ public final class ColonyRegistry {
         Set<UUID> entityIds = new HashSet<>();
         for (CitizenRecord value : snapshot.citizens()) {
             if (!objectIds.add(value.citizenId()) || !entityIds.add(value.entityId())) throw new IllegalArgumentException("Duplicate citizen/entity identity");
-            validateCitizen(value, newColonies, newBuildings);
+            validateCitizen(value, newColonies, newBuildings,snapshot.storage().workshops());
             // Readiness is derived from the current world's observed incarnation, never a saved promise.
             CitizenRecord.Readiness readiness = required(newColonies, value.colonyId(), "citizen colony").contentBlocked() ? CitizenRecord.Readiness.BLOCKED : CitizenRecord.Readiness.UNKNOWN;
             newCitizens.put(value.citizenId(), new CitizenRecord(value.citizenId(), value.colonyId(), value.entityId(), value.bindingEpoch(), value.homeId(), value.workplaceId(), value.assignedWorkId(), value.professionId(), value.skills(), value.needs(), value.lifecycle(), value.admission(), readiness, value.activeTimeTicks(), value.remainingTimers(), value.lastKnownPosition(), value.revision()));
@@ -219,6 +222,18 @@ public final class ColonyRegistry {
             if(!objectIds.add(allocation.id())) throw new IllegalArgumentException("Duplicate allocation identity");
             stockSlots.add(allocation.slot());
         }
+        for(var demand:snapshot.supply().demands()) if(!objectIds.add(demand.id())) throw new IllegalArgumentException("Duplicate demand identity");
+        for(var share:snapshot.supply().shares()) if(!objectIds.add(share.id())) throw new IllegalArgumentException("Duplicate coverage identity");
+        for(var order:snapshot.supply().productionOrders()) if(!objectIds.add(order.id())) throw new IllegalArgumentException("Duplicate production identity");
+        for(var order:snapshot.supply().deliveries()) if(!objectIds.add(order.id())) throw new IllegalArgumentException("Duplicate delivery identity");
+        for(var order:snapshot.supply().productionOrders()) {
+            if(order.workId()!=null&&!required(newWorks,order.workId(),"production work").colonyId().equals(order.colonyId()))throw new IllegalArgumentException("Foreign production work");
+            if(order.citizenId()!=null&&!required(newCitizens,order.citizenId(),"producer").colonyId().equals(order.colonyId()))throw new IllegalArgumentException("Foreign producer");
+        }
+        for(var order:snapshot.supply().deliveries()) {
+            if(order.workId()!=null&&!required(newWorks,order.workId(),"delivery work").colonyId().equals(order.colonyId()))throw new IllegalArgumentException("Foreign delivery work");
+            if(order.citizenId()!=null&&!required(newCitizens,order.citizenId(),"courier").colonyId().equals(order.colonyId()))throw new IllegalArgumentException("Foreign courier");
+        }
         // Restore already accepted state, then drain at the configured limits without eviction.
         int restorationRoots = Math.max(1, snapshot.works().size());
         SimulationLimits restorationLimits = limits
@@ -231,6 +246,9 @@ public final class ColonyRegistry {
                 .withResource(SimulationLimits.Resource.STORAGE_SLOTS,Math.max(limits.resource(SimulationLimits.Resource.STORAGE_SLOTS),Math.multiplyExact(4,stockSlots.size())))
                 .withResource(SimulationLimits.Resource.RESERVATIONS_AND_ALLOCATIONS,Math.max(limits.resource(SimulationLimits.Resource.RESERVATIONS_AND_ALLOCATIONS),Math.multiplyExact(4,snapshot.storage().reservations().size()+snapshot.storage().allocations().size())))
                 .withResource(SimulationLimits.Resource.EVIDENCE, Math.max(limits.resource(SimulationLimits.Resource.EVIDENCE), Math.multiplyExact(4,snapshot.citizens().size()+snapshot.observations().size()+snapshot.effects().size()+snapshot.constructionSites().size()+snapshot.storage().retiredIdentities().size())))
+                .withResource(SimulationLimits.Resource.DEMANDS, Math.max(limits.resource(SimulationLimits.Resource.DEMANDS), Math.multiplyExact(8,snapshot.supply().demands().size())))
+                .withResource(SimulationLimits.Resource.COVERAGE_SHARES, Math.max(limits.resource(SimulationLimits.Resource.COVERAGE_SHARES), Math.multiplyExact(8,snapshot.supply().shares().size())))
+                .withResource(SimulationLimits.Resource.DELIVERIES_AND_PRODUCTION_ORDERS, Math.max(limits.resource(SimulationLimits.Resource.DELIVERIES_AND_PRODUCTION_ORDERS), Math.multiplyExact(8,snapshot.supply().productionOrders().size()+snapshot.supply().deliveries().size())))
                 .withResource(SimulationLimits.Resource.WAIT_REGISTRATIONS, Math.max(limits.resource(SimulationLimits.Resource.WAIT_REGISTRATIONS), Math.multiplyExact(restorationRoots, 144)));
         AdmissionLedger replacement = new AdmissionLedger(restorationLimits, ownerCheck);
         Map<UUID, AdmissionLedger.Lease> newColonyLeases = new LinkedHashMap<>();
@@ -244,12 +262,14 @@ public final class ColonyRegistry {
             CitizenRecord citizen = newCitizens.get(value.citizenId());
             if (citizen == null || !citizen.entityId().equals(value.entityId())) replacement.reserve(citizen == null ? new UUID(0, 0) : citizen.colonyId(), AdmissionLedger.Lane.NORMAL, Map.of(SimulationLimits.Resource.EVIDENCE, 1));
         }
+        io.github.kpuctajluk.colonyloom.core.supply.SupplyRegistry.validatePins(snapshot.pinnedBlueprints(),snapshot.supply().productionOrders().stream().map(io.github.kpuctajluk.colonyloom.core.production.ProductionOrder::recipe).toList(),null);
         try (var preparedClaims = targetClaims.prepareRestore(snapshot.targetClaims(), replacement);
                 var preparedEffects = effects.prepareRestore(snapshot.effects(),replacement);
                 var preparedConstruction = construction.prepareRestore(snapshot.constructionSites(),snapshot.pinnedBlueprints(),replacement);
-                var preparedStorage = storage.prepareRestore(snapshot.storage(),replacement,newColonies.values())) {
+                var preparedStorage = storage.prepareRestore(snapshot.storage(),replacement,newColonies.values());
+                var preparedSupply = supply.prepareRestore(snapshot.supply(),snapshot.storage(),replacement,newColonies.values())) {
             workBoard.restoreValidated(snapshot.works(), replacement);
-            preparedClaims.commit(); preparedEffects.commit(); preparedConstruction.commit(); preparedStorage.commit();
+            preparedClaims.commit(); preparedEffects.commit(); preparedConstruction.commit(); preparedStorage.commit(); preparedSupply.commit();
         }
         replacement.updateLimits(limits);
         replacement.inheritCounters(admission);
@@ -282,13 +302,18 @@ public final class ColonyRegistry {
         beforeMutation();
         updates.forEach(this::updateColony);
     }
-    private static void validateCitizen(CitizenRecord citizen, Map<UUID, ColonyRuntime> colonies, Map<UUID, BuildingRecord> buildings) {
+    private static void validateCitizen(CitizenRecord citizen, Map<UUID, ColonyRuntime> colonies, Map<UUID, BuildingRecord> buildings,
+            java.util.Collection<io.github.kpuctajluk.colonyloom.core.storage.StorageRegistry.Workshop> workshops) {
         ColonyRuntime colony = required(colonies, citizen.colonyId(), "citizen colony");
-        for (UUID reference : new UUID[]{citizen.homeId(), citizen.workplaceId()}) {
-            if (reference == null) continue;
-            BuildingRecord building = buildings.get(reference);
-            if (building == null && colony.contentBlocked()) continue;
-            if (building == null || !building.colonyId().equals(citizen.colonyId())) throw new IllegalArgumentException("Citizen references unknown/foreign building");
+        if(citizen.homeId()!=null) {
+            BuildingRecord home=buildings.get(citizen.homeId());
+            if((home==null && !colony.contentBlocked()) || home!=null && !home.colonyId().equals(citizen.colonyId())) throw new IllegalArgumentException("Citizen references unknown/foreign home");
+        }
+        if(citizen.workplaceId()!=null) {
+            BuildingRecord building=buildings.get(citizen.workplaceId());
+            var workshop=workshops.stream().filter(value -> value.id().equals(citizen.workplaceId())).findFirst().orElse(null);
+            if(building!=null && !building.colonyId().equals(citizen.colonyId()) || workshop!=null && !workshop.colonyId().equals(citizen.colonyId())
+                    || building==null && workshop==null && !colony.contentBlocked()) throw new IllegalArgumentException("Citizen references unknown/foreign workplace");
         }
         if (citizen.assignedWorkId() != null && citizen.lifecycle() != CitizenRecord.Lifecycle.ALIVE) throw new IllegalArgumentException("Nonliving citizen has work assignment");
     }

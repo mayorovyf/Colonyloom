@@ -68,10 +68,10 @@ final class StorageRegistryTest {
         assertEquals(64, f.storage.index().free(slot, f.tick));
         assertEquals(List.of(slot), f.storage.index().candidates(A, STONE.itemId(), f.tick, 10));
         assertEquals(List.of(slot), f.storage.index().candidates(B, STONE.itemId(), f.tick, 10));
-        f.storage.reservations().reserve(id(1001), A, OWNER, slot, STONE, 40, f.tick);
-        f.storage.allocations().allocate(id(1002), B, OWNER, slot, STONE, 24, f.tick);
+        f.storage.reservations().reserve(id(1001), A, OWNER, slot, STONE, 40, f.tick, AdmissionLedger.Lane.NORMAL);
+        f.storage.allocations().allocate(id(1002), B, OWNER, slot, STONE, 24, f.tick, AdmissionLedger.Lane.NORMAL);
         assertEquals(0, f.storage.index().free(slot, f.tick));
-        assertThrows(IllegalStateException.class, () -> f.storage.reservations().reserve(id(1003), B, OWNER, slot, STONE, 1, f.tick));
+        assertThrows(IllegalStateException.class, () -> f.storage.reservations().reserve(id(1003), B, OWNER, slot, STONE, 1, f.tick, AdmissionLedger.Lane.NORMAL));
         assertEquals(2, f.registry.admission().used(Resource.RESERVATIONS_AND_ALLOCATIONS));
         assertEquals(2, f.storage.registrations(A).size());
         assertTrue(f.storage.reservations().release(id(1001))); assertFalse(f.storage.reservations().release(id(1001)));
@@ -86,8 +86,8 @@ final class StorageRegistryTest {
         assertNotEquals(STONE, named);
         Fixture f = new Fixture(); StockRegion slot = slot(100, 0); f.register(A, 0, "warehouse", slot);
         f.physical.set(slot, named, 64); f.scan();
-        assertThrows(IllegalStateException.class, () -> f.storage.reservations().reserve(id(1001), A, OWNER, slot, STONE, 1, f.tick));
-        f.storage.reservations().reserve(id(1001), A, OWNER, slot, named, 40, f.tick);
+        assertThrows(IllegalStateException.class, () -> f.storage.reservations().reserve(id(1001), A, OWNER, slot, STONE, 1, f.tick, AdmissionLedger.Lane.NORMAL));
+        f.storage.reservations().reserve(id(1001), A, OWNER, slot, named, 40, f.tick, AdmissionLedger.Lane.NORMAL);
         f.physical.set(slot, STONE, 64); f.scan();
         assertTrue(f.storage.reservations().entries().isEmpty());
         assertEquals(64, f.storage.index().free(slot, f.tick));
@@ -97,8 +97,8 @@ final class StorageRegistryTest {
     @Test void staleAndUnknownRetainBothKindsOfObligationAndRestoreNeverInventsObservation() {
         Fixture f = new Fixture(); StockRegion slot = slot(100, 0); f.register(A, 0, "warehouse", slot);
         f.physical.set(slot, STONE, 64); f.scan();
-        var reservation = f.storage.reservations().reserve(id(1001), A, OWNER, slot, STONE, 20, f.tick);
-        var allocation = f.storage.allocations().allocate(id(1002), A, OWNER, slot, STONE, 30, f.tick);
+        var reservation = f.storage.reservations().reserve(id(1001), A, OWNER, slot, STONE, 20, f.tick, AdmissionLedger.Lane.NORMAL);
+        var allocation = f.storage.allocations().allocate(id(1002), A, OWNER, slot, STONE, 30, f.tick, AdmissionLedger.Lane.NORMAL);
         assertEquals(0, f.storage.index().free(slot, f.tick + 201));
         f.storage.index().unknown(slot);
         assertEquals(0, f.storage.index().free(slot, f.tick));
@@ -117,8 +117,8 @@ final class StorageRegistryTest {
         Fixture f = new Fixture(); StockRegion slot = slot(100, 0); f.register(A, 0, "warehouse", slot); f.register(B, 64, "warehouse", slot);
         f.physical.set(slot, STONE, 64); f.scan();
         // Admission order does not establish priority: UUID order is canonical across both ledgers.
-        f.storage.reservations().reserve(id(1002), A, OWNER, slot, STONE, 40, f.tick);
-        f.storage.allocations().allocate(id(1001), B, OWNER, slot, STONE, 24, f.tick);
+        f.storage.reservations().reserve(id(1002), A, OWNER, slot, STONE, 40, f.tick, AdmissionLedger.Lane.NORMAL);
+        f.storage.allocations().allocate(id(1001), B, OWNER, slot, STONE, 24, f.tick, AdmissionLedger.Lane.NORMAL);
         f.physical.set(slot, STONE, 32); f.scan();
         assertEquals(24, f.storage.allocations().entries().getFirst().count());
         assertEquals(8, f.storage.reservations().entries().getFirst().count());
@@ -152,7 +152,7 @@ final class StorageRegistryTest {
         f.physical.set(first, STONE, 64); f.physical.set(second, STONE, 64); f.scan();
         assertEquals(List.of(first), f.storage.index().candidates(A, STONE.itemId(), f.tick, 10));
         assertEquals(List.of(second), f.storage.index().candidates(B, STONE.itemId(), f.tick, 10));
-        assertThrows(IllegalArgumentException.class, () -> f.storage.allocations().allocate(id(1001), A, OWNER, second, STONE, 1, f.tick));
+        assertThrows(IllegalArgumentException.class, () -> f.storage.allocations().allocate(id(1001), A, OWNER, second, STONE, 1, f.tick, AdmissionLedger.Lane.NORMAL));
         assertThrows(IllegalArgumentException.class, () -> f.storage.index().observe(slot(102, 0), STONE, 64, f.tick));
         assertThrows(IllegalArgumentException.class, () -> f.storage.index().candidates(A, STONE.itemId(), f.tick, 257));
     }
@@ -171,8 +171,8 @@ final class StorageRegistryTest {
     @Test void failedObligationAdmissionAndMutationBarrierCannotPublishPromises() {
         Fixture f = new Fixture(SimulationLimits.development().withResource(Resource.RESERVATIONS_AND_ALLOCATIONS, 2));
         StockRegion slot = slot(100, 0); f.register(A, 0, "warehouse", slot); f.physical.set(slot, STONE, 64); f.scan();
-        f.storage.reservations().reserve(id(1001), A, OWNER, slot, STONE, 1, f.tick);
-        assertThrows(AdmissionLedger.AdmissionException.class, () -> f.storage.allocations().allocate(id(1002), A, OWNER, slot, STONE, 1, f.tick));
+        f.storage.reservations().reserve(id(1001), A, OWNER, slot, STONE, 1, f.tick, AdmissionLedger.Lane.NORMAL);
+        assertThrows(AdmissionLedger.AdmissionException.class, () -> f.storage.allocations().allocate(id(1002), A, OWNER, slot, STONE, 1, f.tick, AdmissionLedger.Lane.NORMAL));
         assertTrue(f.storage.allocations().entries().isEmpty()); assertEquals(63, f.storage.index().free(slot, f.tick));
         f.registry.setBeforeMutation(() -> { throw new IllegalStateException("disk barrier"); });
         assertThrows(IllegalStateException.class, () -> f.storage.reservations().release(id(1001)));
@@ -184,7 +184,7 @@ final class StorageRegistryTest {
     @Test void replacementKeepsOldObligationsUnknownAndNeverTransfersThemToNewIdentity() {
         Fixture f = new Fixture(); StockRegion old = slot(100, 0), next = slot(101, 0);
         var previous = f.register(A, 0, "warehouse", old); f.physical.set(old, STONE, 64); f.scan();
-        var allocation = f.storage.allocations().allocate(id(1001), A, OWNER, old, STONE, 64, f.tick);
+        var allocation = f.storage.allocations().allocate(id(1001), A, OWNER, old, STONE, 64, f.tick, AdmissionLedger.Lane.NORMAL);
         var replacement = f.register(A, 0, "warehouse", next);
         assertEquals(previous.id(), replacement.id()); assertEquals(1, replacement.revision());
         assertEquals(0, f.storage.index().free(old, f.tick)); assertEquals(List.of(allocation), f.storage.allocations().entries());
@@ -199,7 +199,7 @@ final class StorageRegistryTest {
     @Test void permanentRetirementRetainsPromisesEvenWithOldIdentityStillRegisteredAfterRestore() {
         Fixture f = new Fixture(); StockRegion slot = slot(100, 0); f.register(A, 0, "warehouse", slot);
         f.physical.set(slot, STONE, 64); f.scan();
-        var allocation = f.storage.allocations().allocate(id(1001), A, OWNER, slot, STONE, 32, f.tick);
+        var allocation = f.storage.allocations().allocate(id(1001), A, OWNER, slot, STONE, 32, f.tick, AdmissionLedger.Lane.NORMAL);
         f.storage.retire(slot.storage(), A); f.storage.index().observe(slot, STONE, 64, f.tick + 1);
         assertEquals(0, f.storage.index().free(slot, f.tick + 1)); assertEquals(List.of(allocation), f.storage.allocations().entries());
         StorageSnapshot saved = f.storage.snapshot();
@@ -213,7 +213,7 @@ final class StorageRegistryTest {
         Fixture f = new Fixture(); StockRegion slot = slot(100, 0); f.register(A, 0, "workshop", slot);
         var workshop = f.storage.registerWorkshop(A, pos(2), f.storage.registrations().getFirst().id());
         f.physical.set(slot, STONE, 64); f.scan();
-        f.storage.reservations().reserve(id(1001), A, OWNER, slot, STONE, 20, f.tick);
+        f.storage.reservations().reserve(id(1001), A, OWNER, slot, STONE, 20, f.tick, AdmissionLedger.Lane.NORMAL);
         StorageSnapshot saved = f.storage.snapshot(); AdmissionLedger replacement = f.replacement();
         try (var ignored = f.storage.prepareRestore(saved, replacement, f.registry.colonies())) {
             assertEquals(20, f.storage.reservations().entries().getFirst().count());
@@ -240,13 +240,13 @@ final class StorageRegistryTest {
         assertThrows(IllegalArgumentException.class, () -> new StorageId("not_dimension", id(100), 0));
         assertThrows(IllegalArgumentException.class, () -> new StorageId(DIMENSION, id(100), -1));
         assertThrows(IllegalArgumentException.class, () -> new StockIndex.Observation(STONE, 0, true));
-        assertThrows(IllegalArgumentException.class, () -> new ReservationLedger.Entry(id(1001), A, OWNER, slot, STONE, 0, 0));
-        assertThrows(IllegalArgumentException.class, () -> new AllocationLedger.Entry(id(1001), A, OWNER, slot, STONE, 1_000_001, 0));
+        assertThrows(IllegalArgumentException.class, () -> new ReservationLedger.Entry(id(1001), A, OWNER, slot, STONE, 0, 0, AdmissionLedger.Lane.NORMAL));
+        assertThrows(IllegalArgumentException.class, () -> new AllocationLedger.Entry(id(1001), A, OWNER, slot, STONE, 1_000_001, 0, AdmissionLedger.Lane.NORMAL));
     }
     @Test void readerRecanonicalizationDoesNotObserveOrTransferTheOldIdentity() {
         Fixture f = new Fixture(); StockRegion old = slot(100, 0), next = slot(101, 0);
         f.register(A, 0, "warehouse", old); f.physical.set(old, STONE, 64); f.scan();
-        f.storage.reservations().reserve(id(1001), A, OWNER, old, STONE, 32, f.tick);
+        f.storage.reservations().reserve(id(1001), A, OWNER, old, STONE, 32, f.tick, AdmissionLedger.Lane.NORMAL);
         f.budgets.beginTick(++f.tick);
         f.storage.index().tick(f.tick, f.budgets, region -> {
             if (region.equals(old)) f.register(A, 0, "warehouse", next);
@@ -259,14 +259,14 @@ final class StorageRegistryTest {
 
     @Test void invalidSavedCanonicalTotalsAndComponentMixturesRejectBeforeAdmission() {
         Fixture f = new Fixture(); StockRegion slot = slot(100, 0); f.register(A, 0, "warehouse", slot);
-        ReservationLedger.Entry reserved = new ReservationLedger.Entry(id(1001), A, OWNER, slot, STONE, 1_000_000, 0);
-        AllocationLedger.Entry allocated = new AllocationLedger.Entry(id(1002), A, OWNER, slot, STONE, 1, 0);
+        ReservationLedger.Entry reserved = new ReservationLedger.Entry(id(1001), A, OWNER, slot, STONE, 1_000_000, 0, AdmissionLedger.Lane.NORMAL);
+        AllocationLedger.Entry allocated = new AllocationLedger.Entry(id(1002), A, OWNER, slot, STONE, 1, 0, AdmissionLedger.Lane.NORMAL);
         AdmissionLedger replacement = f.replacement();
         StorageSnapshot excessive = new StorageSnapshot(f.storage.registrations(), List.of(reserved), List.of(allocated), List.of(), List.of());
         assertThrows(IllegalArgumentException.class, () -> f.storage.prepareRestore(excessive, replacement, f.registry.colonies()));
         var mixed = new StorageSnapshot(f.storage.registrations(),
-                List.of(new ReservationLedger.Entry(id(1001), A, OWNER, slot, STONE, 1, 0)),
-                List.of(new AllocationLedger.Entry(id(1002), A, OWNER, slot, new ItemDescriptor(STONE.itemId(), new byte[]{1}), 1, 0)), List.of(), List.of());
+                List.of(new ReservationLedger.Entry(id(1001), A, OWNER, slot, STONE, 1, 0, AdmissionLedger.Lane.NORMAL)),
+                List.of(new AllocationLedger.Entry(id(1002), A, OWNER, slot, new ItemDescriptor(STONE.itemId(), new byte[]{1}), 1, 0, AdmissionLedger.Lane.NORMAL)), List.of(), List.of());
         assertThrows(IllegalArgumentException.class, () -> f.storage.prepareRestore(mixed, replacement, f.registry.colonies()));
         assertEquals(0, replacement.used(Resource.STORAGE_SLOTS));
         assertEquals(0, replacement.used(Resource.RESERVATIONS_AND_ALLOCATIONS));

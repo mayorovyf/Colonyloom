@@ -43,21 +43,24 @@ final class StorageNbt {
     }
     static CompoundTag retired(StorageRegistry.RetiredIdentity value) {CompoundTag tag=typed(RETIRED);tag.putUUID("colonyId",value.colonyId());tag.put("storage",storage(value.storage()));return tag;}
     static StorageRegistry.RetiredIdentity retired(CompoundTag tag) {return new StorageRegistry.RetiredIdentity(storage(RegistryNbt.compound(tag,"storage")),RegistryNbt.uuid(tag,"colonyId"));}
-    static CompoundTag reservation(ReservationLedger.Entry value) {return obligation(RESERVATION,value.id(),value.colonyId(),value.ownerId(),value.slot(),value.item(),value.count(),value.revision());}
-    static CompoundTag allocation(AllocationLedger.Entry value) {return obligation(ALLOCATION,value.id(),value.colonyId(),value.ownerId(),value.slot(),value.item(),value.count(),value.revision());}
-    static ReservationLedger.Entry reservation(CompoundTag tag) {return new ReservationLedger.Entry(RegistryNbt.uuid(tag,"obligationId"),RegistryNbt.uuid(tag,"colonyId"),RegistryNbt.uuid(tag,"ownerId"),slot(RegistryNbt.compound(tag,"slot")),item(RegistryNbt.compound(tag,"item")),number(tag,"count"),number(tag,"revision"));}
-    static AllocationLedger.Entry allocation(CompoundTag tag) {return new AllocationLedger.Entry(RegistryNbt.uuid(tag,"obligationId"),RegistryNbt.uuid(tag,"colonyId"),RegistryNbt.uuid(tag,"ownerId"),slot(RegistryNbt.compound(tag,"slot")),item(RegistryNbt.compound(tag,"item")),number(tag,"count"),number(tag,"revision"));}
-    private static CompoundTag obligation(String type,java.util.UUID id,java.util.UUID colony,java.util.UUID owner,StockRegion slot,ItemDescriptor item,long count,long revision) {
-        CompoundTag tag=typed(type);tag.putUUID("obligationId",id);tag.putUUID("colonyId",colony);tag.putUUID("ownerId",owner);tag.put("slot",slot(slot));tag.put("item",item(item));tag.putLong("count",count);tag.putLong("revision",revision);return tag;
+    static CompoundTag reservation(ReservationLedger.Entry value) {return obligation(RESERVATION,value.id(),value.colonyId(),value.ownerId(),value.slot(),value.item(),value.count(),value.revision(),value.lane());}
+    static CompoundTag allocation(AllocationLedger.Entry value) {return obligation(ALLOCATION,value.id(),value.colonyId(),value.ownerId(),value.slot(),value.item(),value.count(),value.revision(),value.lane());}
+    static ReservationLedger.Entry reservation(CompoundTag tag) {return new ReservationLedger.Entry(RegistryNbt.uuid(tag,"obligationId"),RegistryNbt.uuid(tag,"colonyId"),RegistryNbt.uuid(tag,"ownerId"),slot(RegistryNbt.compound(tag,"slot")),item(RegistryNbt.compound(tag,"item")),number(tag,"count"),number(tag,"revision"),lane(tag));}
+    static AllocationLedger.Entry allocation(CompoundTag tag) {return new AllocationLedger.Entry(RegistryNbt.uuid(tag,"obligationId"),RegistryNbt.uuid(tag,"colonyId"),RegistryNbt.uuid(tag,"ownerId"),slot(RegistryNbt.compound(tag,"slot")),item(RegistryNbt.compound(tag,"item")),number(tag,"count"),number(tag,"revision"),lane(tag));}
+    private static io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane lane(CompoundTag tag) {
+        return tag.contains("lane") ? io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.valueOf(text(tag,"lane")) : io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL;
+    }
+    private static CompoundTag obligation(String type,java.util.UUID id,java.util.UUID colony,java.util.UUID owner,StockRegion slot,ItemDescriptor item,long count,long revision,io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane lane) {
+        CompoundTag tag=typed(type);tag.putUUID("obligationId",id);tag.putUUID("colonyId",colony);tag.putUUID("ownerId",owner);tag.put("slot",slot(slot));tag.put("item",item(item));tag.putLong("count",count);tag.putLong("revision",revision);tag.putString("lane",lane.name());return tag;
     }
     private static CompoundTag storage(StorageId value) {CompoundTag tag=new CompoundTag();tag.putString("dimension",value.dimension());tag.putUUID("identity",value.identity());tag.putLong("bindingEpoch",value.bindingEpoch());return tag;}
     private static StorageId storage(CompoundTag tag) {return new StorageId(text(tag,"dimension"),RegistryNbt.uuid(tag,"identity"),number(tag,"bindingEpoch"));}
-    private static CompoundTag slot(StockRegion value) {CompoundTag tag=storage(value.storage());tag.putInt("slot",value.slot());return tag;}
-    private static StockRegion slot(CompoundTag tag) {require(tag,"slot",Tag.TAG_INT);return new StockRegion(storage(tag),tag.getInt("slot"));}
-    private static CompoundTag item(ItemDescriptor value) {CompoundTag tag=new CompoundTag();tag.putString("itemId",value.itemId());tag.putByteArray("components",value.canonicalComponents());return tag;}
-    private static ItemDescriptor item(CompoundTag tag) {require(tag,"components",Tag.TAG_BYTE_ARRAY);byte[] bytes=tag.getByteArray("components");if(bytes.length>8192)throw new IllegalArgumentException("Stock component envelope exceeded");return new ItemDescriptor(text(tag,"itemId"),bytes);}
-    private static CompoundTag position(WorldPosition value) {CompoundTag tag=new CompoundTag();tag.putString("dimension",value.dimension());tag.putInt("x",value.x());tag.putInt("y",value.y());tag.putInt("z",value.z());return tag;}
-    private static WorldPosition position(CompoundTag tag) {require(tag,"x",Tag.TAG_INT);require(tag,"y",Tag.TAG_INT);require(tag,"z",Tag.TAG_INT);return new WorldPosition(text(tag,"dimension"),tag.getInt("x"),tag.getInt("y"),tag.getInt("z"));}
+    static CompoundTag slot(StockRegion value) {CompoundTag tag=storage(value.storage());tag.putInt("slot",value.slot());return tag;}
+    static StockRegion slot(CompoundTag tag) {require(tag,"slot",Tag.TAG_INT);return new StockRegion(storage(tag),tag.getInt("slot"));}
+    static CompoundTag item(ItemDescriptor value) {CompoundTag tag=new CompoundTag();tag.putString("itemId",value.itemId());tag.putByteArray("components",value.canonicalComponents());return tag;}
+    static ItemDescriptor item(CompoundTag tag) {require(tag,"components",Tag.TAG_BYTE_ARRAY);byte[] bytes=tag.getByteArray("components");if(bytes.length>8192)throw new IllegalArgumentException("Stock component envelope exceeded");return new ItemDescriptor(text(tag,"itemId"),bytes);}
+    static CompoundTag position(WorldPosition value) {CompoundTag tag=new CompoundTag();tag.putString("dimension",value.dimension());tag.putInt("x",value.x());tag.putInt("y",value.y());tag.putInt("z",value.z());return tag;}
+    static WorldPosition position(CompoundTag tag) {require(tag,"x",Tag.TAG_INT);require(tag,"y",Tag.TAG_INT);require(tag,"z",Tag.TAG_INT);return new WorldPosition(text(tag,"dimension"),tag.getInt("x"),tag.getInt("y"),tag.getInt("z"));}
     private static CompoundTag typed(String type) {CompoundTag tag=new CompoundTag();tag.putString("typeId",type);return tag;}
     private static String text(CompoundTag tag,String key) {require(tag,key,Tag.TAG_STRING);String value=tag.getString(key);if(value.isEmpty()||value.length()>256)throw new IllegalArgumentException("Invalid stock "+key);return value;}
     private static long number(CompoundTag tag,String key) {require(tag,key,Tag.TAG_LONG);long value=tag.getLong(key);if(value<0)throw new IllegalArgumentException("Negative stock "+key);return value;}

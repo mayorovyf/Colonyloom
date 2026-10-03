@@ -63,14 +63,15 @@ public final class StorageRegistry {
         final StockRegion slot;
         final ItemDescriptor item;
         long count, revision;
+        final Lane lane;
         final AdmissionLedger.Lease lease;
         Claim(boolean allocation, UUID id, UUID colony, UUID owner, StockRegion slot, ItemDescriptor item,
-              long count, long revision, AdmissionLedger.Lease lease) {
+              long count, long revision, Lane lane, AdmissionLedger.Lease lease) {
             this.allocation = allocation; this.id = id; this.colony = colony; this.owner = owner;
-            this.slot = slot; this.item = item; this.count = count; this.revision = revision; this.lease = lease;
+            this.slot = slot; this.item = item; this.count = count; this.revision = revision; this.lane = Objects.requireNonNull(lane); this.lease = lease;
         }
-        ReservationLedger.Entry reservation() { return new ReservationLedger.Entry(id, colony, owner, slot, item, count, revision); }
-        AllocationLedger.Entry allocation() { return new AllocationLedger.Entry(id, colony, owner, slot, item, count, revision); }
+        ReservationLedger.Entry reservation() { return new ReservationLedger.Entry(id, colony, owner, slot, item, count, revision, lane); }
+        AllocationLedger.Entry allocation() { return new AllocationLedger.Entry(id, colony, owner, slot, item, count, revision, lane); }
         boolean matches(UUID colony, UUID owner, StockRegion slot, ItemDescriptor item, long count) {
             return this.colony.equals(colony) && this.owner.equals(owner) && this.slot.equals(slot) && this.item.equals(item) && this.count == count;
         }
@@ -88,6 +89,8 @@ public final class StorageRegistry {
     private final Map<UUID, Claim> claims = new LinkedHashMap<>();
     private final Map<StockRegion, List<Claim>> slotClaims = new HashMap<>();
     private final Map<UUID, Set<StockRegion>> views = new HashMap<>();
+    private java.util.function.Consumer<UUID> lossListener = ignored -> {};
+    public void setLossListener(java.util.function.Consumer<UUID> listener) { requireOwner(); lossListener = Objects.requireNonNull(listener); }
 
     public StorageRegistry(ColonyRegistry registry) {
         this.registry = Objects.requireNonNull(registry); index = new StockIndex(this);
@@ -166,12 +169,12 @@ public final class StorageRegistry {
         Objects.requireNonNull(id); Objects.requireNonNull(colony); Objects.requireNonNull(owner); Objects.requireNonNull(slot); Objects.requireNonNull(item);
         if (count <= 0 || count > MAX_COUNT || revision < 0) throw new IllegalArgumentException("Invalid stock obligation quantity/revision");
     }
-    Claim claim(boolean allocation, UUID id, UUID colony, UUID owner, StockRegion slot, ItemDescriptor item, long count, long tick) {
-        requireOwner(); validateClaim(id, colony, owner, slot, item, count, 0);
+    Claim claim(boolean allocation, UUID id, UUID colony, UUID owner, StockRegion slot, ItemDescriptor item, long count, long tick, Lane lane) {
+        requireOwner(); validateClaim(id, colony, owner, slot, item, count, 0); Objects.requireNonNull(lane);
         if (tick < 0) throw new IllegalArgumentException("Negative stock claim tick");
         Claim previous = claims.get(id);
         if (previous != null) {
-            if (previous.allocation == allocation && previous.matches(colony, owner, slot, item, count)) return previous;
+            if (previous.allocation == allocation && previous.lane == lane && previous.matches(colony, owner, slot, item, count)) return previous;
             throw new IllegalArgumentException("Obligation identity already used");
         }
         registry.colony(colony);
@@ -180,10 +183,104 @@ public final class StorageRegistry {
         StockIndex.Observation observation = index.observation(slot);
         if (!item.equals(observation.item()) || index.free(slot, tick) < count) throw new IllegalStateException("Insufficient known free canonical stock");
         if (claims.size() >= MAX_OBLIGATIONS) throw new IllegalArgumentException("Stock obligation envelope exceeded");
-        AdmissionLedger.Lease lease = registry.admission().reserve(colony, Lane.NORMAL, Map.of(Resource.RESERVATIONS_AND_ALLOCATIONS, 1));
+        AdmissionLedger.Lease lease = registry.admission().reserve(colony, lane, Map.of(Resource.RESERVATIONS_AND_ALLOCATIONS, 1));
         try { registry.beforeMutation(); } catch (RuntimeException failure) { lease.close(); throw failure; }
-        Claim next = new Claim(allocation, id, colony, owner, slot, item, count, 0, lease);
+        Claim next = new Claim(allocation, id, colony, owner, slot, item, count, 0, lane, lease);
         addClaim(next); return next;
+    }
+    /** Whole-kit admission and publication: no partial reservation survives any failure. */
+    public List<ReservationLedger.Entry> reserveAll(List<ReservationLedger.Entry> requested, long tick) {
+        requireOwner(); if (tick < 0 || requested.isEmpty() || requested.size() > 16) throw new IllegalArgumentException("Invalid kit envelope");
+        if (claims.size() + requested.size() > MAX_OBLIGATIONS) throw new IllegalArgumentException("Stock obligation envelope exceeded");
+        Set<UUID> ids = new HashSet<>(); Map<StockRegion, Long> totals = new HashMap<>();
+        for (ReservationLedger.Entry entry : requested) {
+            registry.colony(entry.colonyId());
+            if (!ids.add(entry.id()) || registry.usedId(entry.id()) || claims.containsKey(entry.id())
+                    || !authorized(entry.colonyId(), entry.slot()) || retired.containsKey(entry.slot().storage())) throw new IllegalArgumentException("Invalid kit obligation identity/view");
+            if (!entry.item().equals(index.observation(entry.slot()).item())) throw new IllegalStateException("Kit item changed");
+            long total = Math.addExact(totals.getOrDefault(entry.slot(), 0L), entry.count());
+            if (total > index.free(entry.slot(), tick)) throw new IllegalStateException("Insufficient complete kit stock");
+            totals.put(entry.slot(), total);
+        }
+        List<Claim> staged = new ArrayList<>(requested.size());
+        try {
+            for (ReservationLedger.Entry entry : requested) staged.add(new Claim(false, entry.id(), entry.colonyId(), entry.ownerId(), entry.slot(), entry.item(), entry.count(), 0, entry.lane(),
+                    registry.admission().reserve(entry.colonyId(), entry.lane(), Map.of(Resource.RESERVATIONS_AND_ALLOCATIONS, 1))));
+            registry.beforeMutation();
+        } catch (RuntimeException failure) { staged.forEach(c -> c.lease.close()); throw failure; }
+        staged.forEach(this::addClaim); return staged.stream().map(Claim::reservation).toList();
+    }
+    public ReservationLedger.Entry reservation(UUID id) { requireOwner(); Claim c = claims.get(id); return c == null || c.allocation ? null : c.reservation(); }
+    public AllocationLedger.Entry allocation(UUID id) { requireOwner(); Claim c = claims.get(id); return c == null || !c.allocation ? null : c.allocation(); }
+    /** Only reduces a real obligation; zero releases its lease. */
+    public void reduceObligation(UUID id, long retained) {
+        requireOwner(); Claim c = claims.get(id);
+        if (c == null || retained < 0 || retained > c.count) throw new IllegalArgumentException("Invalid retained obligation");
+        if (retained == c.count) return; long revision = Math.addExact(c.revision, 1); registry.beforeMutation();
+        if (retained == 0) { removeClaim(c); prune(c.slot); } else { c.count = retained; c.revision = revision; }
+    }
+    /** A physical transfer can replace a reservation with an allocation without double admission. */
+    public AllocationLedger.Entry allocateReserved(UUID id) {
+        requireOwner(); Claim c = claims.get(id);
+        if (c == null || c.allocation) throw new IllegalArgumentException("Unknown reservation");
+        Claim next = new Claim(true, c.id, c.colony, c.owner, c.slot, c.item, c.count, Math.addExact(c.revision, 1), c.lane, c.lease);
+        registry.beforeMutation(); claims.put(id, next); List<Claim> local = slotClaims.get(c.slot); local.set(local.indexOf(c), next); return next.allocation();
+    }
+    /** Validates/admit replacements before releasing old physical obligations. */
+    public void replaceObligations(List<UUID> removals, List<ReservationLedger.Entry> reservations,
+                                   List<AllocationLedger.Entry> allocations, long tick) {
+        requireOwner(); if (tick < 0 || removals.size() > 16 || reservations.size() + allocations.size() > 16) throw new IllegalArgumentException("Replacement envelope exceeded");
+        Set<UUID> removed = new HashSet<>(removals), ids = new HashSet<>();
+        if (removed.size() != removals.size()) throw new IllegalArgumentException("Duplicate removed obligation");
+        Map<StockRegion, Long> released = new HashMap<>(), totals = new HashMap<>();
+        for (UUID id : removals) { Claim c = claims.get(id); if (c == null) throw new IllegalArgumentException("Missing replaced obligation"); released.merge(c.slot, c.count, Math::addExact); }
+        List<Claim> staged = new ArrayList<>();
+        try {
+            for (int i = 0; i < reservations.size() + allocations.size(); i++) {
+                boolean allocation = i >= reservations.size();
+                ReservationLedger.Entry r = allocation ? null : reservations.get(i);
+                AllocationLedger.Entry a = allocation ? allocations.get(i - reservations.size()) : null;
+                UUID id = allocation ? a.id() : r.id(), colony = allocation ? a.colonyId() : r.colonyId(), owner = allocation ? a.ownerId() : r.ownerId();
+                StockRegion slot = allocation ? a.slot() : r.slot(); ItemDescriptor item = allocation ? a.item() : r.item();
+                long count = allocation ? a.count() : r.count(), revision = allocation ? a.revision() : r.revision(); Lane lane = allocation ? a.lane() : r.lane();
+                registry.colony(colony);
+                if (!ids.add(id) || registry.usedId(id) && !removed.contains(id) || claims.containsKey(id) && !removed.contains(id)
+                        || !authorized(colony, slot) || retired.containsKey(slot.storage()) || !item.equals(index.observation(slot).item())) throw new IllegalArgumentException("Invalid replacement obligation");
+                long total = Math.addExact(totals.getOrDefault(slot, 0L), count);
+                if (total > index.free(slot, tick) + released.getOrDefault(slot, 0L) || !index.observation(slot).ready()) throw new IllegalStateException("Insufficient observed replacement stock");
+                totals.put(slot, total);
+                Claim previous = claims.get(id);
+                AdmissionLedger.Lease lease = previous != null && previous.colony.equals(colony) && previous.lane == lane ? previous.lease
+                        : registry.admission().reserve(colony, lane, Map.of(Resource.RESERVATIONS_AND_ALLOCATIONS, 1));
+                staged.add(new Claim(allocation, id, colony, owner, slot, item, count, revision, lane, lease));
+            }
+            if (claims.size() - removals.size() + staged.size() > MAX_OBLIGATIONS) throw new IllegalArgumentException("Obligation envelope exceeded");
+            registry.beforeMutation();
+        } catch (RuntimeException failure) {
+            for (Claim c : staged) { Claim old = claims.get(c.id); if (old == null || old.lease != c.lease) c.lease.close(); }
+            throw failure;
+        }
+        for (UUID id : removals) {
+            Claim old = claims.remove(id); List<Claim> local = slotClaims.get(old.slot); local.remove(old); if (local.isEmpty()) slotClaims.remove(old.slot);
+            boolean reused = false; for (Claim c : staged) if (c.lease == old.lease) { reused = true; break; }
+            if (!reused) old.lease.close();
+        }
+        staged.forEach(this::addClaim);
+        for (StockRegion slot : released.keySet()) prune(slot);
+    }
+    public void reduceObligations(Map<UUID, Long> retained) {
+        requireOwner();
+        for (var entry : retained.entrySet()) {
+            Claim c = claims.get(entry.getKey());
+            if (c == null || entry.getValue() < 0 || entry.getValue() > c.count) throw new IllegalArgumentException("Invalid obligation reduction");
+            Math.addExact(c.revision, 1);
+        }
+        if (retained.isEmpty()) return; registry.beforeMutation();
+        for (var entry : retained.entrySet()) {
+            Claim c = claims.get(entry.getKey());
+            if (entry.getValue() == 0) { removeClaim(c); prune(c.slot); }
+            else if (c.count != entry.getValue()) { c.count = entry.getValue(); c.revision++; }
+        }
     }
     private void addClaim(Claim claim) {
         claims.put(claim.id, claim);
@@ -223,8 +320,8 @@ public final class StorageRegistry {
             Claim claim = local.get(i);
             long retained = claim.item.equals(item) ? Math.min(claim.count, remaining) : 0;
             remaining -= retained;
-            if (retained == 0) { removeClaim(claim); }
-            else { if (retained != claim.count) { claim.count = retained; claim.revision = Math.addExact(claim.revision, 1); } i++; }
+            if (retained == 0) { removeClaim(claim); lossListener.accept(claim.id); }
+            else { if (retained != claim.count) { claim.count = retained; claim.revision = Math.addExact(claim.revision, 1); lossListener.accept(claim.id); } i++; }
         }
         prune(slot);
     }
@@ -289,8 +386,8 @@ public final class StorageRegistry {
             for (Workshop value : snapshot.workshops()) prepared.workshops.put(value.id(), admit(replacement, admitted, value.colonyId(), Resource.PHYSICAL_TARGETS));
             for (RetiredIdentity value : snapshot.retiredIdentities()) prepared.retired.put(value.storage(), admit(replacement, admitted, value.colonyId(), Resource.EVIDENCE));
             for (var value : slotOwners.entrySet()) prepared.slots.put(value.getKey(), admit(replacement, admitted, value.getValue(), Resource.STORAGE_SLOTS));
-            for (ReservationLedger.Entry value : snapshot.reservations()) prepared.claims.add(new Claim(false, value.id(), value.colonyId(), value.ownerId(), value.slot(), value.item(), value.count(), value.revision(), admit(replacement, admitted, value.colonyId(), Resource.RESERVATIONS_AND_ALLOCATIONS)));
-            for (AllocationLedger.Entry value : snapshot.allocations()) prepared.claims.add(new Claim(true, value.id(), value.colonyId(), value.ownerId(), value.slot(), value.item(), value.count(), value.revision(), admit(replacement, admitted, value.colonyId(), Resource.RESERVATIONS_AND_ALLOCATIONS)));
+            for (ReservationLedger.Entry value : snapshot.reservations()) prepared.claims.add(new Claim(false, value.id(), value.colonyId(), value.ownerId(), value.slot(), value.item(), value.count(), value.revision(), value.lane(), admit(replacement, admitted, value.colonyId(), Resource.RESERVATIONS_AND_ALLOCATIONS, value.lane())));
+            for (AllocationLedger.Entry value : snapshot.allocations()) prepared.claims.add(new Claim(true, value.id(), value.colonyId(), value.ownerId(), value.slot(), value.item(), value.count(), value.revision(), value.lane(), admit(replacement, admitted, value.colonyId(), Resource.RESERVATIONS_AND_ALLOCATIONS, value.lane())));
         } catch (RuntimeException failure) { prepared.close(); throw failure; }
         return prepared;
     }
@@ -310,7 +407,10 @@ public final class StorageRegistry {
         quantities.put(slot, total);
     }
     private static AdmissionLedger.Lease admit(AdmissionLedger ledger, List<AdmissionLedger.Lease> admitted, UUID colony, Resource resource) {
-        AdmissionLedger.Lease lease = ledger.reserve(colony, Lane.NORMAL, Map.of(resource, 1)); admitted.add(lease); return lease;
+        return admit(ledger, admitted, colony, resource, Lane.NORMAL);
+    }
+    private static AdmissionLedger.Lease admit(AdmissionLedger ledger, List<AdmissionLedger.Lease> admitted, UUID colony, Resource resource, Lane lane) {
+        AdmissionLedger.Lease lease = ledger.reserve(colony, lane, Map.of(resource, 1)); admitted.add(lease); return lease;
     }
     public final class PreparedRestore implements AutoCloseable {
         private StorageSnapshot snapshot;

@@ -11,6 +11,10 @@ import io.github.kpuctajluk.colonyloom.core.citizen.ProfessionDefinition;
 import io.github.kpuctajluk.colonyloom.core.content.BlockDescriptor;
 import io.github.kpuctajluk.colonyloom.core.content.BlockOffset;
 import io.github.kpuctajluk.colonyloom.core.content.BlueprintDefinition;
+import io.github.kpuctajluk.colonyloom.core.supply.ItemMatcher;
+import io.github.kpuctajluk.colonyloom.core.supply.RecipeDefinition;
+import io.github.kpuctajluk.colonyloom.gameplay.production.ProcessDefinition;
+import io.github.kpuctajluk.colonyloom.minecraft.storage.NativeItemDescriptor;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -28,6 +32,7 @@ import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.NbtAccounter;
@@ -39,6 +44,7 @@ import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraft.server.packs.resources.SimplePreparableReloadListener;
 import net.minecraft.util.profiling.ProfilerFiller;
 import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
 
@@ -46,6 +52,7 @@ import net.minecraft.world.level.block.state.properties.Property;
 public final class ContentLoader extends SimplePreparableReloadListener<ContentLoader.Content> {
     private static final String PROFESSIONS = "colonyloom/professions";
     private static final String BLUEPRINTS = "colonyloom/blueprints";
+    private static final String PROCESSES = "colonyloom/processes";
     private static final int MAX_JSON_BYTES = 8192;
     private static final int MAX_TEMPLATE_BYTES = 4 * 1024 * 1024;
     private static final long MAX_TEMPLATE_HEAP_BYTES = 32L * 1024 * 1024;
@@ -53,23 +60,32 @@ public final class ContentLoader extends SimplePreparableReloadListener<ContentL
     private static final int MAX_DEFINITIONS = 64;
     private static final Set<String> BUILDING_BLOCKS = Set.of("minecraft:oak_planks", "minecraft:oak_stairs");
 
-    public record Content(Map<String, ProfessionDefinition> professions, Map<String, BlueprintDefinition> blueprints) {
+    public record Content(Map<String, ProfessionDefinition> professions, Map<String, BlueprintDefinition> blueprints,
+                          Map<String, ProcessDefinition> processes) {
         public Content {
             professions = Map.copyOf(professions);
             blueprints = Map.copyOf(blueprints);
+            processes = Map.copyOf(processes);
             professions.forEach((id, definition) -> {
                 if (!id.equals(definition.id())) throw new IllegalArgumentException("Profession key mismatch");
             });
             blueprints.forEach((id, definition) -> {
                 if (!id.equals(definition.id())) throw new IllegalArgumentException("Blueprint key mismatch");
             });
+            processes.forEach((id, definition) -> {
+                if (!id.equals(definition.id())) throw new IllegalArgumentException("Process key mismatch");
+            });
         }
     }
 
-    public static Content load(ResourceManager resources) {
+    private final HolderLookup.Provider registries;
+    public ContentLoader(HolderLookup.Provider registries) { this.registries = java.util.Objects.requireNonNull(registries); }
+
+    public static Content load(ResourceManager resources, HolderLookup.Provider registries) {
         var professionFiles = resources.listResources(PROFESSIONS, path -> path.getPath().endsWith(".json"));
         var blueprintFiles = resources.listResources(BLUEPRINTS, path -> path.getPath().endsWith(".json"));
-        if (professionFiles.size() + blueprintFiles.size() > MAX_DEFINITIONS) {
+        var processFiles = resources.listResources(PROCESSES, path -> path.getPath().endsWith(".json"));
+        if (professionFiles.size() + blueprintFiles.size() + processFiles.size() > MAX_DEFINITIONS) {
             throw new IllegalArgumentException("Too many Colonyloom definitions");
         }
         ByteBudget budget = new ByteBudget();
@@ -115,18 +131,54 @@ public final class ContentLoader extends SimplePreparableReloadListener<ContentL
             if (blueprints.put(id, definition) != null) throw new IllegalArgumentException("Duplicate blueprint " + id);
         }
         if (!blueprints.containsKey("colonyloom:stair_strip")) throw new IllegalArgumentException("Missing blueprint colonyloom:stair_strip");
-        return new Content(professions, blueprints);
+        Map<String, ProcessDefinition> processes = new LinkedHashMap<>();
+        for (var entry : processFiles.entrySet()) {
+            String id = definitionId(entry.getKey(), PROCESSES);
+            JsonObject json = json(readBytes(entry.getValue(), MAX_JSON_BYTES, budget, id));
+            fields(json, Set.of("schemaVersion", "version", "profession", "equipment", "inputs", "output", "durationTicks"));
+            schema(json, id);
+            String profession = string(json, "profession"), equipment = string(json, "equipment");
+            ProfessionDefinition professionDefinition = professions.get(profession);
+            if (professionDefinition == null || !professionDefinition.equipment().contains(equipment)
+                    || !BuiltInRegistries.ITEM.containsKey(location(equipment))
+                    || !equipment.equals("minecraft:crafting_table")) throw new IllegalArgumentException("Unsupported process profession/equipment " + id);
+            JsonElement inputsElement = json.get("inputs"), outputElement = json.get("output");
+            if (!inputsElement.isJsonArray() || !outputElement.isJsonObject()) throw new IllegalArgumentException("Invalid process input/output " + id);
+            JsonArray inputs = inputsElement.getAsJsonArray();
+            if (inputs.isEmpty() || inputs.size() > RecipeDefinition.MAX_INGREDIENTS) throw new IllegalArgumentException("Invalid process ingredient count " + id);
+            var ingredients = new ArrayList<RecipeDefinition.Ingredient>();
+            for (JsonElement input : inputs) {
+                if (!input.isJsonObject()) throw new IllegalArgumentException("Expected process ingredient object");
+                JsonObject ingredient = input.getAsJsonObject(); fields(ingredient, Set.of("item", "count"));
+                String item = string(ingredient, "item"); requireItem(item);
+                ingredients.add(new RecipeDefinition.Ingredient(new ItemMatcher(item, null), integer(ingredient.get("count"))));
+            }
+            JsonObject output = outputElement.getAsJsonObject(); fields(output, Set.of("item", "count"));
+            String outputId = string(output, "item"); requireItem(outputId);
+            var descriptor = NativeItemDescriptor.describe(new ItemStack(BuiltInRegistries.ITEM.get(location(outputId))), registries);
+            RecipeDefinition recipe = RecipeDefinition.create(id, version(json), profession, equipment, ingredients,
+                    descriptor, integer(output.get("count")), integer(json.get("durationTicks")));
+            if (processes.put(id, new ProcessDefinition(recipe)) != null) throw new IllegalArgumentException("Duplicate process " + id);
+        }
+        for (String required : Set.of("colonyloom:oak_planks", "colonyloom:oak_stairs")) {
+            if (!processes.containsKey(required)) throw new IllegalArgumentException("Missing process " + required);
+        }
+        return new Content(professions, blueprints, processes);
     }
 
     @Override
     protected Content prepare(ResourceManager resources, ProfilerFiller profiler) {
-        return load(resources);
+        return load(resources, registries);
     }
 
     @Override
     protected void apply(Content content, ResourceManager resources, ProfilerFiller profiler) {
-        LogUtils.getLogger().info("Colonyloom content validated: professions={}, blueprints={}",
-                content.professions().size(), content.blueprints().size());
+        LogUtils.getLogger().info("Colonyloom content validated: professions={}, blueprints={}, processes={}",
+                content.professions().size(), content.blueprints().size(), content.processes().size());
+    }
+
+    private static void requireItem(String id) {
+        if (!BuiltInRegistries.ITEM.containsKey(location(id)) || id.equals("minecraft:air")) throw new IllegalArgumentException("Unknown process item " + id);
     }
 
     /** Strict registry/state validation also works for pinned definitions after their datapack was removed. */

@@ -199,7 +199,7 @@ public final class BlockPlacementGameTests {
         Fixture(GameTestHelper helper, int stairs) {
             this.helper = helper;
             registry = new ColonyRegistry(() -> { if (!helper.getLevel().getServer().isSameThread()) throw new IllegalStateException("Fixture requires server thread"); });
-            blueprint = ContentLoader.load(helper.getLevel().getServer().getResourceManager()).blueprints().get("colonyloom:test_four_stairs");
+            blueprint = ContentLoader.load(helper.getLevel().getServer().getResourceManager(),helper.getLevel().registryAccess()).blueprints().get("colonyloom:test_four_stairs");
             if (blueprint == null || blueprint.blocks().size() != 4) throw new IllegalStateException("Four-stair pinned test resource missing");
             origin = helper.absolutePos(new BlockPos(1, 1, 1));
             for (int x = -1; x <= 5; x++) for (int z = -1; z <= 4; z++) {

@@ -25,6 +25,8 @@ public final class MinecraftServerRuntime {
     private io.github.kpuctajluk.colonyloom.gameplay.construction.ConstructionController construction;
     private io.github.kpuctajluk.colonyloom.minecraft.construction.MinecraftConstructionService constructionService;
     private io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService storage;
+    private io.github.kpuctajluk.colonyloom.core.supply.SupplyPlanner supplyPlanner;
+    private java.util.Map<String,io.github.kpuctajluk.colonyloom.gameplay.production.ProcessDefinition> processes=java.util.Map.of();
     private long metricsTickStart;
     public void metricsTickStarted() { runtime.requireOwnerThread(); metricsTickStart=System.nanoTime(); }
     public void metricsTickFinished() { runtime.requireOwnerThread(); if(metricsTickStart!=0) { metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.MSPT,System.nanoTime()-metricsTickStart); metricsTickStart=0; } }
@@ -75,14 +77,22 @@ public final class MinecraftServerRuntime {
         runtime.configureCommands(persistence::ensureSessionDirty, content.professions().values());
         construction.definitions(content.blueprints());
         runtime.commands().construction(construction);
+        processes=content.processes();configureSupply();
         runtime.setSimulationEnabled(persistence.isAvailable());
     }
     public void configureStorage(io.github.kpuctajluk.colonyloom.minecraft.storage.StorageIdentity identity) {
         runtime.requireOwnerThread();
         if (storage != null) throw new IllegalStateException("Storage service already configured");
         storage = new io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService(server, runtime.registry(), runtime.budgets(), identity);
+        configureSupply();
     }
     public io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService storage() { runtime.requireOwnerThread(); return storage; }
+    private void configureSupply() {
+        if(storage==null)return;
+        if(supplyPlanner==null)supplyPlanner=new io.github.kpuctajluk.colonyloom.core.supply.SupplyPlanner(runtime.registry(),runtime.registry().supply(),runtime.budgets());
+        supplyPlanner.configure(new io.github.kpuctajluk.colonyloom.gameplay.production.ProductionCatalog(runtime.registry(),processes),new io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftSupplyAccess(runtime.registry(),storage));
+        runtime.registry().setAfterRestore(() -> {runtime.scheduler().rebuild();supplyPlanner.rebuild();});
+    }
     public void configurePhysical(io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager.ChunkAccess access,
             io.github.kpuctajluk.colonyloom.minecraft.construction.BlockPlacementExecutor.ItemInteraction interaction,
             io.github.kpuctajluk.colonyloom.minecraft.construction.BlockPlacementExecutor.FaultObserver observer) {
@@ -105,6 +115,8 @@ public final class MinecraftServerRuntime {
                 default -> { if (storage != null) storage.tick(tick); chunks.tick(tick); citizens.tick(); navigation.tick(tick); }
             }
             runtime.registry().targetClaims().tick();
+            runtime.registry().supply().reconcile(tick,runtime.budgets());
+            if(supplyPlanner!=null)supplyPlanner.tick(tick);
         });
         runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.MOVE, new io.github.kpuctajluk.colonyloom.core.scheduler.SimulationScheduler.PhysicalExecutor() {
             public void step(io.github.kpuctajluk.colonyloom.core.work.WorkOrder work, long tick) {
@@ -161,6 +173,7 @@ public final class MinecraftServerRuntime {
     public void beginStopping(MinecraftServer eventServer) {
         requireBoundServer(eventServer);
         runtime.beginStopping();
+        if (supplyPlanner != null) supplyPlanner.close();
         if (navigation != null) navigation.close();
         if (constructionService != null) constructionService.close();
         if (citizens != null) citizens.close();

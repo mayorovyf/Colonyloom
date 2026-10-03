@@ -175,6 +175,9 @@ final class IdentityPlatform {
     String assign(CommandSourceStack source,UUID citizen,String profession) throws CommandSyntaxException {
         bridge.core().commands().assignProfession(context(source),citizen,profession); bridge.persistence().capture(); return "citizen="+citizen+" profession="+profession;
     }
+    String workplace(CommandSourceStack source,UUID citizen,UUID building) throws CommandSyntaxException {
+        bridge.core().commands().assignWorkplace(context(source),citizen,building);bridge.persistence().capture();return "citizen="+citizen+" workplace="+building;
+    }
     String createTimer(CommandSourceStack source,UUID colony,long ticks) throws CommandSyntaxException {
         var work=bridge.core().commands().createTimerWork(context(source),UUID.randomUUID(),colony,
                 position(source.getLevel(),BlockPos.containing(source.getPosition())),null,0,ticks);

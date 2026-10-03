@@ -43,7 +43,7 @@ public final class MinecraftMetrics {
             if(runtime.navigation()!=null) result.put("navigation",runtime.navigation().diagnostics());
             result.put("navigationBackend",runtime.navigationBackendMetrics());
             result.put("timingScopes",timingScopes());
-            result.put("futureMetrics","graph/storage/views/critical food chains/migration not implemented at stage06; counts remain experimental. No JVM allocation profiler attached. No separable broad vanilla world block-change timer.");
+            result.put("futureMetrics","graph/native storage timings implemented; counts remain experimental pending full profile calibration. Views/critical food chains/migration not implemented. No JVM allocation profiler attached. No separable broad vanilla world block-change timer.");
         }
         Map<String,Long> citizens=new LinkedHashMap<>();
         for(var citizen:core.registry().citizensView()) {
@@ -66,6 +66,8 @@ public final class MinecraftMetrics {
         scopes.put("PHYSICAL_UNIT","one placement executor call, inclusive validation, item interaction, block aftermath and verification");
         scopes.put("CHUNK_UNIT","one ticket acquire call; same scope as CHUNK_EXTERNAL because ticket API exposes no separable internal portion");
         scopes.put("DIRTY_RESCAN_UNIT","one scheduler dirty root rescan or one citizen-admission cursor portion");
+        scopes.put("GRAPH_UNIT","one admitted lazy DFS expansion including at most16 indexed candidate checks; not entire root planning or kit admission");
+        scopes.put("STORAGE_EXTERNAL","one real StorageService.read including authority, native topology and exact item component checks; not candidate search or whole reconciliation sweep");
         scopes.put("ENTITY_TICK","CitizenEntity.tick including vanilla AI, movement, collision and managed movement guard; nested timers are not additive");
         scopes.put("MOVEMENT","CitizenEntity.move entire vanilla displacement/collision-resolution call; inclusive physical movement, not pure controller CPU");
         scopes.put("NAVIGATION_POLL","one backend.poll safety/progress check and controller tick; inclusive native COLLISION checks");

@@ -33,7 +33,7 @@ public final class StorageService {
     private final Map<WorldPosition, Physical> tickPhysical = new HashMap<>();
     private final Map<UUID, StorageRegistry.Registration> remembered = new HashMap<>();
     private final Map<StorageId, Map<UUID, StorageRegistry.Registration>> memberships = new HashMap<>();
-    private record Sample(ItemStack stack, StockIndex.Observation observation) {}
+    private record Sample(ItemStack stack, StockIndex.Observation observation,long revision) {}
     private final Map<StockRegion, Sample> samples = new HashMap<>();
     private final Map<StorageId, List<StorageRegistry.Registration>> sourceRegistrations = new HashMap<>();
     private final Set<StorageId> blockedIdentities = new HashSet<>();
@@ -121,6 +121,11 @@ public final class StorageService {
     }
 
     public StockIndex.Observation read(StockRegion slot) {
+        long start=System.nanoTime();
+        try {return readNative(slot);}
+        finally {registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.STORAGE_EXTERNAL,System.nanoTime()-start);}
+    }
+    private StockIndex.Observation readNative(StockRegion slot) {
         owner();
         StorageId id = slot.storage();
         if (storage.isRetired(id) || !currentAuthority(slot)) return unknown();
@@ -153,12 +158,14 @@ public final class StorageService {
         if (previous != null && ItemStack.matches(stack, previous.stack())) return previous.observation();
         try {
             var observation = new StockIndex.Observation(NativeItemDescriptor.describe(stack, server.registryAccess()), stack.isEmpty() ? 0 : stack.getCount(), true);
-            if (memberships.containsKey(id)) samples.put(slot, new Sample(stack.copy(), observation));
+            if (memberships.containsKey(id)) samples.put(slot, new Sample(stack.copy(), observation,previous==null?1:Math.incrementExact(previous.revision())));
             return observation;
         } catch (IllegalArgumentException | IllegalStateException failure) {
             return unknown();
         }
     }
+    public long observationRevision(StockRegion slot) {owner();Sample sample=samples.get(slot);return sample==null?0:sample.revision();}
+    public StockIndex.Observation readFresh(StockRegion slot) {owner();tickPhysical.clear();return read(slot);}
 
     /** Public future-executor guard, including native exact components and current scope. */
     public boolean matches(UUID colony, StockRegion slot, ItemDescriptor item, long count) {

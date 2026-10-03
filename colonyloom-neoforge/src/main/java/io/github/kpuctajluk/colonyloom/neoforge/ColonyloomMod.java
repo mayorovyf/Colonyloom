@@ -64,7 +64,7 @@ public final class ColonyloomMod {
         }
         MinecraftServerRuntime runtime = MinecraftServerRuntime.start(server,net.neoforged.neoforge.common.IOUtilities::waitUntilIOWorkerComplete);
         runtimes.put(server, runtime);
-        runtime.configureContent(ContentLoader.load(server.getResourceManager()));
+        runtime.configureContent(ContentLoader.load(server.getResourceManager(),server.registryAccess()));
         var limits = simulationConfig.snapshot();
         runtime.core().updateLimits(limits);
         configuredLimits.put(server, limits);
@@ -98,7 +98,7 @@ public final class ColonyloomMod {
         }
         var manager=event.getServer().getResourceManager();
         if (contentManagers.get(event.getServer())!=manager) {
-            runtime.configureContent(ContentLoader.load(manager));
+            runtime.configureContent(ContentLoader.load(manager,event.getServer().registryAccess()));
             contentManagers.put(event.getServer(),manager);
         }
         runtime.postTick(event.getServer());
@@ -137,7 +137,7 @@ public final class ColonyloomMod {
     }
 
     private void onReload(AddReloadListenerEvent event) {
-        event.addListener(new ContentLoader());
+        event.addListener(new ContentLoader(event.getRegistryAccess()));
     }
     private synchronized void onBlockChange(net.neoforged.neoforge.event.level.BlockEvent.NeighborNotifyEvent event) {
         if (event.getLevel() instanceof net.minecraft.server.level.ServerLevel level) {

@@ -83,19 +83,22 @@ final class StorageScenario {
             command(server,run,"colonyloom storage register-citizen "+run.colony+" "+citizen+" construction");
             var npcSlot=new StockRegion(new StorageId("minecraft:overworld",citizen,npc.bindingEpoch()),0);
             require(server,service.read(npcSlot).ready()&&service.read(npcSlot).count()==7,"authoritative_citizen_stock","citizen+epoch canonical inventory7");
+            command(server,run,"colonyloom citizen workplace "+citizen+" "+stocks.workshops().getFirst().id());
+            require(server,run.runtime.core().registry().citizen(citizen).workplaceId().equals(stocks.workshops().getFirst().id()),"citizen_workplace_assigned","registered actual workshop");
+            command(server,run,"colonyloom citizen assign "+citizen+" colonyloom:carpenter");
             run.step=1;run.changedAt=run.ticks;return;
         }
         if(run.step==1) {
             if(stocks.index().free(run.chestSlot,tick)!=64)return;
-            stocks.reservations().reserve(id(1),run.colony,id(101),run.chestSlot,run.item,32,tick);stocks.allocations().allocate(id(2),run.colony,id(102),run.chestSlot,run.item,32,tick);
-            boolean rejected=false;try{stocks.reservations().reserve(id(3),run.colony,id(103),run.chestSlot,run.item,1,tick);}catch(IllegalArgumentException|IllegalStateException expected){rejected=true;}
+            stocks.reservations().reserve(id(1),run.colony,id(101),run.chestSlot,run.item,32,tick,io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);stocks.allocations().allocate(id(2),run.colony,id(102),run.chestSlot,run.item,32,tick,io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);
+            boolean rejected=false;try{stocks.reservations().reserve(id(3),run.colony,id(103),run.chestSlot,run.item,1,tick,io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);}catch(IllegalArgumentException|IllegalStateException expected){rejected=true;}
             require(server,rejected&&stocks.index().free(run.chestSlot,tick)==0,"shared64_never_overpromised","reserved32 allocated32 physical64");
             level.setBlock(BARREL,Blocks.BARREL.defaultBlockState(),3);((Container)level.getBlockEntity(BARREL)).setItem(0,new ItemStack(Items.OAK_PLANKS,64));
             command(server,run,"colonyloom storage register "+run.colony+" 12 64 8 return");var reg=stocks.registrations(run.colony).stream().filter(r->r.address().equals(position(BARREL))).findFirst().orElseThrow();run.barrelSlot=reg.slots().get(0);run.step=2;return;
         }
         if(run.step==2) {
             if(stocks.index().free(run.barrelSlot,tick)!=64)return;
-            stocks.allocations().allocate(id(4),run.colony,id(104),run.barrelSlot,run.item,64,tick);
+            stocks.allocations().allocate(id(4),run.colony,id(104),run.barrelSlot,run.item,64,tick,io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);
             level.setBlock(BARREL.below(),Blocks.HOPPER.defaultBlockState().setValue(HopperBlock.FACING,Direction.DOWN),3);
             run.changedAt=run.ticks;run.step=3;return;
         }
@@ -122,6 +125,22 @@ final class StorageScenario {
             require(server,!service.read(run.chestSlot).ready()&&stocks.index().free(run.chestSlot,tick)==0,"copied_uuid_blocks_original","old="+run.chestSlot.storage());
             command(server,run,"colonyloom storage reidentify "+run.colony+" 8 64 12");
             require(server,stocks.isRetired(run.chestSlot.storage())&&!service.read(run.chestSlot).ready(),"explicit_repair_keeps_old_unknown","reserved32 allocated32 remain old identity");
+            run.changedAt=run.ticks;run.step=6;return;
+        }
+        if(run.step==6) {
+            var source=stocks.registrations(run.colony).stream().filter(value -> value.role().equals("workshop")).findFirst().orElseThrow();
+            ((Container)level.getBlockEntity(BARREL)).clearContent();
+            for(var citizen:run.runtime.core().registry().citizens(run.colony)) if(level.getEntity(citizen.entityId()) instanceof io.github.kpuctajluk.colonyloom.minecraft.entity.CitizenEntity npc)npc.inventory().clearContent();
+            ((Container)level.getBlockEntity(new BlockPos(source.address().x(),source.address().y(),source.address().z()))).setItem(0,new ItemStack(Items.OAK_LOG,6));
+            run.runtime.core().registry().supply().request(id(201),run.colony,id(202),new io.github.kpuctajluk.colonyloom.core.supply.ItemMatcher("minecraft:oak_stairs",null),16,io.github.kpuctajluk.colonyloom.core.supply.Demand.GoalKind.CONSUMPTION,position(new BlockPos(10,64,14)),io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL,10,tick);
+            run.changedAt=run.ticks;run.step=7;return;
+        }
+        if(run.step==7) {
+            var supply=run.runtime.core().registry().supply();
+            if(supply.productionOrders().size()!=2 || supply.demands().stream().noneMatch(value -> value.snapshot().matcher().itemId().equals("minecraft:oak_log")&&value.snapshot().covered()==6))return;
+            if(run.ticks-run.changedAt<160)return;
+            require(server,supply.demand(id(201)).snapshot().covered()==16&&supply.demand(id(201)).snapshot().fulfilled()==0&&supply.productionOrders().stream().allMatch(value -> value.state()==io.github.kpuctajluk.colonyloom.core.production.ProductionOrder.State.PLANNED||value.state()==io.github.kpuctajluk.colonyloom.core.production.ProductionOrder.State.WAITING),"supply_repeated_real_chest_plan","stairs16 covered once; planks/stairs pending; actual logs6 reserved");
+            require(server,supply.productionOrders().size()==2&&supply.shares().stream().filter(value -> value.demandId().equals(id(201))).mapToLong(io.github.kpuctajluk.colonyloom.core.supply.CoverageShare::quantity).sum()==16,"supply_no_duplicate_coverage","160ticks repeated production planner");
             run.manifest=new CompoundTag();run.manifest.putUUID("colony",run.colony);run.manifest.putUUID("oldChest",run.chestSlot.storage().identity());run.manifest.putUUID("oldBarrel",run.barrelSlot.storage().identity());
             NbtIo.writeCompressed(run.manifest,world(server).resolve(MANIFEST));
             command(server,run,"colonyloom storage stock "+run.colony);finish(server,run,"exercise_complete");
@@ -133,6 +152,9 @@ final class StorageScenario {
         require(server,stocks.isRetired(old),"retirement_survives_restart",old.toString());
         require(server,stocks.reservations().entries().stream().anyMatch(e->e.id().equals(id(1))&&e.count()==32)&&stocks.allocations().entries().stream().anyMatch(e->e.id().equals(id(2))&&e.count()==32)&&stocks.allocations().entries().stream().anyMatch(e->e.id().equals(id(4))&&e.count()==48),"obligations_survive_restart","reservation32 allocation32 replaced-barrel48");
         require(server,!run.runtime.storage().read(new StockRegion(old,0)).ready(),"old_copy_never_revived",old.toString());
+        require(server,run.runtime.core().registry().citizens(run.colony).getFirst().workplaceId().equals(stocks.workshops().getFirst().id()),"workplace_survives_restart","citizen references persisted workshop");
+        var supply=run.runtime.core().registry().supply();
+        require(server,supply.demand(id(201)).snapshot().covered()==16&&supply.demand(id(201)).snapshot().fulfilled()==0&&supply.productionOrders().size()==2,"supply_pins_and_coverage_survive_restart","pending shared recipe snapshots preserve one coverage");
         command(server,run,"colonyloom storage stock "+run.colony);finish(server,run,"verify_complete");
     }
     private void stopped(ServerStoppedEvent event) {
@@ -143,7 +165,14 @@ final class StorageScenario {
     private static UUID id(long value){return new UUID(0x570c,value);}
     private static WorldPosition position(BlockPos pos){return new WorldPosition("minecraft:overworld",pos.getX(),pos.getY(),pos.getZ());}
     private static CompoundTag read(Path path)throws Exception{return NbtIo.readCompressed(path,NbtAccounter.create(64L*1024*1024));}
-    private static void finish(MinecraftServer server,Run run,String check)throws Exception{fact(server,check,true,"production live path");run.done=true;server.halt(false);}
+    private static void finish(MinecraftServer server,Run run,String check)throws Exception {
+        var timers=run.runtime.metrics().snapshot();var graph=timers.get("GRAPH_UNIT");var storage=timers.get("STORAGE_EXTERNAL");
+        var metrics=new JsonObject();metrics.addProperty("acceptanceDuration",false);metrics.addProperty("profileCalibrated",false);
+        metrics.addProperty("graphCalls",graph.count());metrics.addProperty("graphP99Nanos",graph.p99Nanos());metrics.addProperty("graphMaxNanos",graph.maxNanos());
+        metrics.addProperty("nativeStorageCalls",storage.count());metrics.addProperty("nativeStorageP99Nanos",storage.p99Nanos());metrics.addProperty("nativeStorageMaxNanos",storage.maxNanos());
+        Files.writeString(world(server).resolve("colonyloom-supply-metrics-"+phase()+".json"),metrics.toString());
+        fact(server,check,true,"production live path");run.done=true;server.halt(false);
+    }
     private static void require(MinecraftServer server,boolean passed,String check,String detail)throws Exception{fact(server,check,passed,detail);if(!passed)throw new IllegalStateException(check+": "+detail);}
     private static void fact(MinecraftServer server,String check,boolean passed,String detail)throws Exception{var json=new JsonObject();json.addProperty("phase",phase());json.addProperty("check",check);json.addProperty("passed",passed);json.addProperty("detail",detail);Files.writeString(world(server).resolve("colonyloom-storage-observations.jsonl"),json+"\n",StandardOpenOption.CREATE,StandardOpenOption.APPEND);}
     private static UUID uuid(String output,String key){var match=Pattern.compile("(?:^|[\\s\\[,])"+Pattern.quote(key)+"=([0-9a-fA-F-]{36})(?=[\\s\\],]|$)").matcher(output);if(!match.find())throw new IllegalStateException("Missing "+key+" in "+output);return UUID.fromString(match.group(1));}

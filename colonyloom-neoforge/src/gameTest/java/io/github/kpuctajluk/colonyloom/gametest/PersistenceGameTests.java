@@ -41,7 +41,7 @@ public final class PersistenceGameTests {
             CitizenRecord resident=citizen(1000+i,1,2000+i,1,4);residents.add(resident);
             observations.add(new BindingRegistry.Observation(resident.citizenId(),resident.entityId(),1,false,false,false));
         }
-        source.registry().restore(new RegistrySnapshot(List.of(colony), residents, List.of(), List.of(), observations, List.of(), List.of(), List.of(), List.of(), List.of(), io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty()));
+        source.registry().restore(new RegistrySnapshot(List.of(colony),residents,List.of(),List.of(),observations,List.of(),List.of(),List.of(),List.of(),List.of(),io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty(),io.github.kpuctajluk.colonyloom.core.supply.SupplySnapshot.empty()));
         ColonySavedData data=ColonySavedData.empty(source.registry().snapshot());
         try(CompressedState file=new CompressedState(data.save(new CompoundTag(),helper.getLevel().registryAccess()))) {
             ColonySavedData loaded=ColonySavedData.preflight(file.path,helper.getLevel().registryAccess());
@@ -105,7 +105,7 @@ public final class PersistenceGameTests {
             helper.assertTrue(!restored.registry().targetClaims().owns(id(150),2) && !restored.registry().targetClaims().owns(id(151),3),"Conflicted persisted target has a grant");
             helper.assertTrue(restored.workBoard().work(move.id()).typeId().equals(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.MOVE),"Move executor type became unknown");
             var before = restored.registry().snapshot();
-            var invalid = new RegistrySnapshot(before.colonies(), before.citizens(), before.buildings(), before.tombstones(), before.observations(), before.works(), List.of(before.targetClaims().get(0),before.targetClaims().get(0)), java.util.List.of(), java.util.List.of(), java.util.List.of(), io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty());
+            var invalid = new RegistrySnapshot(before.colonies(),before.citizens(),before.buildings(),before.tombstones(),before.observations(),before.works(),List.of(before.targetClaims().get(0),before.targetClaims().get(0)),java.util.List.of(),java.util.List.of(),java.util.List.of(),io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty(),io.github.kpuctajluk.colonyloom.core.supply.SupplySnapshot.empty());
             try { restored.registry().restore(invalid); helper.fail("Duplicate target restore accepted"); } catch (IllegalArgumentException expected) { }
             helper.assertTrue(restored.registry().snapshot().equals(before),"Rejected target restore damaged authoritative state");
         }
@@ -121,7 +121,7 @@ public final class PersistenceGameTests {
             try { ColonySavedData.preflight(corrupt,helper.getLevel().registryAccess()); helper.fail("Corrupt file accepted"); }
             catch(java.io.IOException expected) { }
             helper.assertTrue(Arrays.equals(damaged,Files.readAllBytes(corrupt)),"Corrupt file overwritten");
-            CompoundTag root=ColonySavedData.empty(new RegistrySnapshot(List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), java.util.List.of(), java.util.List.of(), java.util.List.of(), io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty()))
+            CompoundTag root=ColonySavedData.empty(new RegistrySnapshot(List.of(),List.of(),List.of(),List.of(),List.of(),List.of(),List.of(),java.util.List.of(),java.util.List.of(),java.util.List.of(),io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty(),io.github.kpuctajluk.colonyloom.core.supply.SupplySnapshot.empty()))
                     .save(new CompoundTag(),helper.getLevel().registryAccess());
             root.putInt("schemaVersion",2);
             CompoundTag envelope=new CompoundTag(); envelope.put("data",root);
@@ -298,7 +298,7 @@ public final class PersistenceGameTests {
         ColonyRuntime second = new ColonyRuntime(id(2), "Second", new Territory("minecraft:overworld", 64, 0, 95, 31),
                 id(11), Map.of(id(13), MemberRank.VIEWER), 5, 2, false, null, false);
         List<CitizenRecord> citizens = List.of(citizen(20, 1, 30, 1, 4), citizen(21, 1, 31, 7, 8), citizen(22, 2, 32, 3, 68));
-        runtime.registry().restore(new RegistrySnapshot(List.of(first, second), citizens, List.of(), List.of(), List.of(), List.of(), List.of(), java.util.List.of(), java.util.List.of(), java.util.List.of(), io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty()));
+        runtime.registry().restore(new RegistrySnapshot(List.of(first, second),citizens,List.of(),List.of(),List.of(),List.of(),List.of(),java.util.List.of(),java.util.List.of(),java.util.List.of(),io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty(),io.github.kpuctajluk.colonyloom.core.supply.SupplySnapshot.empty()));
         for (CitizenRecord citizen : citizens) runtime.bindings().observe(citizen.citizenId(), citizen.entityId(), citizen.bindingEpoch());
         runtime.bindings().unload(id(31));
         runtime.bindings().observe(id(22), id(33), 2);

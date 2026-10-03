@@ -36,7 +36,11 @@ public final class ConstructionRegistry {
         registry.requireOwner();
         if(sites.size()>=MAX_SITES || sites.containsKey(site.workId()) || !site.blueprintDigest().equals(definition.digest())
                 || site.cursor()>definition.blocks().size() || !definition.markers().containsKey("work_origin")) throw new IllegalArgumentException("Construction envelope or identity unavailable");
-        try { validatePin(definition,pins,pinnedBytes); }
+        try {
+            validatePin(definition,pins,pinnedBytes);
+            var definitions=new java.util.ArrayList<>(pins.values());if(!pins.containsKey(definition.digest()))definitions.add(definition);
+            io.github.kpuctajluk.colonyloom.core.supply.SupplyRegistry.validatePins(definitions,registry.supply().productionOrders().stream().map(io.github.kpuctajluk.colonyloom.core.production.ProductionOrder::recipe).toList(),null);
+        }
         catch(IllegalArgumentException failure) { rejectedPins++; throw failure; }
     }
     public PreparedNew prepareNew(ConstructionSnapshot site,BlueprintDefinition definition) {

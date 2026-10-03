@@ -118,6 +118,17 @@ public final class ColonyCommands {
         registry.beforeMutation(); registry.updateCitizen(changed); registry.updateColony(changedColony);
         return changed;
     }
+    public CitizenRecord assignWorkplace(CommandContext context, UUID citizenId, UUID workshopId) {
+        CitizenRecord citizen=registry.citizen(citizenId);
+        ColonyRuntime colony=requireRank(context,citizen.colonyId(),MemberRank.MANAGER);requireAvailable(colony);
+        if(citizen.lifecycle()!=CitizenRecord.Lifecycle.ALIVE) throw new IllegalStateException("Citizen is not alive");
+        var workshop=registry.storage().workshops().stream().filter(value -> value.id().equals(workshopId)).findFirst().orElseThrow(() -> new IllegalArgumentException("Unknown registered workshop"));
+        if(!workshop.colonyId().equals(citizen.colonyId())) throw new SecurityException("Foreign workshop");
+        if(workshopId.equals(citizen.workplaceId())) return citizen;
+        CitizenRecord changed=new CitizenRecord(citizen.citizenId(),citizen.colonyId(),citizen.entityId(),citizen.bindingEpoch(),citizen.homeId(),workshopId,citizen.assignedWorkId(),citizen.professionId(),citizen.skills(),citizen.needs(),citizen.lifecycle(),citizen.admission(),citizen.readiness(),citizen.activeTimeTicks(),citizen.remainingTimers(),citizen.lastKnownPosition(),Math.incrementExact(citizen.revision()));
+        ColonyRuntime changedColony=revised(colony,colony.ownerId(),colony.members(),false,false,null);
+        registry.beforeMutation();registry.updateCitizen(changed);registry.updateColony(changedColony);return changed;
+    }
     public ColonyRuntime status(CommandContext context, UUID colonyId) { return requireRank(context, colonyId, MemberRank.VIEWER); }
 
     public io.github.kpuctajluk.colonyloom.core.work.WorkOrder createTimerWork(CommandContext context, UUID workId, UUID colonyId, WorldPosition target, String professionId, int priority, long activeTicks) {

@@ -70,9 +70,10 @@ final class RegistryNbt {
                 String type = string(entry, "typeId");
                 if (type.equals(KNOWN_TYPES.get(key)) || key.equals("works") && (type.equals(WorkOrder.MOVE) || type.equals(WorkOrder.CONSTRUCTION))
                         || key.equals("evidence") && (type.equals(ConstructionNbt.SITE) || type.equals(ConstructionNbt.EFFECT))
-                        || StorageNbt.known(key,type) || key.equals("pinnedDefinitions") && type.equals(ConstructionNbt.PIN)) {
+                        || StorageNbt.known(key,type) || SupplyNbt.known(key,type) || key.equals("pinnedDefinitions") && type.equals(ConstructionNbt.PIN)) {
                     if (key.equals("pinnedDefinitions") && type.equals(ConstructionNbt.PIN) && !ConstructionNbt.knownBlueprintSchema(entry)
-                            || key.equals("evidence") && type.equals(ConstructionNbt.EFFECT) && !ConstructionNbt.knownEffect(entry)) {
+                            || key.equals("evidence") && type.equals(ConstructionNbt.EFFECT) && !ConstructionNbt.knownEffect(entry)
+                            || SupplyNbt.known(key,type) && !SupplyNbt.supported(entry)) {
                         opaque.add(entry.copy());
                         if (entry.hasUUID("colonyId")) blocked.add(entry.getUUID("colonyId"));
                         continue;
@@ -121,7 +122,7 @@ final class RegistryNbt {
         for (var entry : retained.get("pinnedDefinitions")) if (entry.contains("digest", Tag.TAG_STRING)) {
             if (!opaquePins.add(string(entry,"digest"))) throw invalid("Duplicate opaque pinned digest");
         }
-        for (var entry : known.get("pinnedDefinitions")) {
+        for (var entry : known.get("pinnedDefinitions")) if(string(entry,"typeId").equals(ConstructionNbt.PIN)) {
             var pin = ConstructionNbt.blueprint(entry);
             if (opaquePins.contains(pin.digest()) || decodedPins.putIfAbsent(pin.digest(), pin) != null) throw invalid("Duplicate pinned blueprint");
             originalPins.put(pin.digest(), entry);
@@ -158,6 +159,14 @@ final class RegistryNbt {
                 unknownWorks.add(work.id()); blocked.add(work.colonyId());
             } else { works.add(work); workIds.add(work.id()); }
         }
+        Set<UUID> workshopIds=new HashSet<>(),unknownWorkshops=referencedIds(retained.get("evidence"),"buildingId");
+        Set<UUID> availableRegistrations=new HashSet<>();
+        for(var entry:known.get("evidence")) if(string(entry,"typeId").equals(StorageNbt.REGISTRATION) && colonyIds.contains(uuid(entry,"colonyId"))) availableRegistrations.add(uuid(entry,"registrationId"));
+        for(var entry:known.get("evidence")) if(string(entry,"typeId").equals(StorageNbt.WORKSHOP)) {
+            UUID id=uuid(entry,"buildingId");
+            if(colonyIds.contains(uuid(entry,"colonyId")) && availableRegistrations.contains(uuid(entry,"registrationId"))) workshopIds.add(id);
+            else unknownWorkshops.add(id);
+        }
         List<CitizenRecord> citizens = new ArrayList<>();
         Set<UUID> entityIds = new HashSet<>();
         for (CompoundTag entry : known.get("citizens")) {
@@ -165,11 +174,11 @@ final class RegistryNbt {
             if (!objectIds.add(citizen.citizenId()) || !entityIds.add(citizen.entityId())) throw invalid("Duplicate citizen/entity identity");
             if (!colonyIds.contains(citizen.colonyId()) ||
                     (citizen.homeId() != null && !buildingIds.contains(citizen.homeId())) ||
-                    (citizen.workplaceId() != null && !buildingIds.contains(citizen.workplaceId())) ||
+                    (citizen.workplaceId() != null && !buildingIds.contains(citizen.workplaceId()) && !workshopIds.contains(citizen.workplaceId())) ||
                     (citizen.assignedWorkId() != null && !workIds.contains(citizen.assignedWorkId()))) {
                 if (!colonyIds.contains(citizen.colonyId()) && !unknownColonies.contains(citizen.colonyId())) throw invalid("Citizen references missing colony");
                 if (citizen.homeId() != null && !buildingIds.contains(citizen.homeId()) && !unknownBuildings.contains(citizen.homeId())) throw invalid("Citizen references missing home");
-                if (citizen.workplaceId() != null && !buildingIds.contains(citizen.workplaceId()) && !unknownBuildings.contains(citizen.workplaceId())) throw invalid("Citizen references missing workplace");
+                if (citizen.workplaceId() != null && !buildingIds.contains(citizen.workplaceId()) && !workshopIds.contains(citizen.workplaceId()) && !unknownBuildings.contains(citizen.workplaceId()) && !unknownWorkshops.contains(citizen.workplaceId())) throw invalid("Citizen references missing workplace");
                 if (citizen.assignedWorkId() != null && !workIds.contains(citizen.assignedWorkId()) && !unknownWorks.contains(citizen.assignedWorkId())) throw invalid("Citizen references missing work");
                 retained.get("citizens").add(entry.copy());
                 blocked.add(citizen.colonyId());
@@ -339,8 +348,14 @@ final class RegistryNbt {
             }
         }
         var storage=new io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot(registrations,reservations,allocations,workshops,retired);
+        var supply=SupplyNbt.decode(known,retained,colonyIds,unknownColonies,workIds,unknownWorks,storage,blocked,objectIds);
+        Set<UUID> opaqueSupplyColonies=SupplyNbt.opaqueColonies(retained);
+        if(!opaqueSupplyColonies.isEmpty()) {
+            for(String key:List.of("reservations","allocations")) for(var entry:known.get(key)) if(opaqueSupplyColonies.contains(uuid(entry,"colonyId")) && !retained.get(key).contains(entry)) retained.get(key).add(entry.copy());
+            storage=new io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot(registrations,reservations.stream().filter(value -> !opaqueSupplyColonies.contains(value.colonyId())).toList(),allocations.stream().filter(value -> !opaqueSupplyColonies.contains(value.colonyId())).toList(),workshops,retired);
+        }
         blocked.retainAll(colonyIds);
-        return new Decoded(new RegistrySnapshot(colonies, citizens, buildings, tombstones, observations, works, claims, effects, sites, pins, storage), retained, blocked);
+        return new Decoded(new RegistrySnapshot(colonies, citizens, buildings, tombstones, observations, works, claims, effects, sites, pins, storage,supply), retained, blocked);
     }
 
     static CompoundTag encode(RegistrySnapshot snapshot, UUID checkpoint, Map<String, List<CompoundTag>> retained) {
@@ -361,6 +376,12 @@ final class RegistryNbt {
         for(var value:snapshot.storage().reservations()) root.getList("reservations",Tag.TAG_COMPOUND).add(StorageNbt.reservation(value));
         for(var value:snapshot.storage().allocations()) root.getList("allocations",Tag.TAG_COMPOUND).add(StorageNbt.allocation(value));
         for(var value:snapshot.storage().retiredIdentities()) root.getList("evidence",Tag.TAG_COMPOUND).add(StorageNbt.retired(value));
+        for(var value:snapshot.supply().demands()) root.getList("demands",Tag.TAG_COMPOUND).add(SupplyNbt.demand(value));
+        for(var value:snapshot.supply().shares()) root.getList("evidence",Tag.TAG_COMPOUND).add(SupplyNbt.share(value));
+        Map<String,io.github.kpuctajluk.colonyloom.core.supply.RecipeDefinition> recipePins=new LinkedHashMap<>();
+        for(var value:snapshot.supply().productionOrders()) {root.getList("productionOrders",Tag.TAG_COMPOUND).add(SupplyNbt.production(value));recipePins.put(value.recipe().digest(),value.recipe());}
+        for(var value:recipePins.values()) root.getList("pinnedDefinitions",Tag.TAG_COMPOUND).add(SupplyNbt.recipe(value));
+        for(var value:snapshot.supply().deliveries()) root.getList("deliveries",Tag.TAG_COMPOUND).add(SupplyNbt.delivery(value));
         for (BuildingRecord value : snapshot.buildings()) {
             CompoundTag entry = typed("colonyloom:building");
             entry.putUUID("buildingId", value.buildingId());
@@ -564,19 +585,19 @@ final class RegistryNbt {
         if (value != null) tag.putUUID(key, value);
     }
 
-    private static String string(CompoundTag tag, String key) {
+    static String string(CompoundTag tag, String key) {
         require(tag, key, Tag.TAG_STRING);
         String value = tag.getString(key);
         if (value.isEmpty() || value.length() > 256) throw invalid("Invalid string: " + key);
         return value;
     }
 
-    private static int integer(CompoundTag tag, String key) {
+    static int integer(CompoundTag tag, String key) {
         require(tag, key, Tag.TAG_INT);
         return tag.getInt(key);
     }
 
-    private static long number(CompoundTag tag, String key) {
+    static long number(CompoundTag tag, String key) {
         require(tag, key, Tag.TAG_LONG);
         return tag.getLong(key);
     }

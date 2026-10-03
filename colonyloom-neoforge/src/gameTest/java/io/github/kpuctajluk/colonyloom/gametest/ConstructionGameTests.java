@@ -53,7 +53,7 @@ public final class ConstructionGameTests {
             var pos=origin.offset(x,0,z); level.setBlockAndUpdate(pos.below(),Blocks.STONE.defaultBlockState());
             for(int y=0;y<3;y++) level.setBlockAndUpdate(pos.above(y),Blocks.AIR.defaultBlockState());
         }
-        var core=ServerRuntime.start(Thread.currentThread()); var content=ContentLoader.load(level.getServer().getResourceManager());
+        var core=ServerRuntime.start(Thread.currentThread()); var content=ContentLoader.load(level.getServer().getResourceManager(),level.getServer().registryAccess());
         core.configureCommands(() -> {},content.professions().values());
         core.updateLimits(core.admission().limits().withMaxManagedNanos(100_000_000L));
         UUID colony=UUID.randomUUID(),citizen=UUID.randomUUID(),owner=UUID.randomUUID(); String dim=level.dimension().location().toString();

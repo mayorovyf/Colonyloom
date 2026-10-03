@@ -13,7 +13,8 @@ public record RegistrySnapshot(List<ColonyRuntime> colonies, List<CitizenRecord>
         List<io.github.kpuctajluk.colonyloom.core.action.EffectRecord> effects,
         List<io.github.kpuctajluk.colonyloom.core.construction.ConstructionSnapshot> constructionSites,
         List<io.github.kpuctajluk.colonyloom.core.content.BlueprintDefinition> pinnedBlueprints,
-        io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot storage) {
+        io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot storage,
+        io.github.kpuctajluk.colonyloom.core.supply.SupplySnapshot supply) {
     public RegistrySnapshot {
         colonies = List.copyOf(colonies);
         citizens = List.copyOf(citizens);
@@ -26,5 +27,6 @@ public record RegistrySnapshot(List<ColonyRuntime> colonies, List<CitizenRecord>
         constructionSites = List.copyOf(constructionSites);
         pinnedBlueprints = List.copyOf(pinnedBlueprints);
         storage = java.util.Objects.requireNonNull(storage);
+        supply = java.util.Objects.requireNonNull(supply);
     }
 }
