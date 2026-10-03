@@ -38,7 +38,8 @@ public final class MinecraftConstructionGeometry implements ConstructionControll
             maxX=Math.max(maxX,position.x()); maxY=Math.max(maxY,position.y()); maxZ=Math.max(maxZ,position.z());
         }
         var marker=definition.markers().get("work_origin"); if(marker==null) throw new IllegalArgumentException("Blueprint lacks work_origin");
-        return new ConstructionController.Layout(targets,position(origin,marker,rotation),new TargetClaimRegistry.Snapshot(workId,colonyId,null,origin.dimension(),minX,minY,minZ,maxX,maxY,maxZ,0));
+        var buffer=definition.markers().get("delivery_buffer"); if(buffer==null) throw new IllegalArgumentException("Blueprint lacks delivery_buffer");
+        return new ConstructionController.Layout(targets,position(origin,marker,rotation),position(origin,buffer,rotation),new TargetClaimRegistry.Snapshot(workId,colonyId,null,origin.dimension(),minX,minY,minZ,maxX,maxY,maxZ,0));
     }
     private static WorldPosition position(WorldPosition origin,BlockOffset offset,Rotation rotation) {
         BlockPos transformed=StructureTemplate.transform(new BlockPos(offset.x(),offset.y(),offset.z()),Mirror.NONE,rotation,BlockPos.ZERO);

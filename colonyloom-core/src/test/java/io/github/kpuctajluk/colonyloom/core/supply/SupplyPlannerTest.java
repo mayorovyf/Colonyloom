@@ -45,6 +45,10 @@ final class SupplyPlannerTest {
                     .withBudget(Budget.GRAPH_EXPANSIONS, graphBudget);
             registry.admission().updateLimits(limits);
             registry.addColony(new ColonyRuntime(COLONY, "A", new Territory("minecraft:overworld", 0, 0, 31, 31), OWNER, Map.of(), 0, 0, false, null, false));
+            var workshopStorage = new StorageId("minecraft:overworld", id(400), 0);
+            var registration = registry.storage().register(COLONY,new WorldPosition("minecraft:overworld",4,64,0),"workshop",List.of(workshopStorage),List.of(new StockRegion(workshopStorage,0)),List.of(new WorldPosition("minecraft:overworld",4,64,0)));
+            var workshop = registry.storage().registerWorkshop(COLONY,new WorldPosition("minecraft:overworld",5,64,0),registration.id());
+            registry.addCitizen(new io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord(id(401),COLONY,id(402),1,null,workshop.id(),null,"colonyloom:carpenter",Map.of(),Map.of("food",20),io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Lifecycle.ALIVE,io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Admission.ACTIVE,io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Readiness.READY,0,Map.of("food",1200L),DESTINATION,0),proposed->{});
             budgets = new GlobalWorkBudgets(limits, () -> 0);
             planner = new SupplyPlanner(registry, supply, budgets); planner.configure(this, this);
         }

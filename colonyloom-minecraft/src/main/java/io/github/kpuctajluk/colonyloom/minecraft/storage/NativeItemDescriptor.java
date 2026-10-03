@@ -42,7 +42,7 @@ public final class NativeItemDescriptor {
         }
     }
     /** A one-item validation probe only; never published into a physical inventory. */
-    static ItemStack capacityProbe(ItemDescriptor descriptor, HolderLookup.Provider registries) {
+    public static ItemStack capacityProbe(ItemDescriptor descriptor, HolderLookup.Provider registries) {
         try {
             ByteArrayInputStream input = new ByteArrayInputStream(descriptor.canonicalComponents());
             Tag tag = NbtIo.readAnyTag(new DataInputStream(input), new NbtAccounter(65536, 32));
@@ -58,6 +58,12 @@ public final class NativeItemDescriptor {
         } catch (IOException failure) {
             throw new IllegalArgumentException("Invalid native item components", failure);
         }
+    }
+    /** Real recipe output; caller must admit and expend the complete physical ingredient batch first. */
+    public static ItemStack recipeOutput(ItemDescriptor descriptor,int count,HolderLookup.Provider registries) {
+        ItemStack result=capacityProbe(descriptor,registries);
+        if(count<1 || count>result.getMaxStackSize()) throw new IllegalArgumentException("Recipe output exceeds native stack capacity");
+        result.setCount(count); return result;
     }
 
     private static void writePayload(Tag tag, DataOutput out, int depth) throws IOException {

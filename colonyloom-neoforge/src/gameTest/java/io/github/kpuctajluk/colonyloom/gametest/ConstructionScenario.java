@@ -274,6 +274,8 @@ final class ConstructionScenario {
         command(server, run, "colonyloom citizen assign " + npc.citizenId() + " colonyloom:builder");
         int materials = scenario().equals("clean") ? 2 : 4;
         npc.inventory().setItem(0, new ItemStack(Items.OAK_STAIRS, materials));
+        server.overworld().setBlock(new BlockPos(7,64,8),Blocks.BARREL.defaultBlockState(),3);
+        command(server,run,"colonyloom storage register "+colony+" 7 64 8 construction");
         UUID work = uuid(command(server, run, "colonyloom build " + colony + " colonyloom:test_four_stairs 8 64 8 0"), "work");
         manifest.putUUID("work", work); manifest.putInt("initialItems", materials);
         write(world(server).resolve(MANIFEST), manifest);

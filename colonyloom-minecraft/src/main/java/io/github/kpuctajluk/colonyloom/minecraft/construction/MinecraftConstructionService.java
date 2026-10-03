@@ -32,6 +32,8 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         boolean arrived;
         long retryAt;
         WorkOrder.Reason retryReason=WorkOrder.Reason.NONE;
+        int reconcileCursor;
+        final MinecraftConstructionSupply.Portion materials=new MinecraftConstructionSupply.Portion();
         Active(ConstructionController.Layout layout) {
             this.layout=layout; var claim=layout.claim(); var keys=new ArrayList<ChunkKey>();
             for(int x=(claim.minX()-2)>>4;x<=(claim.maxX()+2)>>4;x++) for(int z=(claim.minZ()-2)>>4;z<=(claim.maxZ()+2)>>4;z++) keys.add(new ChunkKey(claim.dimension(),x,z));
@@ -44,9 +46,11 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
     private final BlockPlacementExecutor placement;
     private final java.util.function.Supplier<UUID> checkpoint;
     private final Map<UUID,Active> active=new HashMap<>();
+    private final MinecraftConstructionSupply supply;
     private NavigationService navigation;
-    public MinecraftConstructionService(ColonyRegistry registry,ConstructionController controller,ChunkDemandManager chunks,BlockPlacementExecutor placement,java.util.function.Supplier<UUID> checkpoint) {
+    public MinecraftConstructionService(net.minecraft.server.MinecraftServer server,ColonyRegistry registry,ConstructionController controller,ChunkDemandManager chunks,BlockPlacementExecutor placement,java.util.function.Supplier<UUID> checkpoint,io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService storage,io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor transfer) {
         this.registry=registry; this.controller=controller; this.chunks=chunks; this.placement=placement; this.checkpoint=java.util.Objects.requireNonNull(checkpoint);
+        this.supply=new MinecraftConstructionSupply(server,registry,storage,transfer,placement);
     }
     public void navigation(NavigationService navigation) { registry.requireOwner(); if(this.navigation!=null) throw new IllegalStateException("Navigation already attached"); this.navigation=navigation; }
     public boolean current(WorkOrder work,NavigationService.Request request) {
@@ -66,9 +70,18 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         catch(AdmissionLedger.AdmissionException denied) { waitFor(work,WorkOrder.Reason.STATE_LIMIT); return; }
         if(!chunks.ready(state.chunkOwner)) { var reason=chunks.reason(state.chunkOwner); waitFor(work,reason==WorkOrder.Reason.NONE?WorkOrder.Reason.CHUNK_NOT_READY:reason); return; }
         chunks.useful(state.chunkOwner);
+        // A saved cursor is only a hint: recheck already accepted targets in bounded portions.
+        while(state.reconcileCursor<site.cursor()) {
+            if(!registry.budgets().tryConsume(Budget.BLUEPRINT_COMPARISONS,work.lane())) {waitFor(work,WorkOrder.Reason.BUDGET);return;}
+            var oldTarget=state.layout.targets()[state.reconcileCursor];
+            if(!placement.matches(oldTarget.position(),oldTarget.expected())) {controller.revisit(work.id(),state.reconcileCursor);return;}
+            state.reconcileCursor++;
+        }
         if(site.cursor()>=state.layout.targets().length) {
             registry.workBoard().transition(work.id(),WorkOrder.State.COMPLETED,WorkOrder.Reason.NONE,"completed"); return;
         }
+        try {if(!supply.analyze(work,site,state.layout,state.materials)) {waitFor(work,WorkOrder.Reason.BUDGET);return;}}
+        catch(AdmissionLedger.AdmissionException full) {waitFor(work,WorkOrder.Reason.STATE_LIMIT);return;}
         var target=state.layout.targets()[site.cursor()];
         if(!registry.budgets().tryConsume(Budget.BLUEPRINT_COMPARISONS,work.lane())) { waitFor(work,WorkOrder.Reason.BUDGET); return; }
         long comparisonStart=System.nanoTime(); boolean matches;
@@ -76,6 +89,24 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         finally { registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.BLUEPRINT_UNIT,System.nanoTime()-comparisonStart); }
         if(matches) { controller.advance(work.id(),false); return; }
         var citizen=registry.citizen(work.assignee());
+        io.github.kpuctajluk.colonyloom.core.supply.CoverageShare allocation;
+        try {allocation=supply.carried(work,state.materials,target.expected().itemId());}
+        catch(AdmissionLedger.AdmissionException full) {waitFor(work,WorkOrder.Reason.STATE_LIMIT);return;}
+        if(allocation==null) {
+            var buffered=supply.buffered(work,state.materials,target.expected().itemId());
+            if(buffered==null) {waitFor(work,WorkOrder.Reason.MATERIALS);return;}
+            var buffer=supply.buffer(work,state.layout);
+            if(buffer==null) {waitFor(work,WorkOrder.Reason.RECONCILING);return;}
+            var pickup=new WorldPosition(buffer.dimension(),buffer.x(),buffer.y(),buffer.z()+1);
+            if(!pickup.equals(state.waypoint)) {navigation.cancel(work.id());state.waypoint=pickup;state.generation++;state.lastCursor=-1;state.arrived=false;}
+            try {if(navigation.request(work.id(),work.colonyId(),citizen.citizenId(),citizen.bindingEpoch(),state.generation,pickup,work.lane(),work.priority())==null) {waitFor(work,WorkOrder.Reason.RECONCILING);return;}}
+            catch(AdmissionLedger.AdmissionException full) {waitFor(work,WorkOrder.Reason.STATE_LIMIT);return;}
+            if(!navigation.atTarget(work.id())) {if(navigation.state(work.id())==NavigationService.State.WAITING)waitFor(work,navigation.reason(work.id()));return;}
+            navigation.cancel(work.id());
+            try {var reason=supply.pickup(work,buffered);if(reason!=WorkOrder.Reason.NONE)waitFor(work,reason);}
+            catch(AdmissionLedger.AdmissionException full) {waitFor(work,WorkOrder.Reason.STATE_LIMIT);}
+            return;
+        }
         if(state.lastCursor!=site.cursor()) {
             navigation.cancel(work.id()); state.lastCursor=site.cursor(); state.generation=site.cursor(); state.arrived=false;
             // Work origin travels parallel to the template's target axis, keeping the body off the blocks it places.
@@ -92,6 +123,10 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         int before=placement.materialCount(citizen.citizenId(),citizen.bindingEpoch(),target.expected().itemId());
         if(before<0) { waitFor(work,WorkOrder.Reason.RECONCILING); return; }
         if(before==0) { waitFor(work,WorkOrder.Reason.MATERIALS); return; }
+        io.github.kpuctajluk.colonyloom.core.supply.SupplyRegistry.PreparedConsumption consumption;
+        try {consumption=registry.supply().prepareConsumption(allocation.id(),1);}
+        catch(AdmissionLedger.AdmissionException full) {waitFor(work,WorkOrder.Reason.STATE_LIMIT);return;}
+        try(consumption) {
         var colony=registry.colony(work.colonyId());
         var context=new ActionContext(work.colonyId(),citizen.citizenId(),ActionContext.Kind.BLOCK_PLACE,target.position(),ActionContext.AuthorityMode.COLONY,site.initiatorId(),colony.authorityRevision());
         var effect=new EffectRecord(UUID.randomUUID(),work.colonyId(),work.id(),citizen.citizenId(),citizen.bindingEpoch(),ActionContext.Kind.BLOCK_PLACE,target.position(),MinecraftConstructionGeometry.state(target.expected()).toString(),target.expected().itemId(),before,before,EffectRecord.State.PREPARED,0,null);
@@ -101,7 +136,7 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         chunks.setProtection(state.chunkOwner,true,false,false);
         WorldAccess.Placement result;
         long physicalStart=System.nanoTime();
-        try { result=placement.place(context,citizen.bindingEpoch(),target.expected()); }
+        try {result=placement.place(context,citizen.bindingEpoch(),target.expected(),allocation.slot().slot());}
         catch(RuntimeException failure) { ambiguous(work,effect,before); throw failure; }
         finally { registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.PHYSICAL_UNIT,System.nanoTime()-physicalStart); chunks.setProtection(state.chunkOwner,false,false,false); }
         if(result==WorldAccess.Placement.PLACED || result==WorldAccess.Placement.AMBIGUOUS) {
@@ -110,11 +145,16 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
             placement.observe(BlockPlacementExecutor.FaultPoint.BEFORE_EFFECT_COMMIT,context);
             if(result==WorldAccess.Placement.AMBIGUOUS || after!=before-1 || work.terminal()
                     || !citizen.citizenId().equals(work.assignee()) || !site.equals(registry.construction().site(work.id()))) { ambiguous(work,effect,after); return; }
-            registry.effects().update(effect.observed(after,false)); controller.advance(work.id(),true);
+            registry.effects().update(effect.observed(after,false));
+            try {consumption.commit(1);}
+            catch(RuntimeException changed) {registry.effects().update(effect.observed(after,false).observed(after,true));registry.effects().blockAmbiguous(work.colonyId(),checkpoint.get());navigation.cancel(work.id());throw changed;}
+            controller.advance(work.id(),true);
+            state.reconcileCursor=site.cursor()+1;
         } else {
             registry.effects().discardUnchanged(effect.operationId());
             if(result==WorldAccess.Placement.ALREADY_PRESENT) controller.advance(work.id(),false);
             else waitFor(work,switch(result) { case MATERIALS -> WorkOrder.Reason.MATERIALS; case PERMISSION_DENIED -> WorkOrder.Reason.PERMISSION_DENIED; case OBSTRUCTED -> WorkOrder.Reason.TARGET_CONFLICT; default -> WorkOrder.Reason.CHUNK_NOT_READY; });
+        }
         }
     }
     private void ambiguous(WorkOrder work,EffectRecord effect,int after) {
@@ -130,7 +170,9 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
     }
     public void cancel(UUID workId) {
         registry.requireOwner(); if(navigation!=null) navigation.cancel(workId); var state=active.remove(workId); if(state!=null) chunks.release(state.chunkOwner);
-        if(registry.construction().site(workId)!=null) { var work=registry.workBoard().work(workId); if(work.terminal()) controller.close(workId); }
+        if(registry.construction().site(workId)==null) return;
+        var work=registry.workBoard().work(workId);if(work.terminal())supply.close(workId);
+        if(registry.construction().site(workId)!=null&&work.terminal())controller.close(workId);
     }
     public void close() { registry.requireOwner(); for(var state:active.values()) chunks.release(state.chunkOwner); active.clear(); }
 }

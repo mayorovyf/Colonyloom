@@ -97,14 +97,14 @@ public final class SupplyPlanner implements AutoCloseable {
                 try {
                     boolean stockExhausted = reserveAvailableStock(demand, tick);
                     if (!stockExhausted) return;
-                    if (demand.deficit() > 0) supply.sharedOutput(demand.id());
+                    if (demand.deficit() > 0) supply.coverExistingProduction(demand.id(), demand.deficit(), cursor.selected());
                     if (stockExhausted && demand.deficit() > 0 && cursor.selected() != null
                             && cursor.selected().batchesFor(demand.deficit()) <= cursor.batches()) {
                         var recipe = cursor.selected();
                         long batches = recipe.batchesFor(demand.deficit());
                         var order = supply.promiseProduction(demand.id(), recipe, batches);
                         for (int i = 0; i < recipe.ingredients().size(); i++) {
-                            supply.ingredientDemand(order, i, Math.multiplyExact(recipe.ingredients().get(i).count(), batches), tick);
+                            supply.ingredientDemand(order, i, Math.multiplyExact(recipe.ingredients().get(i).count(), order.batches() + order.completedBatches()), tick);
                         }
                     }
                     supply.status(demand.id(), Demand.Status.WAITING);
@@ -163,12 +163,15 @@ public final class SupplyPlanner implements AutoCloseable {
         return true;
     }
     private boolean reserveProductionKit(Demand demand, io.github.kpuctajluk.colonyloom.core.production.ProductionOrder order, long tick) {
+        if (!order.pinned() || !supply.workshopAvailable(order)) return true;
         if (kitSearch == null) {
             var inputs = new java.util.ArrayList<RecipeDefinition.Ingredient>();
             for (int i = 0; i < order.recipe().ingredients().size(); i++) {
-                var child = supply.ingredientDemand(order, i, Math.multiplyExact(order.batches(), order.recipe().ingredients().get(i).count()), tick);
-                if (child.snapshot().covered() > 0 || child.snapshot().allocated() > 0) return true;
-                if (child.deficit() > 0) inputs.add(new RecipeDefinition.Ingredient(child.snapshot().matcher(), child.deficit()));
+                var ingredient = order.recipe().ingredients().get(i);
+                var child = supply.ingredientDemand(order, i, Math.multiplyExact(order.batches() + order.completedBatches(), ingredient.count()), tick);
+                if (order.terminal() || child.snapshot().covered() > 0) return true;
+                long needed = Math.max(0, ingredient.count() - child.snapshot().allocated());
+                if (needed > 0) inputs.add(new RecipeDefinition.Ingredient(child.snapshot().matcher(), needed));
             }
             if (inputs.isEmpty()) return true;
             kitInputs = List.copyOf(inputs); kitOrderId = order.id(); kitOrderRevision = order.revision();

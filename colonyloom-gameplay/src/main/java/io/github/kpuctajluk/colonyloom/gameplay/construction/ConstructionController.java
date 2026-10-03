@@ -20,8 +20,8 @@ public final class ConstructionController implements ConstructionCommands {
     public record Target(WorldPosition position,BlockDescriptor expected) {
         public Target { Objects.requireNonNull(position); Objects.requireNonNull(expected); }
     }
-    public record Layout(Target[] targets,WorldPosition workOrigin,TargetClaimRegistry.Snapshot claim) {
-        public Layout { Objects.requireNonNull(targets); Objects.requireNonNull(workOrigin); Objects.requireNonNull(claim); if(targets.length==0) throw new IllegalArgumentException("Empty construction"); targets=targets.clone(); }
+    public record Layout(Target[] targets,WorldPosition workOrigin,WorldPosition deliveryBuffer,TargetClaimRegistry.Snapshot claim) {
+        public Layout { Objects.requireNonNull(targets); Objects.requireNonNull(workOrigin); Objects.requireNonNull(deliveryBuffer); Objects.requireNonNull(claim); if(targets.length==0) throw new IllegalArgumentException("Empty construction"); targets=targets.clone(); }
     }
     public interface Geometry {
         Layout layout(UUID workId,UUID colonyId,BlueprintDefinition definition,WorldPosition origin,int rotation);
@@ -36,6 +36,7 @@ public final class ConstructionController implements ConstructionCommands {
         registry.requireOwner(); var layout=geometry.layout(site.workId(),site.colonyId(),registry.construction().definition(site.blueprintDigest()),site.origin(),site.rotation());
         geometry.validate(layout); var colony=registry.colony(site.colonyId());
         if(!colony.territory().contains(layout.workOrigin())) throw new IllegalArgumentException("Pinned work origin outside territory");
+        if(!colony.territory().contains(layout.deliveryBuffer())) throw new IllegalArgumentException("Pinned delivery buffer outside territory");
         for(var target:layout.targets()) if(!colony.territory().contains(target.position())) throw new IllegalArgumentException("Pinned target outside territory");
         var stored=registry.targetClaims().snapshots().stream().filter(claim -> claim.ownerId().equals(site.workId())).findFirst().orElse(null);
         if(!site.closed() && (stored==null || !stored.equals(layout.claim()))) throw new IllegalArgumentException("Pinned geometry differs from authoritative target claim");
@@ -50,7 +51,11 @@ public final class ConstructionController implements ConstructionCommands {
         registry.construction().validateNew(site,definition);
         Layout layout=geometry.layout(workId,colonyId,definition,origin,rotation); geometry.validate(layout);
         if(!colony.territory().contains(layout.workOrigin())) throw new IllegalArgumentException("Construction work origin outside territory");
+        if(!colony.territory().contains(layout.deliveryBuffer())) throw new IllegalArgumentException("Construction delivery buffer outside territory");
         for(var target:layout.targets()) if(!colony.territory().contains(target.position())) throw new IllegalArgumentException("Construction blocks outside territory");
+        if(registry.storage().registrations(colonyId).stream().noneMatch(value -> value.role().equals("construction")
+                && value.address().equals(layout.deliveryBuffer()) && value.storages().stream().allMatch(id -> id.bindingEpoch()==0)))
+            throw new IllegalArgumentException("Register the construction barrel at the transformed delivery_buffer marker before building");
         // Reserve all site evidence before publishing work or demanding any physical ownership.
         try(var prepared=registry.construction().prepareNew(site,definition)) {
             registry.targetClaims().propose(layout.claim());
@@ -62,5 +67,10 @@ public final class ConstructionController implements ConstructionCommands {
         }
     }
     public void advance(UUID workId,boolean consumed) { var site=registry.construction().site(workId); registry.construction().update(ConstructionSite.advance(site,consumed)); }
+    public void revisit(UUID workId,int cursor) {
+        var site=registry.construction().site(workId);
+        if(cursor<0||cursor>=site.cursor())throw new IllegalArgumentException("Invalid construction revisit");
+        registry.construction().update(new ConstructionSnapshot(site.workId(),site.colonyId(),site.blueprintDigest(),site.origin(),site.rotation(),site.initiatorId(),cursor,site.consumed(),site.claimRevision(),Math.addExact(site.revision(),1),false));
+    }
     public void close(UUID workId) { var site=registry.construction().site(workId); if(site!=null && !site.closed()) registry.construction().update(ConstructionSite.close(site)); registry.targetClaims().release(workId); }
 }

@@ -48,6 +48,22 @@ final class SimulationSchedulerTest {
         assertEquals(WorkOrder.State.COMPLETED,timer.state());
         assertTrue(f.budgets.used(Budget.DIRTY_RESCAN_OBJECTS)<=1);
     }
+    @Test void repeatedlyWokenUnavailableOldWorkCannotStarveReadyPhysicalWork() {
+        Fixture f=new Fixture();UUID colony=f.colony(1,0);
+        f.registry.admission().updateLimits(LIMITS.withResource(Resource.READY_ENTRIES,8));
+        WorkOrder unavailable=f.board.createTimer(id(21),colony,new WorldPosition("minecraft:overworld",0,64,0),"colonyloom:carpenter",0,AdmissionLedger.Lane.NORMAL,100);
+        f.scheduler.beforeWork(tick -> f.board.transition(unavailable.id(),WorkOrder.State.READY,WorkOrder.Reason.NONE,"kit"));
+        f.ticks(2100);f.citizen(11,colony);
+        int[] steps={0};
+        f.scheduler.physicalExecutor(WorkOrder.MOVE,new SimulationScheduler.PhysicalExecutor() {
+            public void step(WorkOrder work,long tick) {if(++steps[0]==3)f.board.transition(work.id(),WorkOrder.State.COMPLETED,WorkOrder.Reason.NONE,"completed");}
+            public void cancel(UUID workId) {}
+        });
+        WorkOrder ready=f.board.createMove(id(22),colony,new WorldPosition("minecraft:overworld",8,64,0),0,AdmissionLedger.Lane.NORMAL);
+        f.ticks(100);
+        assertEquals(WorkOrder.State.COMPLETED,ready.state());
+        assertEquals(3,steps[0]);assertFalse(unavailable.terminal());
+    }
     @Test void physicalBackoffRetainsExactWorkerAndCancellationStopsImmediately() {
         Fixture f = new Fixture(); UUID colony = f.colony(1,0); UUID citizen = f.citizen(11,colony); f.citizen(12,colony);
         UUID[] held = {null}; int[] steps = {0}, stops = {0};

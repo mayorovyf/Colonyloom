@@ -258,6 +258,11 @@ final class PlatformScenario {
     private static void provision(MinecraftServer server, Run run, int colony) throws Exception {
         int origin = colony * 512;
         int population = count() / 3 + (colony < count() % 3 ? 1 : 0);
+        if(scenario().equals("block")) {
+            BlockPos buffer=new BlockPos(origin+3,64,10);
+            server.overworld().setBlock(buffer,Blocks.BARREL.defaultBlockState(),3);
+            command(server,run,"colonyloom storage register "+run.colonies[colony]+" "+coordinates(buffer)+" construction");
+        }
         for (int npc = 0; npc < population; npc++) {
             BlockPos pos = new BlockPos(origin + 3 + (npc % 10) * 3, 64, 3 + (npc / 10) * 3);
             UUID entityId = uuid(command(server, run, "colonyloom citizen create " + run.colonies[colony] + " " + coordinates(pos)), "entity");

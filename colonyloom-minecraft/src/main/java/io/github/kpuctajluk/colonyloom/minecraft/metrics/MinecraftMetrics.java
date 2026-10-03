@@ -43,7 +43,7 @@ public final class MinecraftMetrics {
             if(runtime.navigation()!=null) result.put("navigation",runtime.navigation().diagnostics());
             result.put("navigationBackend",runtime.navigationBackendMetrics());
             result.put("timingScopes",timingScopes());
-            result.put("futureMetrics","graph/native storage timings implemented; counts remain experimental pending full profile calibration. Views/critical food chains/migration not implemented. No JVM allocation profiler attached. No separable broad vanilla world block-change timer.");
+            result.put("futureMetrics","graph/native storage timings implemented; counts remain experimental pending full profile calibration. Views/critical food chains not implemented. Supported pending-production migration preserves its original checkpoint. No JVM allocation profiler attached. No separable broad vanilla world block-change timer.");
         }
         Map<String,Long> citizens=new LinkedHashMap<>();
         for(var citizen:core.registry().citizensView()) {

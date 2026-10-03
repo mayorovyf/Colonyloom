@@ -13,6 +13,7 @@ public final class WorkOrder {
     public static final String MOVE = "colonyloom:move";
     public static final String CONSTRUCTION = "colonyloom:construction";
     public static final String DELIVERY = "colonyloom:delivery";
+    public static final String PRODUCTION = "colonyloom:production";
     public static final int MAX_DEPENDENCIES = 16;
     public enum State { PLANNED, READY, ASSIGNED, RUNNING, WAITING, COMPLETED, CANCELLED, FAILED }
     public enum Reason { NONE, MATERIALS, TOOL, WORKER, CAPACITY, UNREACHABLE, CHUNK_NOT_READY,

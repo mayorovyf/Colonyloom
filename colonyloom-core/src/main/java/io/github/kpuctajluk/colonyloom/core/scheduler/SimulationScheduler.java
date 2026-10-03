@@ -35,7 +35,7 @@ public final class SimulationScheduler {
     private int eventCursor;
     private int compare(Node a, Node b) {
         int result = Integer.compare(b.score,a.score);
-        if (result == 0) result = Long.compare(a.birthClock,b.birthClock);
+        if (result == 0) result = Long.compare(a.schedulingSince,b.schedulingSince);
         return result != 0 ? result : a.work.id().compareTo(b.work.id());
     }
     private Node dirtyHead, dirtyTail;
@@ -90,7 +90,7 @@ public final class SimulationScheduler {
         final WakeupIndex.Ticket due;
         final ColonyQueue colony;
         final long birthClock;
-        long queuedAt;
+        long queuedAt, schedulingSince;
         long activeSince = -1, accrued, waitRevision = -1;
         int score, queueIndex = -1;
         boolean queued, linked, changedWhileExecuting;
@@ -101,6 +101,7 @@ public final class SimulationScheduler {
         Node(WorkOrder work, ColonyQueue colony) {
             this.work = work; this.colony = colony; due = new WakeupIndex.Ticket(work.id());
             birthClock = clock - work.ageActiveTicks();
+            schedulingSince = birthClock;
         }
     }
     public SimulationScheduler(WorkBoard board, GlobalWorkBudgets budgets) {
@@ -317,7 +318,7 @@ public final class SimulationScheduler {
             if (!board.ledger().canReserve(node.work.colonyId(),node.work.lane(),READY_COST)) return false;
             node.readyLease = board.ledger().reserve(node.work.colonyId(),node.work.lane(),READY_COST);
         }
-        node.score = node.work.priority() + (node.work.lane() == Lane.NORMAL ? (int)Math.min(10,age(node.work)/200) : 0);
+        node.score = node.work.priority() + (node.work.lane() == Lane.NORMAL ? (int)Math.min(10,Math.max(0,clock-node.schedulingSince)/200) : 0);
         ArrayList<Node> queue = node.colony.queues[node.work.lane().ordinal()];
         if (node.work.lane()==Lane.NORMAL && queue.isEmpty()) node.colony.normalReadySince=tick;
         node.queueIndex = queue.size(); queue.add(node); node.queued = true; queueUp(queue,node.queueIndex);
@@ -408,6 +409,8 @@ public final class SimulationScheduler {
                 else deadlines.schedule(node.due,tick+1);
             }
         } finally {
+            // Aging protects the next bounded attempt, not an old root's lifetime monopoly.
+            node.schedulingSince = clock;
             executing = null;
             if (node.externallyInvalidated || work.revision() != revision && node.changedWhileExecuting && node.linked) {
                 link(node); board.acknowledge(work.id(),revision);
@@ -441,6 +444,10 @@ public final class SimulationScheduler {
                 if(WorkOrder.DELIVERY.equals(work.typeId())) {
                     var order=board.registry().supply().deliveryForWork(work.id());
                     if(order!=null&&board.registry().supply().hasCargo(order.id())&&!id.equals(order.citizenId()))continue;
+                }
+                if(WorkOrder.PRODUCTION.equals(work.typeId())) {
+                    var order=board.registry().supply().productionForWork(work.id());
+                    if(order==null||!order.pinned()||!order.workshopId().equals(citizen.workplaceId())||order.batchStarted()&&!id.equals(order.citizenId()))continue;
                 }
                 long dx = (long)work.target().x()-citizen.lastKnownPosition().x(), dz = (long)work.target().z()-citizen.lastKnownPosition().z();
                 long distance = Math.abs(dx)+Math.abs(dz)+Math.abs((long)work.target().y()-citizen.lastKnownPosition().y());

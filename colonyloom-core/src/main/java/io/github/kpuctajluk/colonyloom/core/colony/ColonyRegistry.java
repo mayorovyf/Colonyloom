@@ -170,7 +170,7 @@ public final class ColonyRegistry {
         Set<UUID> assignedCitizens = new HashSet<>();
         for (WorkOrder.Snapshot work : snapshot.works()) {
             ColonyRuntime colony = required(newColonies, work.colonyId(), "work colony");
-            if (!objectIds.add(work.id()) || !(WorkOrder.ACTIVE_WAIT.equals(work.typeId()) || WorkOrder.MOVE.equals(work.typeId()) || WorkOrder.CONSTRUCTION.equals(work.typeId()) || WorkOrder.DELIVERY.equals(work.typeId())) || !colony.territory().contains(work.target())) throw new IllegalArgumentException("Invalid work identity/type/target");
+            if (!objectIds.add(work.id()) || !(WorkOrder.ACTIVE_WAIT.equals(work.typeId()) || WorkOrder.MOVE.equals(work.typeId()) || WorkOrder.CONSTRUCTION.equals(work.typeId()) || WorkOrder.DELIVERY.equals(work.typeId()) || WorkOrder.PRODUCTION.equals(work.typeId())) || !colony.territory().contains(work.target())) throw new IllegalArgumentException("Invalid work identity/type/target");
             newWorks.put(work.id(), work);
             if (work.assignee() != null) {
                 CitizenRecord citizen = required(newCitizens, work.assignee(), "work assignee");
@@ -226,9 +226,19 @@ public final class ColonyRegistry {
         for(var share:snapshot.supply().shares()) if(!objectIds.add(share.id())) throw new IllegalArgumentException("Duplicate coverage identity");
         for(var order:snapshot.supply().productionOrders()) if(!objectIds.add(order.id())) throw new IllegalArgumentException("Duplicate production identity");
         for(var order:snapshot.supply().deliveries()) if(!objectIds.add(order.id())) throw new IllegalArgumentException("Duplicate delivery identity");
+        Set<UUID> productionWorks = new HashSet<>();
         for(var order:snapshot.supply().productionOrders()) {
-            if(order.workId()!=null&&!required(newWorks,order.workId(),"production work").colonyId().equals(order.colonyId()))throw new IllegalArgumentException("Foreign production work");
-            if(order.citizenId()!=null&&!required(newCitizens,order.citizenId(),"producer").colonyId().equals(order.colonyId()))throw new IllegalArgumentException("Foreign producer");
+            if(order.workId()!=null) {
+                if(!productionWorks.add(order.workId())) throw new IllegalArgumentException("Production work counted twice");
+                var work=required(newWorks,order.workId(),"production work");
+                if(!work.colonyId().equals(order.colonyId()) || !WorkOrder.PRODUCTION.equals(work.typeId()) || !work.target().equals(order.equipmentPosition())
+                        || !Objects.equals(work.professionId(),order.recipe().professionId()) || work.assignee()!=null && order.batchStarted() && !work.assignee().equals(order.citizenId())) throw new IllegalArgumentException("Invalid production work binding");
+                if(!order.terminal() && work.state()==WorkOrder.State.COMPLETED || !order.terminal() && work.state()==WorkOrder.State.CANCELLED || !order.terminal() && work.state()==WorkOrder.State.FAILED) throw new IllegalArgumentException("Live production references terminal work");
+            }
+            if(order.citizenId()!=null) {
+                var citizen=required(newCitizens,order.citizenId(),"producer");
+                if(!citizen.colonyId().equals(order.colonyId()) || !order.workshopId().equals(citizen.workplaceId()) || !order.recipe().professionId().equals(citizen.professionId())) throw new IllegalArgumentException("Invalid producer workplace");
+            }
         }
         Set<UUID> deliveryWorks = new HashSet<>();
         for(var order:snapshot.supply().deliveries()) {

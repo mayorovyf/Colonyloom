@@ -41,7 +41,7 @@ public final class BlockPlacementGameTests {
     public static void fourActualNpcStairsProduceFourBlocks(GameTestHelper helper) {
         withReadyFixture(helper,fixture -> {
             for (BlueprintDefinition.BlockSpec spec : fixture.blueprint.blocks()) {
-                Placement result = fixture.executor.place(fixture.context(fixture.target(spec), ActionContext.AuthorityMode.COLONY, null), 1, spec.block());
+                Placement result = fixture.executor.place(fixture.context(fixture.target(spec), ActionContext.AuthorityMode.COLONY, null), 1, spec.block(), 0);
                 helper.assertTrue(result == Placement.PLACED, "Ordinary NPC item use failed: " + result);
             }
             for (BlueprintDefinition.BlockSpec spec : fixture.blueprint.blocks()) {
@@ -67,7 +67,7 @@ public final class BlockPlacementGameTests {
             };
             NeoForge.EVENT_BUS.addListener(BlockEvent.EntityPlaceEvent.class, placementVeto);
             try {
-                Placement result = fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.COLONY, null), 1, spec.block());
+                Placement result = fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.COLONY, null), 1, spec.block(), 0);
                 helper.assertTrue(result == Placement.PERMISSION_DENIED && events[0] == 1, "Real placement event did not veto item use");
                 helper.assertTrue(helper.getLevel().getBlockState(target).isAir() && fixture.citizen.inventory().getItem(0).getCount() == 4, "Placement veto changed a block or spent a stair");
             } finally {
@@ -78,13 +78,13 @@ public final class BlockPlacementGameTests {
             };
             NeoForge.EVENT_BUS.addListener(PlayerInteractEvent.RightClickBlock.class, interactionVeto);
             try {
-                Placement result = fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.COLONY, null), 1, spec.block());
+                Placement result = fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.COLONY, null), 1, spec.block(), 0);
                 helper.assertTrue(result != Placement.PLACED && events[0] == 2, "Real interaction event did not veto item use");
                 helper.assertTrue(helper.getLevel().getBlockState(target).isAir() && fixture.citizen.inventory().getItem(0).getCount() == 4, "Interaction veto changed a block or spent a stair");
             } finally {
                 NeoForge.EVENT_BUS.unregister(interactionVeto);
             }
-            helper.assertTrue(fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.COLONY, null), 1, spec.block()) == Placement.PLACED, "A veto left stale borrowed resources or event state");
+            helper.assertTrue(fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.COLONY, null), 1, spec.block(), 0) == Placement.PLACED, "A veto left stale borrowed resources or event state");
             helper.assertTrue(fixture.citizen.inventory().getItem(0).getCount() == 3, "Following successful placement did not consume exactly one stair");
         });
     }
@@ -99,7 +99,7 @@ public final class BlockPlacementGameTests {
             };
             NeoForge.EVENT_BUS.addListener(PlayerInteractEvent.RightClickBlock.class, corruptingListener);
             try {
-                helper.assertTrue(fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.COLONY, null), 1, spec.block()) == Placement.AMBIGUOUS, "Unexpected real item delta was silently committed");
+                helper.assertTrue(fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.COLONY, null), 1, spec.block(), 0) == Placement.AMBIGUOUS, "Unexpected real item delta was silently committed");
                 helper.assertTrue(fixture.executor.matches(fixture.position(target), spec.block()), "Ambiguous placement compensated by destroying the physical block");
                 helper.assertTrue(fixture.citizen.inventory().getItem(0).getCount() == 2, "Ambiguous placement compensated by manufacturing a replacement stair");
             } finally {
@@ -115,7 +115,7 @@ public final class BlockPlacementGameTests {
             for (int index = 0; index < facings.length; index++) {
                 BlockPos target = fixture.origin.offset(index, 0, 0);
                 BlockDescriptor expected = new BlockDescriptor("minecraft:oak_stairs", Map.of("facing", facings[index], "half", "bottom", "shape", "straight", "waterlogged", "false"), "minecraft:oak_stairs");
-                Placement result=fixture.executor.place(fixture.context(target,ActionContext.AuthorityMode.COLONY,null),1,expected);
+                Placement result=fixture.executor.place(fixture.context(target,ActionContext.AuthorityMode.COLONY,null),1,expected,0);
                 helper.assertTrue(result==Placement.PLACED,"Rotated item state failed for "+facings[index]+" result="+result+" actual="+helper.getLevel().getBlockState(target)+" inventory="+fixture.citizen.inventory().getItem(0));
                 helper.assertTrue(fixture.executor.matches(fixture.position(target), expected), "Rotated placement mismatched expected facing");
                 // Distinct orientations would legitimately reshape adjacent stairs; isolate each physical case.
@@ -131,10 +131,10 @@ public final class BlockPlacementGameTests {
             BlueprintDefinition.BlockSpec spec = fixture.blueprint.blocks().getFirst();
             BlockPos target = fixture.target(spec);
             helper.getLevel().setBlockAndUpdate(target, ContentLoader.decodeBlockState(spec.block()));
-            helper.assertTrue(fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.COLONY, null), 1, spec.block()) == Placement.ALREADY_PRESENT, "Existing exact target was placed twice");
+            helper.assertTrue(fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.COLONY, null), 1, spec.block(), 0) == Placement.ALREADY_PRESENT, "Existing exact target was placed twice");
             helper.assertTrue(fixture.citizen.inventory().getItem(0).getCount() == 4, "Existing target consumed NPC property");
             fixture.citizen.inventory().clearContent();
-            helper.assertTrue(fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.COLONY, null), 1, spec.block()) == Placement.ALREADY_PRESENT, "Already present target incorrectly requires new materials");
+            helper.assertTrue(fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.COLONY, null), 1, spec.block(), 0) == Placement.ALREADY_PRESENT, "Already present target incorrectly requires new materials");
         });
     }
 
@@ -150,8 +150,8 @@ public final class BlockPlacementGameTests {
             fixture.registry.updateColony(new ColonyRuntime(initial.colonyId(), initial.name(), initial.territory(), initial.ownerId(), Map.of(manager, MemberRank.MANAGER), 2, 2, false, null, false));
             ActionContext oldIndividual = fixture.context(target, ActionContext.AuthorityMode.INDIVIDUAL, manager);
             fixture.registry.updateColony(new ColonyRuntime(initial.colonyId(), initial.name(), initial.territory(), nextOwner, Map.of(), 3, 3, false, null, false));
-            helper.assertTrue(fixture.executor.place(oldIndividual, 1, spec.block()) == Placement.PERMISSION_DENIED, "Stale individual authority survived revocation");
-            helper.assertTrue(fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.INDIVIDUAL, manager), 1, spec.block()) == Placement.PERMISSION_DENIED, "Fresh context restored revoked manager rights");
+            helper.assertTrue(fixture.executor.place(oldIndividual, 1, spec.block(), 0) == Placement.PERMISSION_DENIED, "Stale individual authority survived revocation");
+            helper.assertTrue(fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.INDIVIDUAL, manager), 1, spec.block(), 0) == Placement.PERMISSION_DENIED, "Fresh context restored revoked manager rights");
             helper.assertTrue(helper.getLevel().getBlockState(target).isAir() && fixture.citizen.inventory().getItem(0).getCount() == 4, "Denied authority changed world/property");
             UUID[] observedPrincipal = {null};
             Consumer<BlockEvent.EntityPlaceEvent> observeOwner = event -> {
@@ -162,7 +162,7 @@ public final class BlockPlacementGameTests {
             };
             NeoForge.EVENT_BUS.addListener(BlockEvent.EntityPlaceEvent.class, observeOwner);
             try {
-                helper.assertTrue(fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.COLONY, manager), 1, spec.block()) == Placement.PLACED, "Colony action incorrectly inherited revoked initiator rights");
+                helper.assertTrue(fixture.executor.place(fixture.context(target, ActionContext.AuthorityMode.COLONY, manager), 1, spec.block(), 0) == Placement.PLACED, "Colony action incorrectly inherited revoked initiator rights");
                 helper.assertTrue(nextOwner.equals(observedPrincipal[0]), "Placement event used previous owner/initiator rather than current owner");
             } finally {
                 NeoForge.EVENT_BUS.unregister(observeOwner);

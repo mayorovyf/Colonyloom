@@ -23,4 +23,9 @@ public final class ConstructionExecutorEvent extends Event {
         if(transferObserver!=null)throw new IllegalStateException("Transfer observer already installed");transferObserver=Objects.requireNonNull(observer);
     }
     public io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor.FaultObserver transferObserver() {return transferObserver;}
+    private io.github.kpuctajluk.colonyloom.minecraft.production.RecipeExecutor.FaultObserver recipeObserver;
+    public void recipeObserver(io.github.kpuctajluk.colonyloom.minecraft.production.RecipeExecutor.FaultObserver observer) {
+        if(recipeObserver!=null)throw new IllegalStateException("Recipe observer already installed");recipeObserver=Objects.requireNonNull(observer);
+    }
+    public io.github.kpuctajluk.colonyloom.minecraft.production.RecipeExecutor.FaultObserver recipeObserver() {return recipeObserver;}
 }

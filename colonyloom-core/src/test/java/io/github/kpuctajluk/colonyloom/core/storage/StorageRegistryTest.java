@@ -27,6 +27,36 @@ final class StorageRegistryTest {
     private static WorldPosition pos(int x) { return new WorldPosition(DIMENSION, x, 64, 0); }
     private static StockRegion slot(long identity, int slot) { return new StockRegion(new StorageId(DIMENSION, id(identity), 0), slot); }
 
+    @Test void outputReservationCannotPublishUnknownOrOverpromisedPhysicalOutput() {
+        Fixture f=new Fixture();var first=slot(100,0);var second=slot(100,1);f.register(A,0,"workshop",first,second);
+        var entries=List.of(new ReservationLedger.Entry(id(1001),A,OWNER,first,STONE,2,0,AdmissionLedger.Lane.NORMAL),
+                new ReservationLedger.Entry(id(1002),A,OWNER,second,STONE,2,0,AdmissionLedger.Lane.NORMAL));
+        try(var prepared=f.storage.prepareReserveAll(entries,0)) {
+            f.storage.index().observe(first,STONE,2,0);
+            assertThrows(IllegalStateException.class,prepared::commit);
+            assertTrue(f.storage.reservations().entries().isEmpty());
+            f.storage.index().observe(second,STONE,1,0);
+            assertThrows(IllegalStateException.class,prepared::commit);
+            assertTrue(f.storage.reservations().entries().isEmpty());
+            f.storage.index().observe(second,STONE,2,0);prepared.commit();
+        }
+        assertEquals(entries,f.storage.reservations().entries());
+        assertEquals(0,f.storage.index().free(first,0));assertEquals(0,f.storage.index().free(second,0));
+    }
+    @Test void partialAllocationRelocationRetainsBothPhysicalCustodyObligations() {
+        Fixture f=new Fixture();var source=slot(100,0);var dest=slot(101,0);f.register(A,0,"construction",source);f.register(A,1,"construction",dest);
+        f.storage.index().observe(source,STONE,16,0);f.storage.index().observe(dest,null,0,0);
+        f.storage.allocations().allocate(id(1001),A,OWNER,source,STONE,16,0,AdmissionLedger.Lane.NORMAL);
+        try(var move=f.storage.prepareMoveAllocation(id(1001),dest,id(1002),true,true,6,0)) {
+            assertThrows(IllegalStateException.class,() -> move.commit(6));
+            assertEquals(16,f.storage.allocations().get(id(1001)).count());
+            f.storage.index().observe(dest,STONE,6,0);move.commit(6);
+        }
+        f.storage.index().observe(source,STONE,10,0);
+        assertEquals(10,f.storage.allocations().get(id(1001)).count());assertEquals(6,f.storage.allocations().get(id(1002)).count());
+        assertEquals(OWNER,f.storage.allocations().get(id(1002)).ownerId());
+        assertEquals(0,f.storage.index().free(source,0));assertEquals(0,f.storage.index().free(dest,0));
+    }
     /** The mutable physical reader is shared by both colony views, not copied into registrations. */
     private static final class PhysicalReader implements StockIndex.Reader {
         final Map<StockRegion, StockIndex.Observation> inventories = new HashMap<>();

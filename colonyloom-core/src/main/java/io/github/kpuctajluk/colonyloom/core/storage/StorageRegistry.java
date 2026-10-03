@@ -210,6 +210,44 @@ public final class StorageRegistry {
         } catch (RuntimeException failure) { staged.forEach(c -> c.lease.close()); throw failure; }
         staged.forEach(this::addClaim); return staged.stream().map(Claim::reservation).toList();
     }
+    /** Admits future physical output without advertising stock before native observation. */
+    public PreparedReservations prepareReserveAll(List<ReservationLedger.Entry> requested,long tick) {
+        requireOwner(); requested=List.copyOf(requested);
+        if(tick<0||requested.size()>16||claims.size()+requested.size()>MAX_OBLIGATIONS)throw new IllegalArgumentException("Invalid output reservation envelope");
+        var ids=new HashSet<UUID>();var staged=new ArrayList<Claim>(requested.size());
+        try {
+            for(var entry:requested) {
+                registry.colony(entry.colonyId());
+                if(!ids.add(entry.id())||registry.usedId(entry.id())||claims.containsKey(entry.id())
+                        ||registrations.containsKey(entry.id())||workshops.containsKey(entry.id())
+                        ||!authorized(entry.colonyId(),entry.slot())||retired.containsKey(entry.slot().storage()))throw new IllegalArgumentException("Invalid future output obligation");
+                staged.add(new Claim(false,entry.id(),entry.colonyId(),entry.ownerId(),entry.slot(),entry.item(),entry.count(),entry.revision(),entry.lane(),
+                        registry.admission().reserve(entry.colonyId(),entry.lane(),Map.of(Resource.RESERVATIONS_AND_ALLOCATIONS,1))));
+            }
+        } catch(RuntimeException failure) {staged.forEach(c -> c.lease.close());throw failure;}
+        return new PreparedReservations(staged,tick);
+    }
+    public final class PreparedReservations implements AutoCloseable {
+        private final List<Claim> staged;
+        private final long tick;
+        private boolean closed;
+        private PreparedReservations(List<Claim> staged,long tick) {this.staged=staged;this.tick=tick;}
+        public void commit() {
+            requireOwner();if(closed)throw new IllegalStateException("Output preparation closed");
+            if(claims.size()+staged.size()>MAX_OBLIGATIONS)throw new IllegalStateException("Output obligation envelope changed");
+            var totals=new HashMap<StockRegion,Long>();
+            for(var c:staged) {
+                if(claims.containsKey(c.id)||!authorized(c.colony,c.slot)||retired.containsKey(c.slot.storage())
+                        ||!c.item.equals(index.observation(c.slot).item()))throw new IllegalStateException("Native output identity changed");
+                long total=Math.addExact(totals.getOrDefault(c.slot,0L),c.count);
+                if(total>index.free(c.slot,tick))throw new IllegalStateException("Native output not observed");
+                totals.put(c.slot,total);
+            }
+            if(!staged.isEmpty())registry.beforeMutation();
+            staged.forEach(StorageRegistry.this::addClaim);closed=true;
+        }
+        @Override public void close() {requireOwner();if(!closed){closed=true;staged.forEach(c -> c.lease.close());}}
+    }
     public ReservationLedger.Entry reservation(UUID id) { requireOwner(); Claim c = claims.get(id); return c == null || c.allocation ? null : c.reservation(); }
     public AllocationLedger.Entry allocation(UUID id) { requireOwner(); Claim c = claims.get(id); return c == null || !c.allocation ? null : c.allocation(); }
     /** Only reduces a real obligation; zero releases its lease. */
@@ -271,8 +309,18 @@ public final class StorageRegistry {
     /** Pre-admits a possible split; native destination observation precedes publication. */
     public PreparedMove prepareMoveReservation(UUID id, StockRegion destination, UUID splitId,
                                                boolean allocation, boolean retainDestination, int maximum, long tick) {
+        return prepareMove(id,destination,splitId,allocation,retainDestination,maximum,tick,false);
+    }
+    /** Allocation custody changes location, never becomes free stock during the native transfer. */
+    public PreparedMove prepareMoveAllocation(UUID id,StockRegion destination,UUID splitId,
+            boolean allocation,boolean retainDestination,int maximum,long tick) {
+        if(!allocation||!retainDestination)throw new IllegalArgumentException("Allocation relocation must retain allocation");
+        return prepareMove(id,destination,splitId,true,true,maximum,tick,true);
+    }
+    private PreparedMove prepareMove(UUID id,StockRegion destination,UUID splitId,
+            boolean allocation,boolean retainDestination,int maximum,long tick,boolean sourceAllocation) {
         requireOwner(); Claim old = claims.get(id);
-        if (old == null || old.allocation || maximum <= 0 || maximum > old.count || tick < 0
+        if (old == null || old.allocation != sourceAllocation || maximum <= 0 || maximum > old.count || tick < 0
                 || old.slot.equals(destination) || !authorized(old.colony, old.slot) || retired.containsKey(old.slot.storage())
                 || !authorized(old.colony, destination) || retired.containsKey(destination.storage())
                 || !index.observation(old.slot).ready() || !old.item.equals(index.observation(old.slot).item())
@@ -323,6 +371,66 @@ public final class StorageRegistry {
         }
         @Override public void close() { requireOwner(); if (!closed) { closed = true; if (extra != null) { extra.close(); extra = null; } } }
     }
+    /** Reassigns real property without making it temporarily free or requiring a ready observation. */
+    public record OwnershipTransfer(UUID obligationId, UUID resultId, UUID ownerId, long count) {}
+    public PreparedOwnership prepareOwnership(List<OwnershipTransfer> transfers, Map<UUID, Long> retained) {
+        requireOwner(); transfers = List.copyOf(transfers); retained = Map.copyOf(retained);
+        var originals = new LinkedHashMap<UUID, Claim>(); var extras = new LinkedHashMap<UUID, AdmissionLedger.Lease>();
+        Set<UUID> results = new HashSet<>(); Map<UUID, Long> remaining = new HashMap<>();
+        try {
+            for (var transfer : transfers) {
+                Claim old = claims.get(transfer.obligationId());
+                long available = old == null ? 0 : remaining.getOrDefault(old.id, old.count);
+                if (old == null || retained.containsKey(old.id) || transfer.ownerId() == null || transfer.count() <= 0 || transfer.count() > available
+                        || !results.add(transfer.resultId()) || (transfer.count() == available) != transfer.resultId().equals(old.id))
+                    throw new IllegalArgumentException("Invalid property ownership transfer");
+                originals.putIfAbsent(old.id, old); remaining.put(old.id, available - transfer.count());
+                Math.incrementExact(old.revision);
+                if (transfer.count() < available) {
+                    if (claims.containsKey(transfer.resultId()) || registry.usedId(transfer.resultId()) || claims.size() + extras.size() >= MAX_OBLIGATIONS)
+                        throw new IllegalArgumentException("Ownership split identity/envelope exceeded");
+                    extras.put(transfer.resultId(), registry.admission().reserve(old.colony, old.lane, Map.of(Resource.RESERVATIONS_AND_ALLOCATIONS, 1)));
+                }
+            }
+            for (var entry : retained.entrySet()) {
+                Claim old = claims.get(entry.getKey());
+                if (old == null || entry.getValue() < 0 || entry.getValue() > old.count) throw new IllegalArgumentException("Invalid obligation reduction");
+                Math.incrementExact(old.revision); originals.put(old.id, old);
+            }
+            return new PreparedOwnership(transfers, retained, originals, extras);
+        } catch (RuntimeException failure) { extras.values().forEach(AdmissionLedger.Lease::close); throw failure; }
+    }
+    public final class PreparedOwnership implements AutoCloseable {
+        private final List<OwnershipTransfer> transfers; private final Map<UUID, Long> retained;
+        private final Map<UUID, Claim> originals; private final Map<UUID, Long> counts = new HashMap<>(), revisions = new HashMap<>();
+        private final Map<UUID, AdmissionLedger.Lease> extras; private boolean closed;
+        private PreparedOwnership(List<OwnershipTransfer> transfers, Map<UUID, Long> retained, Map<UUID, Claim> originals, Map<UUID, AdmissionLedger.Lease> extras) {
+            this.transfers = transfers; this.retained = retained; this.originals = originals; this.extras = extras;
+            originals.forEach((id, claim) -> { counts.put(id, claim.count); revisions.put(id, claim.revision); });
+        }
+        public void commit() {
+            requireOwner(); if (closed) throw new IllegalStateException("Property ownership preparation closed");
+            for (var old : originals.values()) if (claims.get(old.id) != old || old.count != counts.get(old.id) || old.revision != revisions.get(old.id))
+                throw new IllegalStateException("Prepared property ownership changed");
+            registry.beforeMutation();
+            for (var transfer : transfers) {
+                Claim old = originals.get(transfer.obligationId()); boolean full = transfer.count() == old.count;
+                Claim next = new Claim(false, transfer.resultId(), old.colony, transfer.ownerId(), old.slot, old.item,
+                        transfer.count(), old.revision + 1, old.lane, full ? old.lease : extras.remove(transfer.resultId()));
+                if (full) { claims.remove(old.id); slotClaims.get(old.slot).remove(old); }
+                else { old.count -= transfer.count(); old.revision++; }
+                addClaim(next);
+            }
+            for (var entry : retained.entrySet()) {
+                Claim old = originals.get(entry.getKey());
+                if (entry.getValue() == 0) { removeClaim(old); prune(old.slot); }
+                else if (old.count != entry.getValue()) { old.count = entry.getValue(); old.revision++; }
+            }
+            closed = true;
+        }
+        @Override public void close() { requireOwner(); closed = true; extras.values().forEach(AdmissionLedger.Lease::close); extras.clear(); }
+    }
+
     public void reduceObligations(Map<UUID, Long> retained) {
         requireOwner();
         for (var entry : retained.entrySet()) {
@@ -354,6 +462,7 @@ public final class StorageRegistry {
         if (local.isEmpty()) slotClaims.remove(claim.slot);
     }
     List<Claim> claims(boolean allocation) { return claims.values().stream().filter(c -> c.allocation == allocation).toList(); }
+    public long obligated(StockRegion slot) { requireOwner(); return promised(Objects.requireNonNull(slot)); }
     long promised(StockRegion slot) {
         List<Claim> local = slotClaims.get(slot); long total = 0;
         if (local != null) for (Claim claim : local) total += claim.count;

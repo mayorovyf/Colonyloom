@@ -116,7 +116,7 @@ public final class BlockPlacementExecutor implements WorldAccess {
         BlockPos pos = position(target);
         return ready(level, pos) && level.getBlockState(pos).equals(ContentLoader.decodeBlockState(expected));
     }
-    @Override public Placement place(ActionContext context, long bindingEpoch, BlockDescriptor expected) {
+    @Override public Placement place(ActionContext context, long bindingEpoch, BlockDescriptor expected,int sourceSlot) {
         owner();
         if (context.actionKind() != ActionContext.Kind.BLOCK_PLACE) return Placement.PERMISSION_DENIED;
         CitizenRecord record = registry.findCitizen(context.citizenId()).orElse(null);
@@ -148,17 +148,11 @@ public final class BlockPlacementExecutor implements WorldAccess {
         if (!level.getBlockState(support).isFaceSturdy(level, support, Direction.UP)
                 || !desired.canSurvive(level, pos) || !level.isUnobstructed(desired, pos, CollisionContext.empty())) return Placement.OBSTRUCTED;
         ResourceLocation material = ResourceLocation.parse(expected.itemId());
-        int sourceSlot = -1;
-        ItemStack source = ItemStack.EMPTY;
-        for (int slot = 0; slot < CitizenEntity.INVENTORY_SIZE; slot++) {
-            ItemStack stack = citizen.inventory().getItem(slot);
-            if (!stack.isEmpty() && BuiltInRegistries.ITEM.getKey(stack.getItem()).equals(material)
-                    && stack.getItem() instanceof BlockItem blockItem && blockItem.getBlock() == desired.getBlock()
-                    && stack.getComponentsPatch().isEmpty()) {
-                sourceSlot = slot; source = stack; break;
-            }
-        }
-        if (sourceSlot < 0) return Placement.MATERIALS;
+        if(sourceSlot<0||sourceSlot>=CitizenEntity.INVENTORY_SIZE)return Placement.MATERIALS;
+        ItemStack source=citizen.inventory().getItem(sourceSlot);
+        if(source.isEmpty()||!BuiltInRegistries.ITEM.getKey(source.getItem()).equals(material)
+                ||!(source.getItem() instanceof BlockItem blockItem)||blockItem.getBlock()!=desired.getBlock()
+                ||!source.getComponentsPatch().isEmpty())return Placement.MATERIALS;
         Direction facing = desired.is(Blocks.OAK_STAIRS) ? desired.getValue(StairBlock.FACING) : Direction.NORTH;
         BlockState predicted = desired.getBlock().getStateForPlacement(new DirectionalPlaceContext(level, pos, facing, source, Direction.UP));
         if (!desired.equals(predicted)) return Placement.OBSTRUCTED;

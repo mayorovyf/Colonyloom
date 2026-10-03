@@ -71,8 +71,8 @@ public final class ConstructionRegistry {
         if(old==null || !old.colonyId().equals(site.colonyId()) || !old.blueprintDigest().equals(site.blueprintDigest())
                 || !old.origin().equals(site.origin()) || old.rotation()!=site.rotation() || !Objects.equals(old.initiatorId(),site.initiatorId())
                 || old.revision()==Long.MAX_VALUE || site.revision()!=old.revision()+1 || site.cursor()>definition(site.blueprintDigest()).blocks().size()
-                || site.cursor()<old.cursor() || site.consumed()<old.consumed() || site.claimRevision()<old.claimRevision()
-                || site.consumed()-old.consumed()>site.cursor()-old.cursor() || old.closed())
+                || site.consumed()<old.consumed() || site.claimRevision()<old.claimRevision()
+                || site.consumed()-old.consumed()>1 || site.consumed()>old.consumed()&&site.cursor()!=old.cursor()+1 || old.closed())
             throw new IllegalArgumentException("Construction identity or revision mismatch");
         registry.beforeMutation(); sites.put(site.workId(),site);
     }

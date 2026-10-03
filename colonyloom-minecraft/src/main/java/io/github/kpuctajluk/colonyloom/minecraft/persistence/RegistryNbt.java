@@ -68,7 +68,7 @@ final class RegistryNbt {
             for (Tag element : entries) {
                 CompoundTag entry = (CompoundTag) element;
                 String type = string(entry, "typeId");
-                if (type.equals(KNOWN_TYPES.get(key)) || key.equals("works") && (type.equals(WorkOrder.MOVE) || type.equals(WorkOrder.CONSTRUCTION) || type.equals(WorkOrder.DELIVERY))
+                if (type.equals(KNOWN_TYPES.get(key)) || key.equals("works") && (type.equals(WorkOrder.MOVE) || type.equals(WorkOrder.CONSTRUCTION) || type.equals(WorkOrder.DELIVERY) || type.equals(WorkOrder.PRODUCTION))
                         || key.equals("evidence") && (type.equals(ConstructionNbt.SITE) || type.equals(ConstructionNbt.EFFECT))
                         || StorageNbt.known(key,type) || SupplyNbt.known(key,type) || key.equals("pinnedDefinitions") && type.equals(ConstructionNbt.PIN)) {
                     if (key.equals("pinnedDefinitions") && type.equals(ConstructionNbt.PIN) && !ConstructionNbt.knownBlueprintSchema(entry)
@@ -306,6 +306,7 @@ final class RegistryNbt {
         for(var entry:retained.get("evidence")) if(entry.hasUUID("registrationId") && entry.hasUUID("colonyId")) unknownStockColonies.add(uuid(entry,"colonyId"));
         Set<UUID> registrationIds=new HashSet<>();
         for(var entry:retained.get("evidence")) {
+            if(entry.hasUUID("operationId")) continue;
             String idKey=entry.hasUUID("buildingId")?"buildingId":entry.hasUUID("registrationId")?"registrationId":null;
             if(idKey!=null && !objectIds.add(uuid(entry,idKey))) throw invalid("Duplicate opaque stock object identity");
         }

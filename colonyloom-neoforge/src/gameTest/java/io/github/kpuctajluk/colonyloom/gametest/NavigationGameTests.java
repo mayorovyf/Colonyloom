@@ -48,6 +48,10 @@ public final class NavigationGameTests {
     public static void nativeLocomotionContinuesBetweenBudgetedStatusPolls(GameTestHelper helper) {
         helper.onEachTick(walkStep(helper,helper.absolutePos(new BlockPos(1,1,1)),() -> {},false,false,100));
     }
+    @GameTest(template="identity_empty",batch="stage10_navigation_container",timeoutTicks=700)
+    public static void cardinalRouteReachesGoalBesideContainerCorner(GameTestHelper helper) {
+        helper.onEachTick(walkStep(helper,helper.absolutePos(new BlockPos(1,1,1)),() -> {},false,false,1,true));
+    }
     @GameTest(template="identity_empty",batch="stage06_navigation_occupied",timeoutTicks=700)
     public static void routeDetoursAroundStationaryPhysicalResident(GameTestHelper helper) {
         BlockPos start=helper.absolutePos(new BlockPos(1,1,1));
@@ -103,6 +107,9 @@ public final class NavigationGameTests {
         return walkStep(helper,start,releaseFixture,raised,waterBarrier,1);
     }
     private static Runnable walkStep(GameTestHelper helper,BlockPos start,Runnable releaseFixture,boolean raised,boolean waterBarrier,int pollingInterval) {
+        return walkStep(helper,start,releaseFixture,raised,waterBarrier,pollingInterval,false);
+    }
+    private static Runnable walkStep(GameTestHelper helper,BlockPos start,Runnable releaseFixture,boolean raised,boolean waterBarrier,int pollingInterval,boolean containerCorner) {
         var level=helper.getLevel();
         BlockPos target = start.offset(7, 0, 0);
         for (int x = -2; x <= 10; x++) for (int z = -2; z <= 2; z++) {
@@ -110,6 +117,7 @@ public final class NavigationGameTests {
             level.setBlockAndUpdate(feet.below(), Blocks.STONE.defaultBlockState());
             for (int y = 0; y < 3; y++) level.setBlockAndUpdate(feet.above(y), Blocks.AIR.defaultBlockState());
         }
+        if(containerCorner) for(int x=3;x<=6;x++) level.setBlockAndUpdate(start.offset(x,0,0),Blocks.BARREL.defaultBlockState());
         if (raised) for (int x = 3; x <= 4; x++) for (int z = -18; z <= 18; z++)
             level.setBlockAndUpdate(start.offset(x, 0, z), Blocks.STONE.defaultBlockState());
         if (waterBarrier) for (int x = 3; x <= 4; x++) for (int z = -18; z <= 18; z++)
@@ -168,6 +176,7 @@ public final class NavigationGameTests {
             } else if (phase[0] == 2 && arrival[0].state()==WorkOrder.State.COMPLETED) {
                 helper.assertTrue(entity.position().distanceToSqr(target.getX()+0.5,target.getY(),target.getZ()+0.5)<=1.1,"Logical arrival lacks physical target");
                 if (raised) helper.assertTrue(observedRise[0] && Math.abs(entity.getY()-start.getY())<0.5,"Route bypassed required physical rise/drop");
+                if(containerCorner) helper.assertTrue(entity.distanceToSqr(target.getX()+0.5,target.getY(),target.getZ()+0.5)<=0.01,"Corner route did not reach exact supported goal");
                 core.commands().updateCitizenAdmission(citizen,CitizenRecord.Admission.INACTIVE);
                 long before = core.registry().citizen(citizen).activeTimeTicks();
                 float health = entity.getHealth(); entity.hurt(level.damageSources().generic(),2.0F);

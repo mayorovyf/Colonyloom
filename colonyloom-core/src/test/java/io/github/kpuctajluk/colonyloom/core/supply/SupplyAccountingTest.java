@@ -26,6 +26,11 @@ final class SupplyAccountingTest {
             registry.admission().updateLimits(limits);
             registry.addColony(new ColonyRuntime(COLONY, "supply", new Territory("minecraft:overworld", 0, 0, 31, 31), OWNER, Map.of(), 0, 0, false, null, false));
             registry.storage().register(COLONY, pos(0), "warehouse", List.of(slot(0).storage()), List.of(slot(0), slot(1), slot(2)), List.of(pos(0)));
+            var workshopStorage = new StorageId("minecraft:overworld", id(400), 0);
+            var registration = registry.storage().register(COLONY, pos(4), "workshop", List.of(workshopStorage), List.of(new StockRegion(workshopStorage,0),new StockRegion(workshopStorage,1)), List.of(pos(4)));
+            var workshop = registry.storage().registerWorkshop(COLONY,pos(5),registration.id());
+            registry.addCitizen(new io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord(id(401),COLONY,id(402),1,null,workshop.id(),null,"colonyloom:carpenter",Map.of(),Map.of("food",20),io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Lifecycle.ALIVE,io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Admission.ACTIVE,io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Readiness.READY,0,Map.of("food",1200L),pos(5),0),proposed->{});
+            registry.bindings().observe(id(401),id(402),1);
         }
         void stock(int slot, ItemDescriptor item, long count) { registry.storage().index().observe(slot(slot), item, count, 1); }
         Demand request(long id, long quantity, Demand.GoalKind kind, Lane lane) { return supply.request(id(id), COLONY, OWNER, new ItemMatcher(X.itemId(), null), quantity, kind, pos(2), lane, 10, 1); }
@@ -228,6 +233,246 @@ final class SupplyAccountingTest {
         assertTrue(denied.supply.productionOrders().isEmpty()); assertTrue(denied.supply.shares().isEmpty()); assertEquals(0, goal.snapshot().covered());
         assertEquals(0, denied.registry.admission().used(Resource.DELIVERIES_AND_PRODUCTION_ORDERS));
     }
+    private static StockRegion workshopSlot(int index) { return new StockRegion(new StorageId("minecraft:overworld",id(400),0),index); }
+    private static void begin(Fixture f, UUID productionId) {
+        var p=f.supply.production(productionId); var board=f.registry.workBoard();
+        var work=board.createProduction(id(450),COLONY,p.equipmentPosition(),p.recipe().professionId(),0,Lane.NORMAL);
+        f.supply.assignProductionWork(p.id(),work.id()); board.transition(work.id(),io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.READY,io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.NONE,"production");
+        assertTrue(board.assign(work.id(),id(401))); board.transition(work.id(),io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.RUNNING,io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.NONE,"production");
+        f.supply.startProduction(p.id(),id(401),work.id());
+    }
+    private static Fixture fragmentedProductionInputs(int distinctSlots) {
+        Fixture f = new Fixture();
+        var slots = java.util.stream.IntStream.range(0, 17).mapToObj(SupplyAccountingTest::workshopSlot).toList();
+        f.registry.storage().register(COLONY, pos(4), "workshop", List.of(workshopSlot(0).storage()), slots, List.of(pos(4)));
+        var recipe = RecipeDefinition.create("colonyloom:fragmented", 1, "colonyloom:carpenter", "minecraft:crafting_table",
+                List.of(new RecipeDefinition.Ingredient(new ItemMatcher(Y.itemId(), null), 16)), X, 1, 20);
+        var root = f.request(10, 1, Demand.GoalKind.CONSUMPTION, Lane.NORMAL);
+        var production = f.supply.promiseProduction(root.id(), recipe, 1);
+        var child = f.supply.ingredientDemand(production, 0, 16, 1);
+        for (int index = 0; index < 17; index++) {
+            int count = index < distinctSlots ? (index == 0 ? 17 - distinctSlots : 1) : 0;
+            f.registry.storage().index().observe(workshopSlot(index), count == 0 ? null : Y, count, 1);
+            if (count > 0) f.supply.allocateStock(child.id(), workshopSlot(index), Y, count, 1);
+        }
+        return f;
+    }
+    @Test void sixteenDistinctInputSlotsCannotBindOrStartAndRetainAllocatedProperty() {
+        Fixture f = fragmentedProductionInputs(16);
+        var production = f.supply.productionOrders().getFirst();
+        var child = f.supply.ingredientDemand(production, 0, 16, 1);
+        var before = f.supply.snapshot();
+        var allocations = f.registry.storage().allocations().entries();
+        var observations = java.util.stream.IntStream.range(0, 17)
+                .mapToObj(index -> f.registry.storage().index().observation(workshopSlot(index))).toList();
+        assertEquals(16, child.snapshot().allocated());
+        assertEquals(16, allocations.size());
+        assertTrue(f.supply.completeProductionKit(production.id()).isEmpty());
+        var board = f.registry.workBoard();
+        var work = board.createProduction(id(450), COLONY, production.equipmentPosition(), production.recipe().professionId(), 0, Lane.NORMAL);
+        assertThrows(IllegalStateException.class, () -> f.supply.assignProductionWork(production.id(), work.id()));
+        assertThrows(IllegalStateException.class, () -> f.supply.startProduction(production.id(), id(401), work.id()));
+        assertNull(work.assignee());
+        assertNull(f.registry.citizen(id(401)).assignedWorkId());
+        assertFalse(f.supply.production(production.id()).batchStarted());
+        assertEquals(before, f.supply.snapshot());
+        assertEquals(allocations, f.registry.storage().allocations().entries());
+        assertEquals(observations, java.util.stream.IntStream.range(0, 17)
+                .mapToObj(index -> f.registry.storage().index().observation(workshopSlot(index))).toList());
+    }
+    @Test void fifteenDistinctInputSlotsLeaveRoomForOneOutputAndCompleteBatch() {
+        Fixture f = fragmentedProductionInputs(15);
+        var production = f.supply.productionOrders().getFirst();
+        var child = f.supply.ingredientDemand(production, 0, 16, 1);
+        var kit = f.supply.completeProductionKit(production.id());
+        assertEquals(15, kit.stream().map(SupplyRegistry.InputPortion::slot).distinct().count());
+        assertEquals(16, kit.stream().mapToInt(SupplyRegistry.InputPortion::count).sum());
+        begin(f, production.id());
+        f.supply.advanceProduction(production.id(), 20);
+        try (var prepared = f.supply.prepareProduction(production.id(), List.of(new SupplyRegistry.OutputPortion(workshopSlot(15), 1)), 1)) {
+            assertTrue(prepared.unchanged());
+            f.registry.storage().index().observe(workshopSlot(15), X, 1, 1);
+            prepared.commit();
+        }
+        for (int index = 0; index < 15; index++) f.registry.storage().index().observe(workshopSlot(index), null, 0, 1);
+        f.supply.reconcile();
+        assertEquals(16, child.snapshot().fulfilled());
+        assertEquals(0, child.snapshot().allocated());
+        assertEquals(1, f.supply.production(production.id()).completedBatches());
+        assertEquals(1, f.registry.storage().index().observation(workshopSlot(15)).count());
+        assertEquals(X, f.registry.storage().index().observation(workshopSlot(15)).item());
+        assertEquals(0, f.registry.storage().index().free(workshopSlot(15), 1));
+        assertEquals(1, f.supply.demand(id(10)).snapshot().covered());
+        assertTrue(f.registry.storage().allocations().entries().isEmpty());
+    }
+    @Test void sharedStartedBatchSurvivesCancellationAndCommitsOnePhysicalOutput() {
+        Fixture f=new Fixture(); var a=f.request(10,3,Demand.GoalKind.CONSUMPTION,Lane.NORMAL); var b=f.request(11,1,Demand.GoalKind.CONSUMPTION,Lane.NORMAL);
+        var p=f.supply.promiseProduction(a.id(),f.recipe(4),1); assertTrue(f.supply.sharedOutput(b.id()));
+        var child=f.supply.ingredientDemand(p,0,1,1); f.registry.storage().index().observe(workshopSlot(0),Y,1,1); f.registry.storage().index().observe(workshopSlot(1),null,0,1);
+        f.supply.allocateStock(child.id(),workshopSlot(0),Y,1,1); begin(f,p.id()); f.supply.advanceProduction(p.id(),7);
+        assertEquals(13,f.supply.production(p.id()).remainingActiveTicks()); f.supply.cancel(a.id());
+        assertEquals(1,f.supply.production(p.id()).batches()); assertTrue(f.supply.production(p.id()).batchStarted()); assertEquals(1,b.snapshot().covered()); assertEquals(1,child.snapshot().allocated());
+        f.supply.advanceProduction(p.id(),13);
+        try(var prepared=f.supply.prepareProduction(p.id(),List.of(new SupplyRegistry.OutputPortion(workshopSlot(1),4)),1)) {
+            assertTrue(prepared.unchanged()); f.registry.storage().index().observe(workshopSlot(1),X,4,1); prepared.commit();
+            assertThrows(IllegalStateException.class,prepared::commit);
+        }
+        f.registry.storage().index().observe(workshopSlot(0),null,0,1); f.supply.reconcile();
+        assertEquals(1,child.snapshot().fulfilled()); assertEquals(0,child.snapshot().allocated()); assertEquals(1,b.snapshot().covered());
+        assertEquals(0,f.registry.storage().index().free(workshopSlot(1),1)); assertEquals(1,f.supply.production(p.id()).completedBatches()); assertEquals(0,f.supply.production(p.id()).batches());
+        var surplus=f.supply.demands().stream().filter(d -> f.supply.productionSurplus(d.id())).findFirst().orElseThrow();
+        assertEquals(3,surplus.snapshot().covered()); assertEquals(0,surplus.snapshot().allocated());
+        var reserved=f.supply.demandShares(surplus.id()).getFirst(); var delivery=f.supply.routeReservedStock(reserved.id());
+        assertEquals(pos(0),delivery.destination()); assertThrows(IllegalStateException.class,()->f.supply.cancel(surplus.id()));
+        assertThrows(IllegalStateException.class,()->f.supply.release(reserved.id()));
+        var saved=f.supply.snapshot(); var storage=f.registry.storage().snapshot(); var replacement=new AdmissionLedger(SimulationLimits.development(),()->{});
+        try(var restored=f.supply.prepareRestore(saved,storage,replacement,f.registry.colonies())) { restored.commit(); }
+        assertEquals(1,f.supply.demand(b.id()).snapshot().covered()); assertEquals(3,f.supply.demand(surplus.id()).snapshot().covered());
+        f.pickup(delivery,3); f.deliver(delivery,3);
+        assertEquals(1,f.registry.storage().index().observation(workshopSlot(1)).count());
+        assertEquals(3,f.registry.storage().index().free(slot(2),1)); assertEquals(0,f.supply.demand(surplus.id()).snapshot().covered());
+        assertEquals(3,f.supply.demand(surplus.id()).snapshot().fulfilled()); assertEquals(3,f.supply.demand(surplus.id()).snapshot().deliveredTotal());
+        assertEquals(1,f.supply.demand(b.id()).snapshot().covered()); assertEquals(DeliveryOrder.State.COMPLETED,f.supply.delivery(delivery.id()).state());
+    }
+    static Fixture producedFixture(long first, long second) { return producedFixture(first, second, false); }
+    static Fixture producedFixture(long first, long second, boolean local) {
+        Fixture f = new Fixture(); var a = f.supply.request(id(10), COLONY, OWNER, new ItemMatcher(X.itemId(), null), first,
+                Demand.GoalKind.CONSUMPTION, local ? pos(4) : pos(2), Lane.NORMAL, 10, 1);
+        var p = f.supply.promiseProduction(a.id(), f.recipe(first + second), 1);
+        if (second > 0) { var b = f.request(11, second, Demand.GoalKind.CONSUMPTION, Lane.NORMAL); assertTrue(f.supply.sharedOutput(b.id())); }
+        var child = f.supply.ingredientDemand(p, 0, 1, 1);
+        f.registry.storage().index().observe(workshopSlot(0), Y, 1, 1); f.registry.storage().index().observe(workshopSlot(1), null, 0, 1);
+        f.supply.allocateStock(child.id(), workshopSlot(0), Y, 1, 1); begin(f, p.id()); f.supply.advanceProduction(p.id(), 20);
+        try (var prepared = f.supply.prepareProduction(p.id(), List.of(new SupplyRegistry.OutputPortion(workshopSlot(1), Math.toIntExact(first + second))), 1)) {
+            f.registry.storage().index().observe(workshopSlot(1), X, first + second, 1); prepared.commit();
+        }
+        f.registry.storage().index().observe(workshopSlot(0), null, 0, 1); f.supply.reconcile(); return f;
+    }
+    static Demand surplus(Fixture f) { return f.supply.demands().stream().filter(d -> f.supply.productionSurplus(d.id())).findFirst().orElseThrow(); }
+    static void restoreAccounting(Fixture f) {
+        var saved = f.supply.snapshot(); var storage = f.registry.storage().snapshot();
+        try (var restore = f.supply.prepareRestore(saved, storage, new AdmissionLedger(SimulationLimits.development(), () -> {}), f.registry.colonies())) { restore.commit(); }
+        assertEquals(saved, f.supply.snapshot()); assertEquals(storage, f.registry.storage().snapshot());
+    }
+    @Test void cancellationAfterCraftReownsOnlyReleasedProducedShareUntilWarehouseHandoff() {
+        Fixture f = producedFixture(3, 1); UUID producer = f.supply.productionOrders().getFirst().id();
+        var sibling = f.supply.demandShares(id(11)).getFirst(); var original = f.supply.demandShares(id(10)).getFirst();
+        assertEquals(producer, original.productionOrderId()); assertNull(original.sourceOrderId());
+        f.registry.storage().index().unknown(workshopSlot(1)); f.supply.cancel(id(10));
+        assertEquals(Demand.Status.CANCELLED, f.supply.demand(id(10)).snapshot().status()); assertEquals(0, f.supply.demand(id(10)).snapshot().fulfilled());
+        assertEquals(sibling, f.supply.demandShares(id(11)).getFirst()); assertEquals(0, f.supply.demand(id(10)).snapshot().covered());
+        var goal = surplus(f); var owned = f.supply.demandShares(goal.id()).getFirst();
+        assertEquals(original.id(), owned.id()); assertEquals(producer, owned.productionOrderId()); assertEquals(3, goal.snapshot().covered());
+        assertEquals(goal.id(), f.registry.storage().reservations().get(owned.obligationId()).ownerId()); assertEquals(4, f.registry.storage().obligated(workshopSlot(1)));
+        restoreAccounting(f); f.registry.storage().index().observe(workshopSlot(1), X, 4, 1);
+        var route = f.supply.routeReservedStock(owned.id()); f.pickup(route, 3); f.deliver(route, 3);
+        assertEquals(0, f.supply.demand(id(10)).snapshot().fulfilled()); assertEquals(3, f.supply.demand(goal.id()).snapshot().fulfilled());
+        assertEquals(1, f.registry.storage().obligated(workshopSlot(1))); assertEquals(3, f.registry.storage().index().free(slot(2), 1));
+    }
+    @Test void producedReductionSplitAdmissionFailuresLeaveExactOriginalAccounting() {
+        for (var resource : List.of(Resource.DEMANDS, Resource.COVERAGE_SHARES, Resource.RESERVATIONS_AND_ALLOCATIONS)) {
+            Fixture f = producedFixture(4, 1); var saved = f.supply.snapshot(); var storage = f.registry.storage().snapshot();
+            var used = f.registry.admission().used(resource);
+            f.registry.admission().updateLimits(SimulationLimits.development().withResource(resource, used));
+            assertThrows(AdmissionLedger.AdmissionException.class, () -> f.supply.reduceRequired(id(10), 2), resource.name());
+            assertEquals(saved, f.supply.snapshot()); assertEquals(storage, f.registry.storage().snapshot()); assertEquals(used, f.registry.admission().used(resource));
+            f.registry.admission().updateLimits(SimulationLimits.development()); f.supply.reduceRequired(id(10), 2);
+            assertEquals(2, f.supply.demand(id(10)).snapshot().covered()); assertEquals(2, surplus(f).snapshot().covered());
+            assertEquals(1, f.supply.demand(id(11)).snapshot().covered()); assertEquals(5, f.registry.storage().obligated(workshopSlot(1))); restoreAccounting(f);
+        }
+        Fixture cancelled = producedFixture(4, 0); var before = cancelled.supply.snapshot(); var stock = cancelled.registry.storage().snapshot();
+        cancelled.registry.admission().updateLimits(SimulationLimits.development().withResource(Resource.DEMANDS, cancelled.registry.admission().used(Resource.DEMANDS)));
+        assertThrows(AdmissionLedger.AdmissionException.class, () -> cancelled.supply.cancel(id(10)));
+        assertEquals(before, cancelled.supply.snapshot()); assertEquals(stock, cancelled.registry.storage().snapshot());
+    }
+    @Test void deliveredMovedAndConsumedSharesKeepProvenanceForReleasedRemainder() {
+        Fixture f = producedFixture(4, 0); UUID producer = f.supply.productionOrders().getFirst().id();
+        var route = f.supply.routeReservedStock(f.supply.demandShares(id(10)).getFirst().id()); f.pickup(route, 4); f.deliver(route, 4);
+        var allocation = f.supply.demandShares(id(10)).getFirst(); assertEquals(producer, allocation.productionOrderId()); f.stock(0, null, 0);
+        try (var move = f.supply.prepareAllocationMove(allocation.id(), slot(0), 2, 1)) { f.stock(0, X, 2); move.commit(2); f.stock(2, X, 2); }
+        for (var share : f.supply.demandShares(id(10))) assertEquals(producer, share.productionOrderId());
+        var moved = f.supply.demandShares(id(10)).stream().filter(s -> slot(0).equals(s.slot())).findFirst().orElseThrow();
+        f.supply.fulfillConsumption(moved.id(), 1); f.stock(0, X, 1); f.supply.cancel(id(10));
+        assertEquals(1, f.supply.demand(id(10)).snapshot().fulfilled()); assertEquals(0, f.supply.demand(id(10)).snapshot().allocated());
+        assertEquals(3, f.supply.demands().stream().filter(d -> f.supply.productionSurplus(d.id())).mapToLong(d -> d.snapshot().covered()).sum());
+        assertEquals(1, f.registry.storage().obligated(slot(0))); assertEquals(2, f.registry.storage().obligated(slot(2)));
+        for (var share : f.supply.shares()) if (share.item().equals(X)) assertEquals(producer, share.productionOrderId()); restoreAccounting(f);
+    }
+    @Test void cancelledProducedCargoRetainsSurplusUntilActualSafeSinkAndRestoresExactly() {
+        Fixture f = producedFixture(4, 0); var route = f.supply.routeReservedStock(f.supply.demandShares(id(10)).getFirst().id()); f.pickup(route, 4);
+        f.supply.cancel(id(10)); var goal = surplus(f); var cargo = f.cargo(route);
+        assertEquals(goal.id(), cargo.demandId()); assertEquals(4, goal.snapshot().covered()); assertEquals(0, f.supply.demand(id(10)).snapshot().covered());
+        assertEquals(DeliveryOrder.State.RETURNING, f.supply.delivery(route.id()).state()); restoreAccounting(f);
+        assertThrows(IllegalArgumentException.class, () -> f.supply.prepareReturn(cargo.id(), workshopSlot(1), 4, 1));
+        f.stock(2, null, 0); f.move(f.supply.prepareReturn(cargo.id(), slot(2), 2, 1), 2);
+        assertEquals(DeliveryOrder.State.RETURNING, f.supply.delivery(route.id()).state()); assertEquals(2, f.supply.demand(goal.id()).snapshot().covered());
+        assertEquals(2, f.supply.demand(goal.id()).snapshot().fulfilled()); restoreAccounting(f);
+        f.move(f.supply.prepareReturn(f.cargo(route).id(), slot(2), 2, 1), 2);
+        assertEquals(DeliveryOrder.State.RETURNED, f.supply.delivery(route.id()).state()); assertEquals(4, f.supply.demand(goal.id()).snapshot().fulfilled());
+        assertEquals(0, f.supply.demand(id(10)).snapshot().fulfilled()); assertEquals(0, f.supply.demand(id(10)).snapshot().deliveredTotal());
+        assertEquals(4, f.registry.storage().index().free(slot(2), 1)); restoreAccounting(f);
+    }
+    @Test void localProducedAllocationAndPartialCargoReductionRetainProperty() {
+        Fixture local = producedFixture(4, 0, true); var allocation = local.supply.demandShares(id(10)).getFirst();
+        assertEquals(CoverageShare.Stage.ALLOCATED, allocation.stage()); assertNotNull(allocation.productionOrderId());
+        local.supply.cancel(id(10)); var released = local.supply.demandShares(surplus(local).id()).getFirst();
+        assertEquals(CoverageShare.Stage.RESERVED_STOCK, released.stage()); assertEquals(allocation.productionOrderId(), released.productionOrderId());
+        assertEquals(4, local.registry.storage().obligated(workshopSlot(1))); assertEquals(0, local.registry.storage().index().free(workshopSlot(1), 1)); restoreAccounting(local);
+        Fixture transit = producedFixture(4, 1); var sibling = transit.supply.demandShares(id(11)).getFirst();
+        var route = transit.supply.routeReservedStock(transit.supply.demandShares(id(10)).getFirst().id()); transit.pickup(route, 4);
+        transit.supply.reduceRequired(id(10), 2); var goal = surplus(transit);
+        assertEquals(2, transit.supply.demand(id(10)).snapshot().covered()); assertEquals(2, goal.snapshot().covered());
+        assertEquals(sibling, transit.supply.demandShares(id(11)).getFirst()); assertEquals(4, transit.registry.storage().obligated(slot(1))); restoreAccounting(transit);
+        var surplusCargo = transit.supply.demandShares(goal.id()).getFirst(); transit.stock(2, null, 0);
+        transit.move(transit.supply.prepareReturn(surplusCargo.id(), slot(2), 2, 1), 2);
+        assertEquals(0, transit.supply.demand(id(10)).snapshot().fulfilled()); assertEquals(2, transit.supply.demand(id(10)).snapshot().covered());
+        transit.move(transit.supply.prepareReturn(transit.cargo(route).id(), slot(2), 2, 1), 2);
+        assertEquals(2, transit.supply.demand(id(10)).snapshot().covered()); assertEquals(2, transit.registry.storage().obligated(slot(2)));
+        assertEquals(2, transit.supply.demand(goal.id()).snapshot().fulfilled()); assertNull(transit.supply.demandShares(id(10)).getFirst().sourceOrderId()); restoreAccounting(transit);
+    }
+
+
+    @Test void queuedCancellationShrinksSharedOrderWithoutDeletingSibling() {
+        Fixture f=new Fixture(); var a=f.request(10,4,Demand.GoalKind.CONSUMPTION,Lane.NORMAL); var b=f.request(11,4,Demand.GoalKind.CONSUMPTION,Lane.NORMAL);
+        var p=f.supply.promiseProduction(a.id(),f.recipe(4),1); var shared=f.supply.promiseProduction(b.id(),f.recipe(4),1);
+        assertEquals(p.id(),shared.id()); assertEquals(2,shared.batches()); f.supply.cancel(a.id());
+        assertEquals(1,f.supply.production(p.id()).batches()); assertEquals(4,b.snapshot().covered()); assertEquals(1,f.supply.ingredientDemand(f.supply.production(p.id()),0,1,1).snapshot().required());
+    }
+    @Test void changedAllocatedKitRefusesPreparedCommitAndRestoreKeepsExactProgress() {
+        Fixture f=new Fixture(); var d=f.request(10,4,Demand.GoalKind.CONSUMPTION,Lane.NORMAL); var p=f.supply.promiseProduction(d.id(),f.recipe(4),1);
+        var child=f.supply.ingredientDemand(p,0,1,1); f.registry.storage().index().observe(workshopSlot(0),Y,1,1); f.registry.storage().index().observe(workshopSlot(1),null,0,1);
+        var allocation=f.supply.allocateStock(child.id(),workshopSlot(0),Y,1,1); begin(f,p.id()); f.supply.advanceProduction(p.id(),9);
+        var saved=f.supply.snapshot(); var storage=f.registry.storage().snapshot(); var replacement=new AdmissionLedger(SimulationLimits.development(),()->{});
+        try(var restored=f.supply.prepareRestore(saved,storage,replacement,f.registry.colonies())) { restored.commit(); }
+        assertEquals(11,f.supply.production(p.id()).remainingActiveTicks()); assertEquals(p.recipe(),f.supply.production(p.id()).recipe()); assertEquals(p.workshopId(),f.supply.production(p.id()).workshopId());
+        f.supply.advanceProduction(p.id(),11);
+        try(var prepared=f.supply.prepareProduction(p.id(),List.of(new SupplyRegistry.OutputPortion(workshopSlot(1),4)),1)) {
+            f.registry.storage().reduceObligations(Map.of(allocation.obligationId(),0L)); assertFalse(prepared.unchanged()); assertThrows(IllegalStateException.class,prepared::commit);
+        }
+        assertEquals(4,f.supply.demand(d.id()).snapshot().covered()); assertEquals(0,f.supply.production(p.id()).completedBatches());
+    }
+    @Test void localAllocationMoveNeverIncreasesHistoricalDeliveryAndPreAdmissionRefusesChangedShare() {
+        Fixture f=new Fixture(); f.stock(0,X,8); f.stock(2,null,0); var d=f.request(10,8,Demand.GoalKind.CONSUMPTION,Lane.NORMAL);
+        var allocation=f.supply.allocateStock(d.id(),slot(0),X,8,1); assertEquals(0,d.snapshot().deliveredTotal());
+        try(var move=f.supply.prepareAllocationMove(allocation.id(),slot(2),3,1)) { f.stock(2,X,3); move.commit(3); f.stock(0,X,5); }
+        assertEquals(8,d.snapshot().allocated()); assertEquals(0,d.snapshot().deliveredTotal());
+        var relocated=f.supply.demandShares(d.id()).stream().filter(s->slot(2).equals(s.slot())).findFirst().orElseThrow();
+        try(var consumption=f.supply.prepareConsumption(relocated.id(),1)) { f.supply.reduceRequired(d.id(),0); assertThrows(IllegalStateException.class,()->consumption.commit(1)); }
+        assertEquals(0,d.snapshot().fulfilled());
+    }
+    @Test void inactiveProducerCannotAdvanceAndCancellingAllStartedSharesStillCompletesSurplus() {
+        Fixture f=new Fixture(); var d=f.request(10,4,Demand.GoalKind.CONSUMPTION,Lane.NORMAL); var p=f.supply.promiseProduction(d.id(),f.recipe(4),1);
+        var child=f.supply.ingredientDemand(p,0,1,1); f.registry.storage().index().observe(workshopSlot(0),Y,1,1); f.registry.storage().index().observe(workshopSlot(1),null,0,1);
+        f.supply.allocateStock(child.id(),workshopSlot(0),Y,1,1); begin(f,p.id());
+        f.registry.bindings().unload(id(402)); assertThrows(IllegalStateException.class,()->f.supply.advanceProduction(p.id(),20)); assertEquals(20,f.supply.production(p.id()).remainingActiveTicks());
+        f.registry.bindings().observe(id(401),id(402),1); f.supply.cancel(d.id()); assertEquals(1,child.snapshot().allocated()); f.supply.advanceProduction(p.id(),20);
+        try(var prepared=f.supply.prepareProduction(p.id(),List.of(new SupplyRegistry.OutputPortion(workshopSlot(1),4)),1)) { f.registry.storage().index().observe(workshopSlot(1),X,4,1); prepared.commit(); }
+        assertEquals(0,f.registry.storage().index().free(workshopSlot(1),1)); assertEquals(1,child.snapshot().fulfilled()); assertEquals(0,d.snapshot().covered());
+        var surplus=f.supply.demands().stream().filter(goal -> f.supply.productionSurplus(goal.id())).findFirst().orElseThrow();
+        assertEquals(4,surplus.snapshot().covered()); var delivery=f.supply.routeReservedStock(f.supply.demandShares(surplus.id()).getFirst().id());
+        f.pickup(delivery,4); f.deliver(delivery,4); assertEquals(4,f.supply.demand(surplus.id()).snapshot().fulfilled());
+        assertEquals(0,f.registry.storage().index().observation(workshopSlot(1)).count());
+    }
     @Test void restoreRejectsMissingStagedObligationAndRollsBackAdmission() {
         Fixture f = new Fixture(); f.stock(0, X, 10); var d = f.request(10, 10, Demand.GoalKind.CONSUMPTION, Lane.NORMAL); f.supply.coverStock(d.id(), slot(0), X, 10, 1);
         var saved = f.supply.snapshot(); var replacement = new AdmissionLedger(SimulationLimits.development(), () -> {});
@@ -261,6 +506,6 @@ final class SupplyAccountingTest {
         var named = new ItemDescriptor(X.itemId(), new byte[]{1});
         assertTrue(new ItemMatcher(X.itemId(), null).matches(named)); assertFalse(new ItemMatcher(X.itemId(), X).matches(named));
         assertThrows(IllegalArgumentException.class, () -> new ItemMatcher(Y.itemId(), X));
-        assertThrows(IllegalArgumentException.class, () -> new CoverageShare(id(10), COLONY, id(11), null, null, null, X, 1, 0, CoverageShare.Stage.IN_TRANSIT));
+        assertThrows(IllegalArgumentException.class, () -> new CoverageShare(id(10), COLONY, id(11), null, null, null, null, X, 1, 0, CoverageShare.Stage.IN_TRANSIT));
     }
 }

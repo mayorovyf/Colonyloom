@@ -3,6 +3,9 @@ package io.github.kpuctajluk.colonyloom.minecraft.persistence;
 import io.github.kpuctajluk.colonyloom.core.persistence.RegistrySnapshot;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.nio.file.Files;
+import java.nio.file.FileAlreadyExistsException;
+import net.minecraft.nbt.Tag;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -41,10 +44,25 @@ public final class ColonySavedData extends SavedData {
         return new ColonySavedData(decoded.snapshot(), RegistryNbt.uuid(tag, "checkpointId"),
                 decoded.retained(), decoded.blockedColonies());
     }
-    /** Read-only bounded preflight of Minecraft's compressed {data: DTO, DataVersion} envelope. */
+    /** Bounded preflight; keeps the original compressed checkpoint before a supported migration. */
     public static ColonySavedData preflight(Path path, HolderLookup.Provider registries) throws IOException {
         try {
-            return load(RegistryNbt.compound(DurableNbt.read(path, DurableNbt.STATE_LIMIT), "data"), registries);
+            var tag = RegistryNbt.compound(DurableNbt.read(path, DurableNbt.STATE_LIMIT), "data");
+            var loaded = load(tag, registries);
+            var production = tag.getList("productionOrders", Tag.TAG_COMPOUND);
+            if (production.size() > io.github.kpuctajluk.colonyloom.core.supply.SupplyRegistry.MAX_ORDERS) throw new IllegalArgumentException("Production migration envelope exceeded");
+            for (int i = 0; i < production.size(); i++) {
+                var order = production.getCompound(i);
+                if (order.getString("typeId").equals(SupplyNbt.PRODUCTION) && order.getInt("schemaVersion") == 1) {
+                    Path directory = path.resolveSibling("colonyloom-backups");
+                    Files.createDirectories(directory);
+                    Path backup = directory.resolve(loaded.checkpointId() + "-v1.dat");
+                    try { Files.copy(path, backup); }
+                    catch (FileAlreadyExistsException exists) { if (Files.mismatch(path, backup) != -1) throw new IOException("Conflicting Colonyloom migration backup: " + backup, exists); }
+                    break;
+                }
+            }
+            return loaded;
         } catch (RuntimeException exception) {
             throw new IOException("Invalid Colonyloom state: " + path, exception);
         }

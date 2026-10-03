@@ -72,7 +72,7 @@ public final class ColonyloomMod {
         var executorEvent=NeoForge.EVENT_BUS.post(new ConstructionExecutorEvent(server,runtime));
         runtime.configureStorage(new NeoForgeStorageIdentity());
         runtime.configurePhysical(new NeoForgeChunkAccess(server, tickets),new NeoForgeItemInteraction(),executorEvent.observer(),
-                (context,principal,source,destination,amount) -> !NeoForge.EVENT_BUS.post(new StorageTransferEvent(server,context,principal,source,destination,amount)).isCanceled(),executorEvent.transferObserver());
+                (context,principal,source,destination,amount) -> !NeoForge.EVENT_BUS.post(new StorageTransferEvent(server,context,principal,source,destination,amount)).isCanceled(),executorEvent.transferObserver(),new NeoForgeRecipeProtection(server),executorEvent.recipeObserver());
         IdentityPlatform identity = new IdentityPlatform(server, runtime);
         identities.put(server, identity);
         identity.reconcileLoaded();

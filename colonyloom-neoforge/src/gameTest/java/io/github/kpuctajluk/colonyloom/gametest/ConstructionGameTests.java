@@ -41,6 +41,10 @@ public final class ConstructionGameTests {
     public static void cancellationDuringPhysicalEffectBlocksStaleCursorCommit(GameTestHelper helper) { run(helper,false,true); }
     @GameTest(template="identity_empty",batch="stage06_construction",timeoutTicks=600)
     public static void approachingFromTargetSideReachesClearPlacementWaypoint(GameTestHelper helper) { run(helper,false,false,true); }
+    @GameTest(template="identity_empty",batch="stage10_construction_retirement",timeoutTicks=600)
+    public static void checkpointRetiresLiveClosedConstructionWithoutChangingPlacedProperty(GameTestHelper helper) {
+        run(helper,true,false,false,true);
+    }
     private static void run(GameTestHelper helper,boolean cancel) {
         run(helper,cancel,false);
     }
@@ -48,6 +52,9 @@ public final class ConstructionGameTests {
         run(helper,cancel,staleCommit,false);
     }
     private static void run(GameTestHelper helper,boolean cancel,boolean staleCommit,boolean approachAcrossTarget) {
+        run(helper,cancel,staleCommit,approachAcrossTarget,false);
+    }
+    private static void run(GameTestHelper helper,boolean cancel,boolean staleCommit,boolean approachAcrossTarget,boolean retire) {
         var level=helper.getLevel(); var origin=helper.absolutePos(new BlockPos(1,1,1));
         for(int x=-6;x<=6;x++) for(int z=-5;z<=4;z++) {
             var pos=origin.offset(x,0,z); level.setBlockAndUpdate(pos.below(),Blocks.STONE.defaultBlockState());
@@ -69,7 +76,9 @@ public final class ConstructionGameTests {
         var placement=new BlockPlacementExecutor(level.getServer(),core.registry(),new NeoForgeItemInteraction(id -> id.equals(owner)?new GameProfile(owner,"ConstructionFixture"):null),(point,context) -> {
             if(staleCommit && point==BlockPlacementExecutor.FaultPoint.BEFORE_EFFECT_COMMIT) core.workBoard().cancel(core.registry().citizen(citizen).assignedWorkId());
         });
-        var service=new MinecraftConstructionService(core.registry(),controller,chunks,placement,() -> new UUID(1,2));
+        var storage=new io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService(level.getServer(),core.registry(),core.budgets(),new io.github.kpuctajluk.colonyloom.neoforge.NeoForgeStorageIdentity());
+        var transfer=new io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor(level.getServer(),core.registry(),storage,(context,principal,source,destination,amount) -> true,() -> new UUID(1,2),null);
+        var service=new MinecraftConstructionService(level.getServer(),core.registry(),controller,chunks,placement,() -> new UUID(1,2),storage,transfer);
         var navigation=new NavigationService(core.registry(),core.budgets(),chunks,new MinecraftNavigationBackend(level.getServer(),core.registry(),chunks,service),service); service.navigation(navigation);
         core.scheduler().beforeWork(tick -> { chunks.tick(tick); navigation.tick(tick); core.registry().targetClaims().tick(); });
         core.scheduler().physicalExecutor(WorkOrder.CONSTRUCTION,service);
@@ -78,6 +87,15 @@ public final class ConstructionGameTests {
             public void validateCitizenPosition(ColonyRuntime c,WorldPosition p) {}
             public void validateRecovery(ColonyRuntime c,java.util.List<CitizenRecord> cs,java.util.List<io.github.kpuctajluk.colonyloom.core.citizen.BindingRegistry.Observation> observations) {}
         });
+        if(approachAcrossTarget) {
+            boolean refused=false;
+            try {core.commands().build(context,UUID.randomUUID(),colony,"colonyloom:test_four_stairs",position(dim,origin),0);}
+            catch(IllegalArgumentException expected) {refused=true;}
+            helper.assertTrue(refused && core.workBoard().works().isEmpty() && core.registry().targetClaims().snapshots().isEmpty()
+                    && core.registry().construction().snapshots().isEmpty(),"Missing transformed construction buffer accepted partial site/claim/work");
+        }
+        var buffer=origin.west();level.setBlockAndUpdate(buffer,Blocks.BARREL.defaultBlockState());
+        storage.register(colony,position(dim,buffer),"construction");
         var work=core.commands().build(context,UUID.randomUUID(),colony,"colonyloom:test_four_stairs",position(dim,origin),0);
         int[] phase={0}; long[] stoppedAt={0}; double[] stoppedX={0};
         helper.onEachTick(() -> {
@@ -103,6 +121,37 @@ public final class ConstructionGameTests {
             helper.assertTrue(!cancel || Math.abs(entity.getX()-stoppedX[0])<1.0,"Cancelled construction kept walking");
             helper.assertTrue(core.registry().citizen(citizen).assignedWorkId()==null,"Terminal construction retained citizen assignment");
             helper.assertTrue(core.registry().effects().snapshots().size()==placed,"Physical effects count differs");
+            if(retire) {
+                phase[0]=2;
+                try {
+                    helper.assertTrue(work.terminal() && work.assignee()==null && site.closed(),"Retirement fixture is not closed and unassigned");
+                    helper.assertTrue(core.registry().targetClaims().snapshots().isEmpty()
+                            && core.workBoard().works().stream().noneMatch(value -> value.dependencies().contains(work.id())),"Closed construction retained claim or dependent");
+                    var states=java.util.stream.IntStream.range(0,4).mapToObj(x -> level.getBlockState(origin.offset(x,0,0))).toList();
+                    var property=entity.inventory().getItem(0).copy();
+                    var checkpoint=io.github.kpuctajluk.colonyloom.minecraft.persistence.ColonySavedData.empty(core.registry().snapshot());
+                    var encoded=checkpoint.save(new net.minecraft.nbt.CompoundTag(),level.registryAccess());
+                    var verified=io.github.kpuctajluk.colonyloom.minecraft.persistence.ColonySavedData.load(encoded,level.registryAccess()).snapshot();
+                    helper.assertTrue(verified.constructionSites().stream().anyMatch(value -> value.workId().equals(work.id()) && value.closed()),"Verified checkpoint lost closed construction");
+                    core.registry().effects().compactAfterVerifiedCheckpoint();
+                    helper.assertTrue(core.registry().effects().snapshots().stream().noneMatch(value -> work.id().equals(value.workId())),"Resolved construction witness survived checkpoint");
+                    core.registry().construction().compactAfterVerifiedCheckpoint();
+                    helper.assertTrue(core.registry().construction().site(work.id())==null && core.registry().construction().definitions().isEmpty()
+                            && core.workBoard().works().stream().noneMatch(value -> value.id().equals(work.id())),"Live checkpoint retained site, work or pin");
+                    helper.assertTrue(core.registry().targetClaims().snapshots().isEmpty()
+                            && chunks.footprint()==0 && chunks.blockTicking()==0 && chunks.entityTicking()==0,"Retired construction retained claim or chunk tickets");
+                    helper.assertTrue(core.registry().citizen(citizen).assignedWorkId()==null,"Retired construction retained assignment");
+                    helper.assertTrue(states.equals(java.util.stream.IntStream.range(0,4).mapToObj(x -> level.getBlockState(origin.offset(x,0,0))).toList())
+                            && ItemStack.matches(property,entity.inventory().getItem(0)),"Retirement changed placed world or remaining NPC property");
+                    var compacted=io.github.kpuctajluk.colonyloom.minecraft.persistence.ColonySavedData.empty(core.registry().snapshot());
+                    var restored=io.github.kpuctajluk.colonyloom.minecraft.persistence.ColonySavedData.load(compacted.save(new net.minecraft.nbt.CompoundTag(),level.registryAccess()),level.registryAccess()).snapshot();
+                    helper.assertTrue(restored.works().isEmpty() && restored.constructionSites().isEmpty() && restored.targetClaims().isEmpty(),"Compacted checkpoint retained dangling construction");
+                    helper.succeed();
+                } finally {
+                    navigation.close(); service.close(); chunks.close(); entity.remove(Entity.RemovalReason.DISCARDED); core.beginStopping(); core.stop();
+                }
+                return;
+            }
             System.out.println("COLONYLOOM_CONSTRUCTION_WALK cancel="+cancel+" placed="+placed+" materials="+entity.inventory().getItem(0).getCount()+" position="+entity.position());
             phase[0]=2; navigation.close(); service.close(); chunks.close(); entity.remove(Entity.RemovalReason.DISCARDED); core.beginStopping(); core.stop(); helper.succeed();
         });

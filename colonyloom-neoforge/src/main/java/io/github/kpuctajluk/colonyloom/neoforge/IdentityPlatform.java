@@ -295,7 +295,7 @@ final class IdentityPlatform {
             result.append("\nentity=").append(entity.getUUID()).append(" epoch=").append(entity.bindingEpoch()).append(" quarantine=").append(entity.isQuarantined());
             for(int slot=0;slot<9;slot++)result.append(" slot").append(slot).append('=').append(entity.inventory().getItem(slot));
         }
-        for(var effect:inspection.effects()) result.append("\neffect=").append(effect.operationId()).append(" state=").append(effect.state()).append(" actualBlock=").append(inspections.get(colony).physicalEffects().get(effect.operationId()));
+        for(var effect:inspection.effects()) result.append("\neffect=").append(effect.operationId()).append(" state=").append(effect.state()).append(" actualPhysical=").append(inspections.get(colony).physicalEffects().get(effect.operationId()));
         for(var site:inspection.constructionSites()) result.append("\nsite=").append(site.workId()).append(" cursor=").append(site.cursor()).append(" actualWorldDigest=").append(inspections.get(colony).physicalSites().get(site.workId()));
         return result.toString();
     }
@@ -351,6 +351,12 @@ final class IdentityPlatform {
     private Map<UUID,String> effectSnapshot(ColonyCommands.RecoveryInspection inspection) {
         Map<UUID,String> result=new LinkedHashMap<>();
         for(var effect:inspection.effects()) {
+            if(effect.craft()!=null) {
+                var craft=effect.craft();var physical=new StringBuilder("table=").append(observedBlock(craft.table()));
+                for(var input:craft.inputs())physical.append(" input=").append(input.slot()).append(':').append(observedTransferSlot(input.slot()));
+                for(var output:craft.outputs())physical.append(" output=").append(output.slot()).append(':').append(observedTransferSlot(output.slot()));
+                result.put(effect.operationId(),physical.toString());continue;
+            }
             if(effect.transfer()==null) {result.put(effect.operationId(),observedBlock(effect.target()));continue;}
             var transfer=effect.transfer();
             result.put(effect.operationId(),observedTransferSlot(transfer.source())+" -> "+observedTransferSlot(transfer.destination()));

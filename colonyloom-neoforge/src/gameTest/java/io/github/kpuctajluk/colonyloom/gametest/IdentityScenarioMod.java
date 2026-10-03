@@ -68,6 +68,7 @@ public final class IdentityScenarioMod {
         new PlatformScenario();
         new StorageScenario();
         new DeliveryScenario();
+        new ProductionScenario();
     }
 
     private void register(RegisterCommandsEvent event) {
@@ -183,6 +184,8 @@ public final class IdentityScenarioMod {
             var origin=new BlockPos(from[0]+4,physical.blockPosition().getY(),from[2]+7);
             for(int x=-2;x<=17;x++) for(int z=-1;z<=2;z++) { var pos=origin.offset(x,0,z); validateSite(source,pos); prepareFloor(source.getLevel(),pos); }
             for(int x=0;x<16;x++) require(source,source.getLevel().getBlockState(origin.offset(x,0,0)).isAir(),"build_fixture_target_clear",coordinates(origin.offset(x,0,0)));
+            source.getLevel().setBlock(origin.west(),Blocks.BARREL.defaultBlockState(),3);
+            success(source,"colonyloom storage register "+expected.getUUID("colony")+" "+coordinates(origin.west())+" construction");
             var build=new CompoundTag(); build.putUUID("colony",expected.getUUID("colony")); build.putIntArray("origin",new int[]{origin.getX(),origin.getY(),origin.getZ()});
             var work=uuid(success(source,"colonyloom build "+expected.getUUID("colony")+" colonyloom:stair_strip "+coordinates(origin)+" 0"),"work");
             build.putUUID("work",work); manifest.put("buildWork",build); writeManifest(source,manifest);

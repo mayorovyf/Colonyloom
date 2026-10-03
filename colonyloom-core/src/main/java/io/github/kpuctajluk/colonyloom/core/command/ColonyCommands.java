@@ -124,6 +124,7 @@ public final class ColonyCommands {
         if (!professions.containsKey(professionId)) throw new IllegalArgumentException("Unknown profession ID");
         if (professionId.equals(citizen.professionId())) return citizen;
         requireNoCargo(citizenId);
+        requireNoStartedProduction(citizenId);
         CitizenRecord changed = citizen.withProfession(professionId);
         ColonyRuntime changedColony = revised(colony, colony.ownerId(), colony.members(), false, false, null);
         registry.beforeMutation(); registry.updateCitizen(changed); registry.updateColony(changedColony);
@@ -136,6 +137,7 @@ public final class ColonyCommands {
         var workshop=registry.storage().workshops().stream().filter(value -> value.id().equals(workshopId)).findFirst().orElseThrow(() -> new IllegalArgumentException("Unknown registered workshop"));
         if(!workshop.colonyId().equals(citizen.colonyId())) throw new SecurityException("Foreign workshop");
         if(workshopId.equals(citizen.workplaceId())) return citizen;
+        requireNoStartedProduction(citizenId);
         CitizenRecord changed=new CitizenRecord(citizen.citizenId(),citizen.colonyId(),citizen.entityId(),citizen.bindingEpoch(),citizen.homeId(),workshopId,citizen.assignedWorkId(),citizen.professionId(),citizen.skills(),citizen.needs(),citizen.lifecycle(),citizen.admission(),citizen.readiness(),citizen.activeTimeTicks(),citizen.remainingTimers(),citizen.lastKnownPosition(),Math.incrementExact(citizen.revision()));
         ColonyRuntime changedColony=revised(colony,colony.ownerId(),colony.members(),false,false,null);
         registry.beforeMutation();registry.updateCitizen(changed);registry.updateColony(changedColony);return changed;
@@ -230,11 +232,17 @@ public final class ColonyCommands {
         CitizenRecord citizen = registry.citizen(citizenId);
         requireRank(context, citizen.colonyId(), MemberRank.OWNER);
         requireNoCargo(citizenId);
+        requireNoStartedProduction(citizenId);
         return finishLifecycle(citizenId, CitizenRecord.Lifecycle.REMOVED);
     }
     private void requireNoCargo(UUID citizenId) {
         for(var order:registry.supply().deliveries())if(citizenId.equals(order.citizenId())&&registry.supply().hasCargo(order.id()))
             throw new IllegalStateException("Return or unload bound cargo before changing citizen profession/removing citizen");
+    }
+    private void requireNoStartedProduction(UUID citizenId) {
+        for(var order:registry.supply().productionOrders())
+            if(!order.terminal() && order.batchStarted() && citizenId.equals(order.citizenId()))
+                throw new IllegalStateException("Finish the indivisible production batch before changing/removing its producer");
     }
     private CitizenRecord finishLifecycle(UUID citizenId, CitizenRecord.Lifecycle lifecycle) {
         CitizenRecord citizen = registry.citizen(citizenId);

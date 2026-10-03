@@ -137,10 +137,9 @@ final class StorageScenario {
         }
         if(run.step==7) {
             var supply=run.runtime.core().registry().supply();
-            if(supply.productionOrders().size()!=2 || supply.demands().stream().noneMatch(value -> value.snapshot().matcher().itemId().equals("minecraft:oak_log")&&value.snapshot().covered()==6))return;
-            if(run.ticks-run.changedAt<160)return;
-            require(server,supply.demand(id(201)).snapshot().covered()==16&&supply.demand(id(201)).snapshot().fulfilled()==0&&supply.productionOrders().stream().allMatch(value -> value.state()==io.github.kpuctajluk.colonyloom.core.production.ProductionOrder.State.PLANNED||value.state()==io.github.kpuctajluk.colonyloom.core.production.ProductionOrder.State.WAITING),"supply_repeated_real_chest_plan","stairs16 covered once; planks/stairs pending; actual logs6 reserved");
-            require(server,supply.productionOrders().size()==2&&supply.shares().stream().filter(value -> value.demandId().equals(id(201))).mapToLong(io.github.kpuctajluk.colonyloom.core.supply.CoverageShare::quantity).sum()==16,"supply_no_duplicate_coverage","160ticks repeated production planner");
+            if(supply.productionOrders().size()!=2||supply.productionOrders().stream().anyMatch(value -> !value.terminal()))return;
+            require(server,supply.demand(id(201)).snapshot().covered()==16&&supply.demand(id(201)).snapshot().fulfilled()==0,"supply_real_workshop_output","stairs16 covered once in physical workshop; absent courier never reports delivery");
+            require(server,supply.productionOrders().size()==2&&supply.shares().stream().filter(value -> value.demandId().equals(id(201))).mapToLong(io.github.kpuctajluk.colonyloom.core.supply.CoverageShare::quantity).sum()==16,"supply_no_duplicate_coverage","complete native production retains single16 coverage");
             run.manifest=new CompoundTag();run.manifest.putUUID("colony",run.colony);run.manifest.putUUID("oldChest",run.chestSlot.storage().identity());run.manifest.putUUID("oldBarrel",run.barrelSlot.storage().identity());
             NbtIo.writeCompressed(run.manifest,world(server).resolve(MANIFEST));
             command(server,run,"colonyloom storage stock "+run.colony);finish(server,run,"exercise_complete");
@@ -154,7 +153,7 @@ final class StorageScenario {
         require(server,!run.runtime.storage().read(new StockRegion(old,0)).ready(),"old_copy_never_revived",old.toString());
         require(server,run.runtime.core().registry().citizens(run.colony).getFirst().workplaceId().equals(stocks.workshops().getFirst().id()),"workplace_survives_restart","citizen references persisted workshop");
         var supply=run.runtime.core().registry().supply();
-        require(server,supply.demand(id(201)).snapshot().covered()==16&&supply.demand(id(201)).snapshot().fulfilled()==0&&supply.productionOrders().size()==2,"supply_pins_and_coverage_survive_restart","pending shared recipe snapshots preserve one coverage");
+        require(server,supply.demand(id(201)).snapshot().covered()==16&&supply.demand(id(201)).snapshot().fulfilled()==0&&supply.productionOrders().size()==2&&supply.productionOrders().stream().allMatch(value -> value.terminal()),"supply_pins_and_coverage_survive_restart","completed shared recipe snapshots preserve physical output coverage without delivery");
         command(server,run,"colonyloom storage stock "+run.colony);finish(server,run,"verify_complete");
     }
     private void stopped(ServerStoppedEvent event) {

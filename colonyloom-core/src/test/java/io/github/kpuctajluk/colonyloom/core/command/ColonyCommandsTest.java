@@ -257,6 +257,52 @@ final class ColonyCommandsTest {
         assertEquals(before, restored.registry().snapshot());
     }
 
+    @Test void begunBatchRejectsProducerCutoversUntilPhysicalCommit() {
+        var runtime=runtime();
+        runtime.configureCommands(() -> {},List.of(new ProfessionDefinition("colonyloom:builder",1,Set.of(),Set.of()),
+                new ProfessionDefinition("colonyloom:carpenter",1,Set.of("colonyloom:production"),Set.of("minecraft:crafting_table"))));
+        var colony=colony(runtime,0);var citizen=citizen(runtime,colony);var registry=runtime.registry();
+        var barrel=new WorldPosition("minecraft:overworld",4,64,4);var table=new WorldPosition("minecraft:overworld",5,64,4);
+        var id=new io.github.kpuctajluk.colonyloom.core.storage.StorageId(barrel.dimension(),UUID.randomUUID(),0);
+        var input=new io.github.kpuctajluk.colonyloom.core.storage.StockRegion(id,0);var output=new io.github.kpuctajluk.colonyloom.core.storage.StockRegion(id,1);
+        var registration=registry.storage().register(colony.colonyId(),barrel,"workshop",List.of(id),List.of(input,output),List.of(barrel));
+        var workshop=registry.storage().registerWorkshop(colony.colonyId(),table,registration.id());
+        var alternative=registry.storage().registerWorkshop(colony.colonyId(),new WorldPosition("minecraft:overworld",6,64,4),registration.id());
+        runtime.commands().assignProfession(context(owner,false),citizen.citizenId(),"colonyloom:carpenter");
+        runtime.commands().assignWorkplace(context(owner,false),citizen.citizenId(),workshop.id());
+        runtime.commands().updateCitizenReadiness(citizen.citizenId(),CitizenRecord.Readiness.READY);
+        var logs=new io.github.kpuctajluk.colonyloom.core.storage.ItemDescriptor("minecraft:oak_log",new byte[0]);
+        var planks=new io.github.kpuctajluk.colonyloom.core.storage.ItemDescriptor("minecraft:oak_planks",new byte[0]);
+        var matcher=new io.github.kpuctajluk.colonyloom.core.supply.ItemMatcher(planks.itemId(),planks);
+        var demand=registry.supply().request(UUID.randomUUID(),colony.colonyId(),owner,matcher,4,
+                io.github.kpuctajluk.colonyloom.core.supply.Demand.GoalKind.CONSUMPTION,barrel,
+                io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL,0,0);
+        var recipe=io.github.kpuctajluk.colonyloom.core.supply.RecipeDefinition.create("colonyloom:oak_planks",1,"colonyloom:carpenter","minecraft:crafting_table",
+                List.of(new io.github.kpuctajluk.colonyloom.core.supply.RecipeDefinition.Ingredient(new io.github.kpuctajluk.colonyloom.core.supply.ItemMatcher(logs.itemId(),logs),1)),planks,4,20);
+        var production=registry.supply().promiseProduction(demand.id(),recipe,1);var child=registry.supply().ingredientDemand(production,0,1,0);
+        registry.storage().index().observe(input,logs,1,0);registry.storage().index().observe(output,null,0,0);
+        registry.supply().allocateStock(child.id(),input,logs,1,0);
+        var work=registry.workBoard().createProduction(UUID.randomUUID(),colony.colonyId(),table,"colonyloom:carpenter",0,production.lane());
+        registry.supply().assignProductionWork(production.id(),work.id());
+        registry.workBoard().transition(work.id(),io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.READY,io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.NONE,"production");
+        assertTrue(registry.workBoard().assign(work.id(),citizen.citizenId()));
+        registry.workBoard().transition(work.id(),io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.RUNNING,io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.NONE,"production");
+        registry.supply().startProduction(production.id(),citizen.citizenId(),work.id());
+        var before=registry.snapshot();
+        assertThrows(IllegalStateException.class,() -> runtime.commands().assignProfession(context(owner,false),citizen.citizenId(),"colonyloom:builder"));
+        assertThrows(IllegalStateException.class,() -> runtime.commands().assignWorkplace(context(owner,false),citizen.citizenId(),alternative.id()));
+        assertThrows(IllegalStateException.class,() -> runtime.commands().removeCitizen(context(owner,false),citizen.citizenId()));
+        assertEquals(before,registry.snapshot());
+        registry.supply().advanceProduction(production.id(),20);
+        try(var prepared=registry.supply().prepareProduction(production.id(),List.of(new io.github.kpuctajluk.colonyloom.core.supply.SupplyRegistry.OutputPortion(output,4)),0)) {
+            registry.storage().index().observe(output,planks,4,0);prepared.commit();
+        }
+        registry.storage().index().observe(input,null,0,0);
+        runtime.commands().assignProfession(context(owner,false),citizen.citizenId(),"colonyloom:builder");
+        assertEquals("colonyloom:builder",registry.citizen(citizen.citizenId()).professionId());
+        assertEquals(4,demand.snapshot().allocated());assertEquals(1,child.snapshot().fulfilled());
+    }
+
     @Test
     void sessionGateFailureAndStoppingRejectCommandsBeforeLogicalOrPhysicalChanges() {
         ServerRuntime runtime = runtime(); ColonyRuntime colony = colony(runtime, 0); RegistrySnapshot before = runtime.registry().snapshot();

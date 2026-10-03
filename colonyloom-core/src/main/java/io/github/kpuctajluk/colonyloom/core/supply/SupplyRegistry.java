@@ -26,6 +26,7 @@ public final class SupplyRegistry {
     private final Map<UUID, Set<UUID>> orderShares = new HashMap<>(), demandShares = new HashMap<>();
     private final List<UUID> deliveryIds = new ArrayList<>();
     private final Map<UUID, Integer> deliveryOffsets = new HashMap<>();
+    private final List<UUID> productionIds = new ArrayList<>();
     private final LinkedHashSet<UUID> unroutedShares = new LinkedHashSet<>();
     private final LinkedHashSet<UUID> dirtyObligations = new LinkedHashSet<>();
     public SupplyRegistry(ColonyRegistry registry) {
@@ -67,6 +68,8 @@ public final class SupplyRegistry {
     public boolean hasDeliveryWork(UUID workId) { return deliveryForWork(workId) != null; }
     public int deliveryCount() { registry.requireOwner(); return deliveryIds.size(); }
     public DeliveryOrder deliveryAt(int offset) { registry.requireOwner(); return deliveries.get(deliveryIds.get(offset)); }
+    public int productionCount() { registry.requireOwner(); return productionIds.size(); }
+    public ProductionOrder productionAt(int offset) { registry.requireOwner(); return productions.get(productionIds.get(offset)); }
     public CoverageShare unroutedReservation() { registry.requireOwner(); return unroutedShares.isEmpty() ? null : shares.get(unroutedShares.iterator().next()); }
     private void addDelivery(DeliveryOrder order) {
         deliveries.put(order.id(), order); deliveryOffsets.put(order.id(), deliveryIds.size()); deliveryIds.add(order.id());
@@ -114,6 +117,31 @@ public final class SupplyRegistry {
         }
         return result;
     }
+    /** Self-owned delivery goals retain begun output until a physical safe-buffer transfer fulfils them. */
+    public boolean productionSurplus(UUID demandId) {
+        var d = demand(demandId).snapshot();
+        return d.goalKind() == Demand.GoalKind.DELIVERY && d.ownerId().equals(d.id());
+    }
+    public boolean surplusBuffer(UUID colonyId, StorageRegistry.Registration registration, String dimension) {
+        return registration.colonyId().equals(colonyId) && (registration.role().equals("warehouse") || registration.role().equals("return"))
+                && registration.address().dimension().equals(dimension) && registry.colony(colonyId).territory().contains(registration.address())
+                && registration.storages().stream().allMatch(id -> id.bindingEpoch() == 0 && !registry.storage().isRetired(id));
+    }
+    public void routeProductionSurplus(UUID demandId, WorldPosition destination) {
+        var d = demand(demandId).snapshot();
+        if (!productionSurplus(demandId) || registry.storage().registrations(d.colonyId()).stream()
+                .noneMatch(r -> r.address().equals(destination) && surplusBuffer(d.colonyId(), r, d.destination().dimension())))
+            throw new IllegalArgumentException("Surplus requires a registered local safe buffer");
+        if (d.destination().equals(destination)) return;
+        registry.beforeMutation();
+        demand(demandId).replace(new Demand.Snapshot(d.id(), d.colonyId(), d.ownerId(), d.matcher(), d.goalKind(), destination,
+                d.required(), d.fulfilled(), d.allocated(), d.covered(), d.deliveredTotal(), Math.incrementExact(d.revision()),
+                d.lane(), d.priority(), d.createdTick(), d.status(), d.sourceStorages()));
+        for (var order : List.copyOf(deliveries.values())) if (order.ownerDemandId().equals(demandId))
+            deliveries.put(order.id(), new DeliveryOrder(order.id(), order.colonyId(), demandId, order.source(), destination,
+                    order.item(), order.quantity(), order.transferred(), Math.incrementExact(order.revision()), order.citizenId(), order.workId(),
+                    order.state(), order.lane(), order.priority()));
+    }
     public void status(UUID id, Demand.Status status) {
         Demand d = demand(id); var s = d.snapshot(); Objects.requireNonNull(status);
         if (s.status() == status || s.status() == Demand.Status.CANCELLED || s.status() == Demand.Status.COMPLETED) return;
@@ -151,7 +179,7 @@ public final class SupplyRegistry {
         }
         active(s, item, quantity); unique(shareId); unique(obligationId); if (shareId.equals(obligationId)) throw new IllegalArgumentException("Duplicate coverage identity");
         if (shares.size() >= MAX_SHARES) throw new IllegalArgumentException("Coverage envelope exceeded");
-        CoverageShare share = new CoverageShare(shareId, s.colonyId(), demandId, null, obligationId, slot, item, quantity, 0, CoverageShare.Stage.RESERVED_STOCK);
+        CoverageShare share = new CoverageShare(shareId, s.colonyId(), demandId, null, null, obligationId, slot, item, quantity, 0, CoverageShare.Stage.RESERVED_STOCK);
         var next = state(s, s.required(), s.fulfilled(), s.allocated(), Math.addExact(s.covered(), quantity), s.deliveredTotal(), Demand.Status.ACTIVE);
         AdmissionLedger.Lease lease = admit(s.colonyId(), s.lane(), Resource.COVERAGE_SHARES);
         try { registry.storage().reserveAll(List.of(new ReservationLedger.Entry(obligationId, s.colonyId(), s.ownerId(), slot, item, quantity, 0, s.lane())), tick); }
@@ -168,17 +196,20 @@ public final class SupplyRegistry {
         try { reserveStock(shareId, demandId, obligationId, slot, item, quantity, tick); }
         catch (RuntimeException failure) { lease.close(); throw failure; }
         CoverageShare share = shares.get(shareId);
-        putShare(shareId, new CoverageShare(share.id(), share.colonyId(), share.demandId(), orderId, share.obligationId(), share.slot(), share.item(), share.quantity(), share.revision(), share.stage()));
+        putShare(shareId, new CoverageShare(share.id(), share.colonyId(), share.demandId(), orderId, share.productionOrderId(), share.obligationId(), share.slot(), share.item(), share.quantity(), share.revision(), share.stage()));
         addDelivery(order); leases.put(orderId, lease); return order;
     }
     public void coverProductionKit(UUID productionId, List<ReservationLedger.Entry> candidates, long tick) {
         registry.requireOwner(); ProductionOrder order = productions.get(productionId);
         if (order == null || candidates.isEmpty() || candidates.size() > 16) throw new IllegalArgumentException("Invalid production kit");
         List<Demand.Snapshot> children = new ArrayList<>();
-        for (int i = 0; i < order.recipe().ingredients().size(); i++) children.add(ingredientDemand(order, i, Math.multiplyExact(order.batches(), order.recipe().ingredients().get(i).count()), tick).snapshot());
+        for (int i = 0; i < order.recipe().ingredients().size(); i++) children.add(ingredientDemand(order, i, Math.multiplyExact(order.batches() + order.completedBatches(), order.recipe().ingredients().get(i).count()), tick).snapshot());
         for (var child : children) if (child.covered() != 0 || child.status() == Demand.Status.CANCELLED) throw new IllegalStateException("Production dependency not physically ready");
         children.sort(Comparator.comparing((Demand.Snapshot d) -> d.matcher().exact() == null));
-        Map<UUID, Long> remaining = new LinkedHashMap<>(); for (var child : children) remaining.put(child.id(), child.deficit());
+        Map<UUID, Long> remaining = new LinkedHashMap<>(); for (var child : children) {
+            long count = order.recipe().ingredients().stream().filter(i -> i.matcher().equals(child.matcher())).findFirst().orElseThrow().count();
+            remaining.put(child.id(), Math.max(0, count - child.allocated()));
+        }
         List<ReservationLedger.Entry> reservations = new ArrayList<>(); List<CoverageShare> proposed = new ArrayList<>(); List<DeliveryOrder> orders = new ArrayList<>();
         for (var candidate : candidates) {
             if (!candidate.colonyId().equals(order.colonyId())) throw new IllegalArgumentException("Foreign kit stock");
@@ -190,8 +221,9 @@ public final class SupplyRegistry {
                 unique(obligationId);
                 UUID deliveryId = fresh(), shareId = fresh();
                 reservations.add(new ReservationLedger.Entry(obligationId, order.colonyId(), child.ownerId(), candidate.slot(), candidate.item(), count, 0, child.lane()));
-                orders.add(new DeliveryOrder(deliveryId, order.colonyId(), child.id(), candidate.slot(), child.destination(), candidate.item(), count, 0, 0, null, null, DeliveryOrder.State.PLANNED, child.lane(), child.priority()));
-                proposed.add(new CoverageShare(shareId, order.colonyId(), child.id(), deliveryId, obligationId, candidate.slot(), candidate.item(), count, 0, CoverageShare.Stage.RESERVED_STOCK));
+                boolean local = localDestination(child, candidate.slot());
+                if (!local) orders.add(new DeliveryOrder(deliveryId, order.colonyId(), child.id(), candidate.slot(), child.destination(), candidate.item(), count, 0, 0, null, null, DeliveryOrder.State.PLANNED, child.lane(), child.priority()));
+                proposed.add(new CoverageShare(shareId, order.colonyId(), child.id(), local ? null : deliveryId, null, obligationId, candidate.slot(), candidate.item(), count, 0, CoverageShare.Stage.RESERVED_STOCK));
                 available -= count; remaining.put(child.id(), remaining.get(child.id()) - count);
             }
             if (available != 0) throw new IllegalArgumentException("Kit exceeds ingredient deficits");
@@ -208,19 +240,35 @@ public final class SupplyRegistry {
             registry.storage().reserveAll(reservations, tick);
         } catch (RuntimeException failure) { admitted.values().forEach(AdmissionLedger.Lease::close); throw failure; }
         leases.putAll(admitted); orders.forEach(this::addDelivery); proposed.forEach(s -> putShare(s.id(), s)); states.forEach((id, s) -> demand(id).replace(s));
+        for (var share : proposed) if (share.sourceOrderId() == null) allocateLocalReservation(share.id());
     }
     public ProductionOrder promiseProduction(UUID demandId, RecipeDefinition recipe, long batches) {
         var s = demand(demandId).snapshot(); long output = Math.multiplyExact(batches, recipe.outputCount()); Demand.quantity(output);
         long quantity = Math.min(output, s.deficit()); active(s, recipe.output(), quantity);
-        ProductionOrder order = new ProductionOrder(fresh(), s.colonyId(), demandId, recipe, batches, Math.multiplyExact(batches, recipe.activeTicks()), 0, null, null, ProductionOrder.State.PLANNED, s.lane(), s.priority());
-        CoverageShare share = new CoverageShare(fresh(), s.colonyId(), demandId, order.id(), null, null, recipe.output(), quantity, 0, CoverageShare.Stage.PROMISED_OUTPUT);
+        var workshop = selectWorkshop(s.colonyId(), recipe);
+        var registration = registry.storage().registrations().stream().filter(r -> r.id().equals(workshop.registrationId())).findFirst().orElseThrow();
+        if (registration.storages().size() != 1) throw new IllegalStateException("Production requires one canonical workshop barrel");
+        for (var existing : List.copyOf(productions.values())) if (!existing.terminal() && existing.recipe().equals(recipe) && existing.colonyId().equals(s.colonyId()) && existing.workshopId()!=null && existing.workshopId().equals(workshop.id()) && !dependsOn(demandId, existing.id())) {
+            long promised = 0; for (var share : orderShares(existing.id())) if (share.stage()==CoverageShare.Stage.PROMISED_OUTPUT) promised = Math.addExact(promised, share.quantity());
+            long remainingBatches = recipe.batchesFor(Math.addExact(promised, quantity));
+            if (shares.size() >= MAX_SHARES) throw new IllegalArgumentException("Coverage envelope exceeded");
+            var nextOrder = existing.update(Math.max(existing.batches(), remainingBatches), existing.remainingActiveTicks(), existing.completedBatches(), existing.batchStarted(), existing.workId(), existing.citizenId(), existing.state(), existing.lane(), existing.priority());
+            var promise = new CoverageShare(fresh(),s.colonyId(),demandId,existing.id(),existing.id(),null,null,recipe.output(),quantity,0,CoverageShare.Stage.PROMISED_OUTPUT);
+            var nextDemand = state(s,s.required(),s.fulfilled(),s.allocated(),Math.addExact(s.covered(),quantity),s.deliveredTotal(),s.status());
+            var states = new LinkedHashMap<UUID,Demand.Snapshot>();
+            for (int i=0;i<recipe.ingredients().size();i++) { var child=ingredientDemand(existing,i,Math.multiplyExact(existing.batches()+existing.completedBatches(),recipe.ingredients().get(i).count()),0).snapshot(); states.put(child.id(),state(child,Math.multiplyExact(nextOrder.batches()+nextOrder.completedBatches(),recipe.ingredients().get(i).count()),child.fulfilled(),child.allocated(),child.covered(),child.deliveredTotal(),Demand.Status.ACTIVE)); }
+            var lease=admit(s.colonyId(),s.lane(),Resource.COVERAGE_SHARES); try { registry.beforeMutation(); } catch(RuntimeException failure) { lease.close(); throw failure; }
+            productions.put(existing.id(),nextOrder); putShare(promise.id(),promise); leases.put(promise.id(),lease); demand(demandId).replace(nextDemand); states.forEach((id,state)->demand(id).replace(state)); recomputePriorities(); return production(existing.id());
+        }
+        ProductionOrder order = new ProductionOrder(fresh(), s.colonyId(), demandId, recipe, batches, recipe.activeTicks(), 0, null, null, ProductionOrder.State.PLANNED, s.lane(), s.priority(), workshop.id(), workshop.position(), registration.storages().getFirst(), 0, false);
+        CoverageShare share = new CoverageShare(fresh(), s.colonyId(), demandId, order.id(), order.id(), null, null, recipe.output(), quantity, 0, CoverageShare.Stage.PROMISED_OUTPUT);
         planProduction(order, List.of(share)); return order;
     }
     public void planProduction(ProductionOrder order, List<CoverageShare> promised) {
         registry.colony(order.colonyId()); unique(order.id());
         if (productions.size() + deliveries.size() >= MAX_ORDERS || shares.size() + promised.size() > MAX_SHARES || promised.isEmpty()) throw new IllegalArgumentException("Production envelope exceeded");
         var owner = demand(order.ownerDemandId()).snapshot();
-        if (!owner.colonyId().equals(order.colonyId()) || order.workId() != null || order.citizenId() != null) throw new IllegalArgumentException("Invalid planned production owner");
+        if (!owner.colonyId().equals(order.colonyId()) || order.workId() != null || order.citizenId() != null || !order.pinned() || !workshopAvailable(order) || order.batchStarted() || order.completedBatches()!=0) throw new IllegalArgumentException("Invalid planned production owner/pin");
         Map<UUID, CoverageShare> staged = new LinkedHashMap<>(shares); Set<UUID> ids = new HashSet<>(); ids.add(order.id());
         long output = 0; Map<UUID, Demand.Snapshot> changed = new LinkedHashMap<>();
         for (CoverageShare share : promised) {
@@ -239,7 +287,7 @@ public final class SupplyRegistry {
             unique(id); if (!ids.add(id)) throw new IllegalArgumentException("Ingredient identity collision");
             long quantity = Math.multiplyExact(order.batches(), ingredient.count());
             ingredients.add(new Demand(new Demand.Snapshot(id, order.colonyId(), order.id(), ingredient.matcher(), Demand.GoalKind.CONSUMPTION,
-                    owner.destination(), quantity, 0, 0, 0, 0, 0, order.lane(), order.priority(), owner.createdTick(), Demand.Status.ACTIVE, List.of())));
+                    workshopDestination(order), quantity, 0, 0, 0, 0, 0, order.lane(), order.priority(), owner.createdTick(), Demand.Status.ACTIVE, List.of())));
         }
         if (demands.size() + ingredients.size() > MAX_DEMANDS) throw new IllegalArgumentException("Ingredient demand envelope exceeded");
         Map<UUID, AdmissionLedger.Lease> admitted = new LinkedHashMap<>();
@@ -249,7 +297,7 @@ public final class SupplyRegistry {
             for (Demand ingredient : ingredients) admitted.put(ingredient.id(), admit(order.colonyId(), order.lane(), Resource.DEMANDS));
             registry.beforeMutation();
         } catch (RuntimeException failure) { admitted.values().forEach(AdmissionLedger.Lease::close); throw failure; }
-        productions.put(order.id(), order); promised.forEach(s -> putShare(s.id(), s)); leases.putAll(admitted); changed.forEach((id, value) -> demand(id).replace(value));
+        productions.put(order.id(), order); productionIds.add(order.id()); promised.forEach(s -> putShare(s.id(), s)); leases.putAll(admitted); changed.forEach((id, value) -> demand(id).replace(value));
         ingredients.forEach(d -> demands.put(d.id(), d));
         recomputePriorities();
     }
@@ -280,14 +328,18 @@ public final class SupplyRegistry {
     }
     public boolean sharedOutput(UUID demandId) { return coverExistingProduction(demandId, demand(demandId).deficit()); }
     public boolean coverExistingProduction(UUID demandId, long quantity) {
+        return coverExistingProduction(demandId,quantity,null);
+    }
+    public boolean coverExistingProduction(UUID demandId, long quantity, RecipeDefinition acceptedRecipe) {
         var s = demand(demandId).snapshot(); if (quantity <= 0 || quantity > s.deficit()) return false;
         for (ProductionOrder order : List.copyOf(productions.values())) {
-            if (order.state() == ProductionOrder.State.CANCELLED || s.goalKind() == Demand.GoalKind.DELIVERY) continue;
+            if (order.terminal() || s.goalKind() == Demand.GoalKind.DELIVERY) continue;
             if (!order.colonyId().equals(s.colonyId()) || !s.matcher().matches(order.recipe().output()) || dependsOn(s.id(), order.id())) continue;
-            long promised = 0; for (CoverageShare share : shares.values()) if (order.id().equals(share.sourceOrderId())) promised = Math.addExact(promised, share.quantity());
+            if (acceptedRecipe!=null && !acceptedRecipe.equals(order.recipe())) continue;
+            long promised = 0; for (CoverageShare share : orderShares(order.id())) if (share.stage() == CoverageShare.Stage.PROMISED_OUTPUT) promised = Math.addExact(promised, share.quantity());
             if (Math.multiplyExact(order.batches(), order.recipe().outputCount()) - promised < quantity) continue;
             if (shares.size() >= MAX_SHARES) throw new IllegalArgumentException("Coverage envelope exceeded");
-            CoverageShare share = new CoverageShare(fresh(), s.colonyId(), demandId, order.id(), null, null, order.recipe().output(), quantity, 0, CoverageShare.Stage.PROMISED_OUTPUT);
+            CoverageShare share = new CoverageShare(fresh(), s.colonyId(), demandId, order.id(), order.id(), null, null, order.recipe().output(), quantity, 0, CoverageShare.Stage.PROMISED_OUTPUT);
             var next = state(s, s.required(), s.fulfilled(), s.allocated(), Math.addExact(s.covered(), quantity), s.deliveredTotal(), Demand.Status.ACTIVE);
             AdmissionLedger.Lease lease = admit(s.colonyId(), s.lane(), Resource.COVERAGE_SHARES);
             try { registry.beforeMutation(); } catch (RuntimeException failure) { lease.close(); throw failure; }
@@ -302,6 +354,210 @@ public final class SupplyRegistry {
         Demand existing = demand(id);
         if (existing.snapshot().required() != required || !existing.snapshot().matcher().equals(ingredient.matcher())) throw new IllegalArgumentException("Ingredient quantity differs from pinned batch");
         return existing;
+    }
+    private StorageRegistry.Workshop selectWorkshop(UUID colony, RecipeDefinition recipe) {
+        if (!recipe.equipmentId().equals("minecraft:crafting_table")) throw new IllegalStateException("Unsupported production equipment");
+        for (var citizen : registry.citizensView()) if (citizen.colonyId().equals(colony)
+                && citizen.lifecycle() == io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Lifecycle.ALIVE
+                && recipe.professionId().equals(citizen.professionId()) && citizen.workplaceId() != null) {
+            for (var workshop : registry.storage().workshops()) if (workshop.id().equals(citizen.workplaceId()) && workshop.colonyId().equals(colony)) return workshop;
+        }
+        throw new IllegalStateException("No assigned producer workshop");
+    }
+    public ProductionOrder production(UUID id) { registry.requireOwner(); var order = productions.get(id); if (order == null) throw new IllegalArgumentException("Unknown production"); return order; }
+    public ProductionOrder productionForWork(UUID workId) { registry.requireOwner(); for (var p : productions.values()) if (workId.equals(p.workId())) return p; return null; }
+    public WorldPosition workshopDestination(ProductionOrder order) {
+        for (var registration : registry.storage().registrations()) if (registration.colonyId().equals(order.colonyId()) && registration.role().equals("workshop") && registration.storages().contains(order.workshopStorage()))
+            return registration.positions().get(registration.storages().indexOf(order.workshopStorage()));
+        throw new IllegalStateException("Pinned workshop barrel unavailable");
+    }
+    public boolean workshopAvailable(ProductionOrder order) {
+        if (!order.pinned()) return false;
+        for (var workshop : registry.storage().workshops()) if (workshop.id().equals(order.workshopId()) && workshop.colonyId().equals(order.colonyId()) && workshop.position().equals(order.equipmentPosition())) {
+            for (var registration : registry.storage().registrations()) if (registration.id().equals(workshop.registrationId()) && registration.role().equals("workshop") && registration.storages().equals(List.of(order.workshopStorage())) && !registry.storage().isRetired(order.workshopStorage())) return true;
+        }
+        return false;
+    }
+    public boolean pinProduction(UUID productionId) {
+        var p = production(productionId); if (p.pinned()) return workshopAvailable(p); if (p.terminal()) return false;
+        StorageRegistry.Workshop workshop;
+        try { workshop = selectWorkshop(p.colonyId(), p.recipe()); } catch (IllegalStateException unavailable) { return false; }
+        var registration = registry.storage().registrations().stream().filter(r -> r.id().equals(workshop.registrationId())).findFirst().orElseThrow();
+        if (registration.storages().size() != 1) return false;
+        var next = new ProductionOrder(p.id(), p.colonyId(), p.ownerDemandId(), p.recipe(), p.batches(), p.remainingActiveTicks(), Math.incrementExact(p.revision()), null, null, ProductionOrder.State.PLANNED, p.lane(), p.priority(), workshop.id(), workshop.position(), registration.storages().getFirst(), 0, false);
+        for (var d : demands.values()) if (d.snapshot().ownerId().equals(p.id()) && d.snapshot().allocated() != 0) return false;
+        for (var d : demands.values()) if (d.snapshot().ownerId().equals(p.id())) for (var share : demandShares(d.id())) if (share.obligationId()!=null) {
+            var observed=registry.storage().index().observation(share.slot());
+            if (!observed.ready() || !share.item().equals(observed.item()) || observed.count()<registry.storage().obligated(share.slot())) return false;
+        }
+        registry.beforeMutation(); productions.put(p.id(), next);
+        for (var d : demands.values()) if (d.snapshot().ownerId().equals(p.id())) {
+            var s = d.snapshot(); d.replace(new Demand.Snapshot(s.id(), s.colonyId(), s.ownerId(), s.matcher(), s.goalKind(), registration.positions().getFirst(), s.required(), s.fulfilled(), s.allocated(), s.covered(), s.deliveredTotal(), Math.incrementExact(s.revision()), s.lane(), s.priority(), s.createdTick(), s.status(), s.sourceStorages()));
+            for (var delivery : List.copyOf(deliveries.values())) if (delivery.ownerDemandId().equals(s.id()) && !delivery.terminal()) deliveries.put(delivery.id(), new DeliveryOrder(delivery.id(), delivery.colonyId(), delivery.ownerDemandId(), delivery.source(), registration.positions().getFirst(), delivery.item(), delivery.quantity(), delivery.transferred(), Math.incrementExact(delivery.revision()), delivery.citizenId(), delivery.workId(), delivery.state(), delivery.lane(), delivery.priority()));
+        }
+        return true;
+    }
+    private boolean localDestination(Demand.Snapshot d, StockRegion slot) {
+        if (d.goalKind() != Demand.GoalKind.CONSUMPTION) return false;
+        for (var registration : registry.storage().registrations()) if (registration.colonyId().equals(d.colonyId()) && registration.storages().contains(slot.storage())) {
+            if (registration.positions().get(registration.storages().indexOf(slot.storage())).equals(d.destination())) return true;
+        }
+        return false;
+    }
+    public boolean allocateLocalReservation(UUID shareId) {
+        var share = requiredShare(shareId); var d = demand(share.demandId()).snapshot();
+        if (share.stage() != CoverageShare.Stage.RESERVED_STOCK || !localDestination(d, share.slot()) || d.status() == Demand.Status.CANCELLED) return false;
+        var result = new CoverageShare(share.id(), share.colonyId(), share.demandId(), share.sourceOrderId(), share.productionOrderId(), share.obligationId(), share.slot(), share.item(), share.quantity(), Math.incrementExact(share.revision()), CoverageShare.Stage.ALLOCATED);
+        var next = state(d, d.required(), d.fulfilled(), d.allocated() + share.quantity(), d.covered() - share.quantity(), d.deliveredTotal(), d.status());
+        registry.storage().allocateReserved(share.obligationId()); putShare(share.id(), result); demand(d.id()).replace(next);
+        if (share.sourceOrderId() != null && deliveries.containsKey(share.sourceOrderId())) { var delivery = delivery(share.sourceOrderId()); deliveries.put(delivery.id(), delivery(delivery, delivery.transferred(), DeliveryOrder.State.COMPLETED)); }
+        return true;
+    }
+    public record InputPortion(UUID shareId, UUID obligationId, StockRegion slot, ItemDescriptor item, int count) {}
+    public record OutputPortion(StockRegion slot, int count) {
+        public OutputPortion { Objects.requireNonNull(slot); if (count <= 0) throw new IllegalArgumentException("Invalid physical output portion"); }
+    }
+    /** Empty means the full next batch is not locally allocated; no worker may bind. */
+    public List<InputPortion> completeProductionKit(UUID productionId) {
+        var order = production(productionId); if (order.terminal() || order.batches() == 0 || !workshopAvailable(order)) return List.of();
+        var result = new ArrayList<InputPortion>(); Set<StockRegion> slots = new HashSet<>();
+        for (int i = 0; i < order.recipe().ingredients().size(); i++) {
+            var ingredient = order.recipe().ingredients().get(i); long needed = ingredient.count();
+            UUID child = UUID.nameUUIDFromBytes((order.id() + ":ingredient:" + i).getBytes(StandardCharsets.UTF_8));
+            for (var share : demandShares(child)) if (share.stage() == CoverageShare.Stage.ALLOCATED && share.slot().storage().equals(order.workshopStorage())) {
+                var allocation = registry.storage().allocations().get(share.obligationId()); var observed = registry.storage().index().observation(share.slot());
+                if (allocation == null || allocation.count() != share.quantity() || !allocation.item().equals(share.item()) || !allocation.slot().equals(share.slot())
+                        || !observed.ready() || !share.item().equals(observed.item()) || observed.count() < registry.storage().obligated(share.slot())) return List.of();
+                int taken = Math.toIntExact(Math.min(needed, share.quantity()));
+                if (taken > 0) { result.add(new InputPortion(share.id(), share.obligationId(), share.slot(), share.item(), taken)); slots.add(share.slot()); needed -= taken; }
+                if (needed == 0) break;
+            }
+            if (needed != 0) return List.of();
+        }
+        return result.size() <= 16 && slots.size() < 16 ? List.copyOf(result) : List.of();
+    }
+    public void assignProductionWork(UUID productionId, UUID workId) {
+        var p = production(productionId); var work = registry.workBoard().work(workId);
+        if (p.terminal() || p.workId() != null && !p.workId().equals(workId) || !work.colonyId().equals(p.colonyId())
+                || !work.typeId().equals(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.PRODUCTION) || !work.target().equals(p.equipmentPosition())
+                || !Objects.equals(work.professionId(), p.recipe().professionId()) || completeProductionKit(p.id()).isEmpty()) throw new IllegalStateException("Production work lacks complete kit");
+        if (workId.equals(p.workId())) return;
+        registry.beforeMutation(); productions.put(p.id(), p.update(p.batches(), p.remainingActiveTicks(), p.completedBatches(), p.batchStarted(), workId, null, p.state(), p.lane(), p.priority()));
+    }
+    public void startProduction(UUID productionId, UUID citizenId, UUID workId) {
+        var p = production(productionId); var citizen = registry.citizen(citizenId); var work = registry.workBoard().work(workId);
+        if (!workId.equals(p.workId()) || !citizenId.equals(work.assignee()) || !workId.equals(citizen.assignedWorkId())
+                || !p.workshopId().equals(citizen.workplaceId()) || !p.recipe().professionId().equals(citizen.professionId())
+                || !registry.colony(p.colonyId()).available() || citizen.readiness() != io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Readiness.READY
+                || registry.bindings().activeEntity(citizenId).isEmpty() || completeProductionKit(p.id()).isEmpty()
+                || p.batchStarted() && p.citizenId() != null && !citizenId.equals(p.citizenId())) throw new IllegalStateException("Production binding/kit not ready");
+        if (p.batchStarted() && citizenId.equals(p.citizenId())) return;
+        registry.beforeMutation(); productions.put(p.id(), p.update(p.batches(), p.remainingActiveTicks(), p.completedBatches(), true, workId, citizenId, ProductionOrder.State.PROCESSING, p.lane(), p.priority()));
+    }
+    public void advanceProduction(UUID productionId, long activeDelta) {
+        var p = production(productionId);
+        if (activeDelta < 0 || !p.batchStarted() || p.state() != ProductionOrder.State.PROCESSING) throw new IllegalStateException("Production is not processing");
+        var citizen = registry.citizen(p.citizenId()); var work = registry.workBoard().work(p.workId());
+        if (!registry.colony(p.colonyId()).available() || work.state()!=io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.RUNNING
+                || !p.citizenId().equals(work.assignee()) || !p.workId().equals(citizen.assignedWorkId())
+                || citizen.admission()!=io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Admission.ACTIVE
+                || citizen.readiness()!=io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Readiness.READY
+                || registry.bindings().activeEntity(citizen.citizenId()).isEmpty() || !workshopAvailable(p)) throw new IllegalStateException("Inactive production cannot accrue time");
+        if (activeDelta == 0 || p.remainingActiveTicks() == 0) return;
+        registry.beforeMutation(); productions.put(p.id(), p.update(p.batches(), Math.max(0, p.remainingActiveTicks() - Math.min(activeDelta, p.remainingActiveTicks())), p.completedBatches(), true, p.workId(), p.citizenId(), p.state(), p.lane(), p.priority()));
+    }
+    public PreparedProduction prepareProduction(UUID productionId, List<OutputPortion> outputs, long tick) {
+        var p = production(productionId); var inputs = completeProductionKit(productionId);
+        if (!p.batchStarted() || p.remainingActiveTicks() != 0 || inputs.isEmpty() || p.state() != ProductionOrder.State.PROCESSING) throw new IllegalStateException("Physical batch not ready");
+        outputs = List.copyOf(outputs); long outputCount = 0; Set<StockRegion> touched = new HashSet<>(); for (var input : inputs) touched.add(input.slot());
+        Set<StockRegion> outputSlots = new HashSet<>();
+        for (var out : outputs) { if (!out.slot().storage().equals(p.workshopStorage()) || !outputSlots.add(out.slot()) || touched.contains(out.slot())) throw new IllegalArgumentException("Output must use distinct pinned barrel slots"); outputCount = Math.addExact(outputCount, out.count()); }
+        if (outputCount != p.recipe().outputCount() || touched.size() + outputSlots.size() > 16) throw new IllegalArgumentException("Physical output batch/envelope mismatch");
+        var staged = new LinkedHashMap<>(shares); var beforeDemands = new LinkedHashMap<UUID, Demand.Snapshot>(); var beforeShares = new LinkedHashMap<UUID, CoverageShare>();
+        var allocations = new LinkedHashMap<UUID, AllocationLedger.Entry>(); var reductions = new LinkedHashMap<UUID, Long>(); var admitted = new LinkedHashMap<UUID, AdmissionLedger.Lease>();
+        var reservations = new ArrayList<ReservationLedger.Entry>();
+        Demand surplus = null;
+        try {
+            for (var input : inputs) {
+                var share = requiredShare(input.shareId()); var d = demand(share.demandId()).snapshot(); beforeDemands.put(d.id(), d); beforeShares.put(share.id(), share);
+                var allocation = registry.storage().allocations().get(share.obligationId()); allocations.put(allocation.id(), allocation); reductions.put(allocation.id(), allocation.count() - input.count());
+                UUID id = input.count() == share.quantity() ? share.id() : fresh();
+                if (!id.equals(share.id())) admitted.put(id, admit(d.colonyId(), d.lane(), Resource.COVERAGE_SHARES));
+                staged.remove(share.id()); if (input.count() < share.quantity()) staged.put(share.id(), resized(share, share.quantity() - input.count()));
+                staged.put(id, new CoverageShare(id, share.colonyId(), share.demandId(), share.sourceOrderId(), share.productionOrderId(), null, null, share.item(), input.count(), Math.incrementExact(share.revision()), CoverageShare.Stage.FULFILLED));
+            }
+            int outIndex = 0, free = outputs.getFirst().count(); long remaining = outputCount;
+            for (var promise : orderShares(p.id())) if (promise.stage() == CoverageShare.Stage.PROMISED_OUTPUT && remaining > 0) {
+                var d = demand(promise.demandId()).snapshot(); beforeDemands.put(d.id(), d); beforeShares.put(promise.id(), promise);
+                long converted = Math.min(remaining, promise.quantity()), left = converted; staged.remove(promise.id());
+                if (converted < promise.quantity()) staged.put(promise.id(), resized(promise, promise.quantity() - converted));
+                boolean reuse = converted == promise.quantity();
+                while (left > 0) {
+                    int count = Math.toIntExact(Math.min(left, free)); UUID id = reuse ? promise.id() : fresh(); reuse = false; UUID obligation = fresh();
+                    if (!id.equals(promise.id())) admitted.put(id, admit(d.colonyId(), d.lane(), Resource.COVERAGE_SHARES));
+                    var slot = outputs.get(outIndex).slot(); reservations.add(new ReservationLedger.Entry(obligation, p.colonyId(), d.ownerId(), slot, p.recipe().output(), count, 0, d.lane()));
+                    staged.put(id, new CoverageShare(id, p.colonyId(), d.id(), null, p.id(), obligation, slot, p.recipe().output(), count, Math.incrementExact(promise.revision()), CoverageShare.Stage.RESERVED_STOCK));
+                    left -= count; free -= count; if (free == 0 && ++outIndex < outputs.size()) free = outputs.get(outIndex).count();
+                }
+                remaining -= converted;
+            }
+            if (remaining > 0) {
+                if (demands.size() >= MAX_DEMANDS) throw new IllegalArgumentException("Demand envelope exceeded");
+                UUID id = fresh();
+                var destination = registry.storage().registrations(p.colonyId()).stream()
+                        .filter(r -> surplusBuffer(p.colonyId(), r, p.workshopStorage().dimension()))
+                        .min(Comparator.comparing(StorageRegistry.Registration::id))
+                        .map(StorageRegistry.Registration::address).orElseGet(() -> workshopDestination(p));
+                surplus = new Demand(new Demand.Snapshot(id, p.colonyId(), id, new ItemMatcher(p.recipe().output().itemId(), p.recipe().output()),
+                        Demand.GoalKind.DELIVERY, destination, remaining, 0, 0, remaining, 0, 0, p.lane(), p.priority(), tick,
+                        Demand.Status.ACTIVE, List.of(p.workshopStorage())));
+                admitted.put(id, admit(p.colonyId(), p.lane(), Resource.DEMANDS));
+                while (remaining > 0) {
+                    int count = Math.toIntExact(Math.min(remaining, free)); UUID shareId = fresh(), obligation = fresh();
+                    admitted.put(shareId, admit(p.colonyId(), p.lane(), Resource.COVERAGE_SHARES));
+                    var slot = outputs.get(outIndex).slot();
+                    reservations.add(new ReservationLedger.Entry(obligation, p.colonyId(), id, slot, p.recipe().output(), count, 0, p.lane()));
+                    staged.put(shareId, new CoverageShare(shareId, p.colonyId(), id, null, p.id(), obligation, slot, p.recipe().output(), count, 0, CoverageShare.Stage.RESERVED_STOCK));
+                    remaining -= count; free -= count; if (free == 0 && ++outIndex < outputs.size()) free = outputs.get(outIndex).count();
+                }
+            }
+            if (staged.size() > MAX_SHARES) throw new IllegalArgumentException("Coverage envelope exceeded");
+            var states = new LinkedHashMap<UUID, Demand.Snapshot>(); beforeDemands.forEach((id, d) -> states.put(id, totals(d, staged.values(), d.required(), d.deliveredTotal(), d.status())));
+            return new PreparedProduction(p, inputs, outputs, beforeDemands, beforeShares, allocations, reductions, staged, states, admitted, surplus, registry.storage().prepareReserveAll(reservations, tick));
+        } catch (RuntimeException failure) { admitted.values().forEach(AdmissionLedger.Lease::close); throw failure; }
+    }
+    public final class PreparedProduction implements AutoCloseable {
+        private final ProductionOrder order; private final List<InputPortion> inputs; private final List<OutputPortion> outputs;
+        private final Map<UUID, Demand.Snapshot> beforeDemands, states; private final Map<UUID, CoverageShare> beforeShares, staged;
+        private final Map<UUID, AllocationLedger.Entry> allocations; private final Map<UUID, Long> reductions;
+        private final Map<UUID, AdmissionLedger.Lease> admitted; private final Demand surplus;
+        private final StorageRegistry.PreparedReservations physical; private boolean closed;
+        private PreparedProduction(ProductionOrder order, List<InputPortion> inputs, List<OutputPortion> outputs, Map<UUID, Demand.Snapshot> beforeDemands, Map<UUID, CoverageShare> beforeShares, Map<UUID, AllocationLedger.Entry> allocations, Map<UUID, Long> reductions, Map<UUID, CoverageShare> staged, Map<UUID, Demand.Snapshot> states, Map<UUID, AdmissionLedger.Lease> admitted, Demand surplus, StorageRegistry.PreparedReservations physical) {
+            this.order = order; this.inputs = inputs; this.outputs = outputs; this.beforeDemands = beforeDemands; this.beforeShares = new LinkedHashMap<>(shares); this.allocations = allocations; this.reductions = reductions; this.staged = staged; this.states = states; this.admitted = admitted; this.surplus = surplus; this.physical = physical;
+        }
+        public List<InputPortion> inputs() { return inputs; } public List<OutputPortion> outputs() { return outputs; }
+        public boolean unchanged() {
+            registry.requireOwner(); if (closed || productions.get(order.id()) != order || !workshopAvailable(order)) return false;
+            var work=registry.workBoard().work(order.workId()); var citizen=registry.citizen(order.citizenId());
+            if(!registry.colony(order.colonyId()).available() || !order.citizenId().equals(work.assignee()) || !order.workId().equals(citizen.assignedWorkId())
+                    || !Objects.equals(order.workshopId(),citizen.workplaceId()) || !order.recipe().professionId().equals(citizen.professionId())
+                    || citizen.readiness()!=io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Readiness.READY || registry.bindings().activeEntity(citizen.citizenId()).isEmpty()) return false;
+            if (shares.size() != beforeShares.size()) return false;
+            for (var d : beforeDemands.values()) if (demand(d.id()).snapshot() != d) return false;
+            for (var s : beforeShares.values()) if (shares.get(s.id()) != s) return false;
+            for (var a : allocations.values()) if (!a.equals(registry.storage().allocations().get(a.id()))) return false;
+            return true;
+        }
+        public void commit() {
+            if (!unchanged()) throw new IllegalStateException("Prepared production changed");
+            long remaining = order.batches() - 1;
+            var next = order.update(remaining, remaining == 0 ? 0 : order.recipe().activeTicks(), Math.incrementExact(order.completedBatches()), false, order.workId(), null, remaining == 0 ? ProductionOrder.State.COMPLETED : ProductionOrder.State.PLANNED, order.lane(), order.priority());
+            physical.commit(); registry.storage().reduceObligations(reductions); leases.putAll(admitted); admitted.clear();
+            if (surplus != null) demands.put(surplus.id(), surplus);
+            publishShares(staged); states.forEach((id, s) -> demand(id).replace(s)); productions.put(order.id(), next); closed = true;
+            for (var share : staged.values()) if (share.stage() == CoverageShare.Stage.RESERVED_STOCK && share.sourceOrderId() == null) allocateLocalReservation(share.id());
+        }
+        @Override public void close() { registry.requireOwner(); physical.close(); if (!closed) { closed = true; admitted.values().forEach(AdmissionLedger.Lease::close); admitted.clear(); } }
     }
     public PreparedTransfer preparePickup(UUID shareId, UUID orderId, StockRegion cargo, int maximum, long tick) {
         CoverageShare s = requiredShare(shareId); DeliveryOrder o = delivery(orderId);
@@ -318,12 +574,15 @@ public final class SupplyRegistry {
     public PreparedTransfer prepareReturn(UUID shareId, StockRegion buffer, int maximum, long tick) {
         CoverageShare s = requiredShare(shareId);
         if (s.stage() != CoverageShare.Stage.IN_TRANSIT || !delivery(s.sourceOrderId()).returnRequired()) throw new IllegalStateException("Cargo not returning");
-        return prepare(s, buffer, maximum, tick, TransferKind.RETURN);
+        return prepare(s, buffer, maximum, tick, productionSurplus(s.demandId()) ? TransferKind.DELIVER : TransferKind.RETURN);
     }
     private enum TransferKind { PICKUP, DELIVER, RETURN }
     private PreparedTransfer prepare(CoverageShare share, StockRegion destination, int maximum, long tick, TransferKind kind) {
         var d = demand(share.demandId()).snapshot();
         if (maximum <= 0 || maximum > share.quantity()) throw new IllegalArgumentException("Invalid transfer maximum");
+        if (productionSurplus(d.id()) && kind != TransferKind.PICKUP && registry.storage().registrations(d.colonyId()).stream()
+                .noneMatch(r -> r.slots().contains(destination) && surplusBuffer(d.colonyId(), r, share.slot().storage().dimension())))
+            throw new IllegalArgumentException("Surplus must physically reach registered safe storage");
         boolean retained = kind == TransferKind.PICKUP || kind == TransferKind.RETURN && d.status() != Demand.Status.CANCELLED
                 || kind == TransferKind.DELIVER && d.goalKind() == Demand.GoalKind.CONSUMPTION;
         UUID resultId = fresh(), splitObligation = fresh(); AdmissionLedger.Lease extra = null;
@@ -369,8 +628,8 @@ public final class SupplyRegistry {
                 CoverageShare.Stage stage = kind == TransferKind.PICKUP ? CoverageShare.Stage.IN_TRANSIT
                         : kind == TransferKind.RETURN ? CoverageShare.Stage.RESERVED_STOCK
                         : retained ? CoverageShare.Stage.ALLOCATED : CoverageShare.Stage.FULFILLED;
-                result = new CoverageShare(id, share.colonyId(), share.demandId(), kind == TransferKind.RETURN ? null : order.id(),
-                        retained ? physical.destinationObligation(moved) : null, retained ? destination : null,
+                result = new CoverageShare(id, share.colonyId(), share.demandId(), kind == TransferKind.RETURN || !retained && !order.ownerDemandId().equals(share.demandId()) ? null : order.id(),
+                        share.productionOrderId(), retained ? physical.destinationObligation(moved) : null, retained ? destination : null,
                         share.item(), moved, Math.addExact(share.revision(), 1), stage);
             }
             Map<UUID, CoverageShare> staged = new LinkedHashMap<>(shares); staged.remove(share.id());
@@ -379,9 +638,9 @@ public final class SupplyRegistry {
             long delivered = kind == TransferKind.DELIVER ? Math.addExact(before.deliveredTotal(), moved) : before.deliveredTotal();
             long transferred = kind == TransferKind.DELIVER ? Math.addExact(order.transferred(), moved) : order.transferred();
             boolean cargoLeft = staged.values().stream().anyMatch(s -> order.id().equals(s.sourceOrderId()) && s.stage() == CoverageShare.Stage.IN_TRANSIT);
-            if (kind == TransferKind.RETURN && !cargoLeft) {
+            if ((kind == TransferKind.RETURN || order.returnRequired()) && !cargoLeft) {
                 for (var old : List.copyOf(staged.values())) if (order.id().equals(old.sourceOrderId()) && old.stage() == CoverageShare.Stage.RESERVED_STOCK)
-                    staged.put(old.id(), new CoverageShare(old.id(), old.colonyId(), old.demandId(), null, old.obligationId(), old.slot(), old.item(), old.quantity(), Math.addExact(old.revision(), 1), old.stage()));
+                    staged.put(old.id(), new CoverageShare(old.id(), old.colonyId(), old.demandId(), null, old.productionOrderId(), old.obligationId(), old.slot(), old.item(), old.quantity(), Math.addExact(old.revision(), 1), old.stage()));
             }
             var nextDemand = totals(before, staged.values(), before.required(), delivered, before.status());
             var state = kind == TransferKind.PICKUP ? DeliveryOrder.State.IN_TRANSIT : kind == TransferKind.RETURN
@@ -389,6 +648,7 @@ public final class SupplyRegistry {
                     : transferred == order.quantity() ? DeliveryOrder.State.COMPLETED : cargoLeft ? DeliveryOrder.State.IN_TRANSIT : DeliveryOrder.State.TRANSFERRED;
             if (kind == TransferKind.DELIVER && !cargoLeft && state == DeliveryOrder.State.TRANSFERRED
                     && staged.values().stream().noneMatch(s -> order.id().equals(s.sourceOrderId()) && s.covered())) state = DeliveryOrder.State.RETURNED;
+            if (order.returnRequired()) state = cargoLeft ? DeliveryOrder.State.RETURNING : DeliveryOrder.State.RETURNED;
             var nextOrder = delivery(order, transferred, state);
             physical.commit(moved);
             if (!full && result != null) { leases.put(id, extra); extra = null; }
@@ -411,7 +671,7 @@ public final class SupplyRegistry {
         registry.beforeMutation();
         boolean cargo = hasCargo(orderId);
         if (!cargo) for (var s : orderShares(orderId)) if (s.stage() == CoverageShare.Stage.RESERVED_STOCK)
-            putShare(s.id(), new CoverageShare(s.id(), s.colonyId(), s.demandId(), null, s.obligationId(), s.slot(), s.item(), s.quantity(), Math.addExact(s.revision(), 1), s.stage()));
+            putShare(s.id(), new CoverageShare(s.id(), s.colonyId(), s.demandId(), null, s.productionOrderId(), s.obligationId(), s.slot(), s.item(), s.quantity(), Math.addExact(s.revision(), 1), s.stage()));
         deliveries.put(orderId, delivery(o, o.transferred(), cargo ? DeliveryOrder.State.RETURNING : DeliveryOrder.State.RETURNED));
     }
     /** Explicit operator cutover abandons promises without touching native contents. */
@@ -429,7 +689,7 @@ public final class SupplyRegistry {
         states.forEach((id, s) -> demand(id).replace(s));
         for (var o : List.copyOf(deliveries.values())) if (o.colonyId().equals(colonyId) && !o.terminal()) deliveries.put(o.id(), delivery(o, o.transferred(), DeliveryOrder.State.CANCELLED));
         for (var o : List.copyOf(productions.values())) if (o.colonyId().equals(colonyId))
-            productions.put(o.id(), new ProductionOrder(o.id(), o.colonyId(), o.ownerDemandId(), o.recipe(), o.batches(), o.remainingActiveTicks(), Math.addExact(o.revision(), 1), o.workId(), o.citizenId(), ProductionOrder.State.CANCELLED, o.lane(), o.priority()));
+            productions.put(o.id(), o.update(o.batches(), o.remainingActiveTicks(), o.completedBatches(), o.batchStarted(), o.workId(), o.citizenId(), ProductionOrder.State.CANCELLED, o.lane(), o.priority()));
         dirtyObligations.removeIf(id -> !obligationShares.containsKey(id));
     }
 
@@ -439,7 +699,7 @@ public final class SupplyRegistry {
         if (o.workId() != null && !registry.workBoard().work(o.workId()).terminal()) throw new IllegalStateException("Delivery work still active");
         for (var e : registry.effects().snapshots()) if (o.workId() != null && o.workId().equals(e.workId())) throw new IllegalStateException("Delivery has native evidence");
         registry.beforeMutation();
-        for (var s : orderShares(orderId)) putShare(s.id(), new CoverageShare(s.id(), s.colonyId(), s.demandId(), null, s.obligationId(), s.slot(), s.item(), s.quantity(), Math.addExact(s.revision(), 1), s.stage()));
+        for (var s : orderShares(orderId)) putShare(s.id(), new CoverageShare(s.id(), s.colonyId(), s.demandId(), null, s.productionOrderId(), s.obligationId(), s.slot(), s.item(), s.quantity(), Math.addExact(s.revision(), 1), s.stage()));
         removeDelivery(orderId); leases.remove(orderId).close();
     }
     public void markDeliveryLost(UUID orderId) {
@@ -460,26 +720,86 @@ public final class SupplyRegistry {
         try { registry.beforeMutation(); } catch (RuntimeException failure) { lease.close(); throw failure; }
         DeliveryOrder o = new DeliveryOrder(id, s.colonyId(), s.demandId(), s.slot(), d.destination(), s.item(), s.quantity(), 0, 0, null, null, DeliveryOrder.State.PLANNED, d.lane(), d.priority());
         addDelivery(o); leases.put(id, lease);
-        putShare(s.id(), new CoverageShare(s.id(), s.colonyId(), s.demandId(), id, s.obligationId(), s.slot(), s.item(), s.quantity(), Math.addExact(s.revision(), 1), s.stage()));
+        putShare(s.id(), new CoverageShare(s.id(), s.colonyId(), s.demandId(), id, s.productionOrderId(), s.obligationId(), s.slot(), s.item(), s.quantity(), Math.addExact(s.revision(), 1), s.stage()));
         return o;
     }
 
     public void fulfillConsumption(UUID shareId, long quantity) {
+        try (var prepared = prepareConsumption(shareId, Math.toIntExact(quantity))) { prepared.commit(Math.toIntExact(quantity)); }
+    }
+    public PreparedConsumption prepareConsumption(UUID shareId, int maximum) {
         CoverageShare share = requiredShare(shareId); var d = demand(share.demandId()).snapshot();
-        if (share.stage() != CoverageShare.Stage.ALLOCATED || d.goalKind() != Demand.GoalKind.CONSUMPTION || quantity <= 0 || quantity > share.quantity()) throw new IllegalArgumentException("Invalid consumption");
-        var allocation = registry.storage().allocations().get(share.obligationId()); if (allocation == null || allocation.count() < share.quantity()) throw new IllegalStateException("Consumed allocation changed");
-        UUID id = quantity == share.quantity() ? share.id() : fresh();
-        CoverageShare fulfilled = new CoverageShare(id, share.colonyId(), share.demandId(), share.sourceOrderId(), null, null, share.item(), quantity, Math.addExact(share.revision(), 1), CoverageShare.Stage.FULFILLED);
-        Map<UUID, CoverageShare> staged = new LinkedHashMap<>(shares); staged.remove(shareId); if (quantity < share.quantity()) staged.put(shareId, resized(share, share.quantity() - quantity)); staged.put(id, fulfilled);
-        var next = totals(d, staged.values(), d.required(), d.deliveredTotal(), d.status()); AdmissionLedger.Lease extra = null;
+        if (share.stage() != CoverageShare.Stage.ALLOCATED || d.goalKind() != Demand.GoalKind.CONSUMPTION || maximum <= 0 || maximum > share.quantity()) throw new IllegalArgumentException("Invalid consumption");
+        if (productions.containsKey(d.ownerId())) throw new IllegalStateException("Production ingredients require atomic PreparedProduction");
+        var allocation = registry.storage().allocations().get(share.obligationId());
+        if (allocation == null || allocation.count() != share.quantity() || !allocation.slot().equals(share.slot()) || !allocation.item().equals(share.item())) throw new IllegalStateException("Consumed allocation changed");
+        UUID split = fresh(); AdmissionLedger.Lease extra = null;
+        if (share.quantity() > 1) { if (shares.size() >= MAX_SHARES) throw new IllegalArgumentException("Coverage envelope exceeded"); extra = admit(d.colonyId(), d.lane(), Resource.COVERAGE_SHARES); }
+        return new PreparedConsumption(share, d, allocation, maximum, split, extra);
+    }
+    public final class PreparedConsumption implements AutoCloseable {
+        private final CoverageShare share; private final Demand.Snapshot before; private final AllocationLedger.Entry allocation;
+        private final int maximum; private final UUID split; private AdmissionLedger.Lease extra; private boolean closed;
+        private PreparedConsumption(CoverageShare share, Demand.Snapshot before, AllocationLedger.Entry allocation, int maximum, UUID split, AdmissionLedger.Lease extra) {
+            this.share = share; this.before = before; this.allocation = allocation; this.maximum = maximum; this.split = split; this.extra = extra;
+        }
+        public boolean unchanged() { registry.requireOwner(); return !closed && shares.get(share.id()) == share && demand(before.id()).snapshot() == before && allocation.equals(registry.storage().allocations().get(allocation.id())); }
+        public void commit(int consumed) {
+            if (!unchanged() || consumed <= 0 || consumed > maximum) throw new IllegalStateException("Prepared consumption changed");
+            UUID id = consumed == share.quantity() ? share.id() : split;
+            var fulfilled = new CoverageShare(id, share.colonyId(), share.demandId(), share.sourceOrderId(), share.productionOrderId(), null, null, share.item(), consumed, Math.incrementExact(share.revision()), CoverageShare.Stage.FULFILLED);
+            var staged = new LinkedHashMap<>(shares); staged.remove(share.id()); if (consumed < share.quantity()) staged.put(share.id(), resized(share, share.quantity() - consumed)); staged.put(id, fulfilled);
+            var next = totals(before, staged.values(), before.required(), before.deliveredTotal(), before.status());
+            registry.storage().reduceObligations(Map.of(allocation.id(), allocation.count() - consumed));
+            if (!id.equals(share.id())) { leases.put(id, extra); extra = null; }
+            publishShares(staged); demand(before.id()).replace(next); close();
+        }
+        @Override public void close() { registry.requireOwner(); closed = true; if (extra != null) { extra.close(); extra = null; } }
+    }
+    public PreparedAllocationMove prepareAllocationMove(UUID shareId, StockRegion destination, int maximum, long tick) {
+        CoverageShare s = requiredShare(shareId); var d = demand(s.demandId()).snapshot();
+        if (s.stage() != CoverageShare.Stage.ALLOCATED || maximum <= 0 || maximum > s.quantity() || d.status() == Demand.Status.CANCELLED) throw new IllegalStateException("Allocation cannot move");
+        AdmissionLedger.Lease extra = null;
+        var production=productions.get(d.ownerId()); if(production!=null && production.batchStarted()) throw new IllegalStateException("Begun production allocation cannot relocate");
         try {
-            if (!id.equals(shareId)) { if (shares.size() >= MAX_SHARES) throw new IllegalArgumentException("Coverage envelope exceeded"); extra = admit(d.colonyId(), d.lane(), Resource.COVERAGE_SHARES); }
-            registry.storage().reduceObligations(Map.of(share.obligationId(), allocation.count() - quantity));
+            if (s.quantity() > 1) { if (shares.size() >= MAX_SHARES) throw new IllegalArgumentException("Coverage envelope exceeded"); extra = admit(d.colonyId(), d.lane(), Resource.COVERAGE_SHARES); }
+            return new PreparedAllocationMove(s, d, destination, maximum, fresh(), extra, registry.storage().prepareMoveAllocation(s.obligationId(), destination, fresh(), true, true, maximum, tick));
         } catch (RuntimeException failure) { if (extra != null) extra.close(); throw failure; }
-        clearShares(); putShares(staged); if (extra != null) leases.put(id, extra); demand(d.id()).replace(next);
+    }
+    public final class PreparedAllocationMove implements AutoCloseable {
+        private final CoverageShare share; private final Demand.Snapshot before; private final StockRegion destination; private final int maximum; private final UUID split;
+        private AdmissionLedger.Lease extra; private final StorageRegistry.PreparedMove physical; private boolean closed;
+        private PreparedAllocationMove(CoverageShare share, Demand.Snapshot before, StockRegion destination, int maximum, UUID split, AdmissionLedger.Lease extra, StorageRegistry.PreparedMove physical) { this.share = share; this.before = before; this.destination = destination; this.maximum = maximum; this.split = split; this.extra = extra; this.physical = physical; }
+        public StockRegion source() { return share.slot(); } public StockRegion destination() { return destination; } public ItemDescriptor item() { return share.item(); } public int maximum() { return maximum; }
+        public void commit(int moved) {
+            registry.requireOwner(); if (closed || moved <= 0 || moved > maximum || shares.get(share.id()) != share || demand(before.id()).snapshot() != before) throw new IllegalStateException("Prepared allocation changed");
+            boolean full = moved == share.quantity(); UUID id = full ? share.id() : split;
+            var result = new CoverageShare(id, share.colonyId(), share.demandId(), share.sourceOrderId(), share.productionOrderId(), physical.destinationObligation(moved), destination, share.item(), moved, Math.incrementExact(share.revision()), CoverageShare.Stage.ALLOCATED);
+            var staged = new LinkedHashMap<>(shares); staged.remove(share.id()); if (!full) staged.put(share.id(), resized(share, share.quantity() - moved)); staged.put(id, result);
+            var next = totals(before, staged.values(), before.required(), before.deliveredTotal(), before.status()); physical.commit(moved);
+            if (!full) { leases.put(id, extra); extra = null; } publishShares(staged); demand(before.id()).replace(next); close();
+        }
+        @Override public void close() { registry.requireOwner(); physical.close(); closed = true; if (extra != null) { extra.close(); extra = null; } }
+    }
+    public CoverageShare allocateStock(UUID demandId, StockRegion slot, ItemDescriptor item, long quantity, long tick) {
+        var d = demand(demandId).snapshot(); active(d, item, quantity);
+        if (d.goalKind() != Demand.GoalKind.CONSUMPTION || shares.size() >= MAX_SHARES) throw new IllegalArgumentException("Invalid local allocation");
+        UUID id = fresh(), obligation = fresh(); var lease = admit(d.colonyId(), d.lane(), Resource.COVERAGE_SHARES);
+        var result = new CoverageShare(id, d.colonyId(), demandId, null, null, obligation, slot, item, quantity, 0, CoverageShare.Stage.ALLOCATED);
+        var next = state(d, d.required(), d.fulfilled(), Math.addExact(d.allocated(), quantity), d.covered(), d.deliveredTotal(), d.status());
+        try { registry.storage().allocations().allocate(obligation, d.colonyId(), d.ownerId(), slot, item, quantity, tick, d.lane()); }
+        catch (RuntimeException failure) { lease.close(); throw failure; }
+        leases.put(id, lease); putShare(id, result); demand(demandId).replace(next); return result;
+    }
+    public void updateRequired(UUID demandId, long required) {
+        var d = demand(demandId); var s = d.snapshot(); Demand.quantity(required);
+        if (s.status() == Demand.Status.CANCELLED) throw new IllegalStateException("Cancelled demand cannot reopen");
+        if (required <= s.required()) { reduceRequired(demandId, required); return; }
+        var next = state(s, required, s.fulfilled(), s.allocated(), s.covered(), s.deliveredTotal(), Demand.Status.ACTIVE);
+        registry.beforeMutation(); d.replace(next);
     }
     private CoverageShare requiredShare(UUID id) { registry.requireOwner(); CoverageShare s = shares.get(id); if (s == null) throw new IllegalArgumentException("Unknown coverage share"); return s; }
-    private static CoverageShare resized(CoverageShare s, long count) { return new CoverageShare(s.id(), s.colonyId(), s.demandId(), s.sourceOrderId(), s.obligationId(), s.slot(), s.item(), count, Math.addExact(s.revision(), 1), s.stage()); }
+    private static CoverageShare resized(CoverageShare s, long count) { return new CoverageShare(s.id(), s.colonyId(), s.demandId(), s.sourceOrderId(), s.productionOrderId(), s.obligationId(), s.slot(), s.item(), count, Math.addExact(s.revision(), 1), s.stage()); }
     private static DeliveryOrder delivery(DeliveryOrder o, long transferred, DeliveryOrder.State state) {
         return new DeliveryOrder(o.id(), o.colonyId(), o.ownerDemandId(), o.source(), o.destination(), o.item(), o.quantity(), transferred, Math.addExact(o.revision(), 1), o.citizenId(), o.workId(), state, o.lane(), o.priority());
     }
@@ -540,32 +860,122 @@ public final class SupplyRegistry {
     }
     public void release(UUID shareId) {
         CoverageShare share = requiredShare(shareId);
+        if (productionSurplus(share.demandId())) throw new IllegalStateException("Begun output requires physical surplus delivery");
         if (share.stage() == CoverageShare.Stage.FULFILLED || share.stage() == CoverageShare.Stage.IN_TRANSIT) throw new IllegalArgumentException("Cannot erase consumed history or actual cargo");
-        Map<UUID, CoverageShare> staged = new LinkedHashMap<>(shares); staged.remove(shareId); var states = recomputed(staged);
-        registry.beforeMutation(); if (share.obligationId() != null) registry.storage().reduceObligations(Map.of(share.obligationId(), 0L));
-        publishShares(staged); states.forEach((id, s) -> demand(id).replace(s)); blockUnreferencedDeliveries(); recomputePriorities();
+        var owner=productions.get(demand(share.demandId()).snapshot().ownerId());
+        if(owner!=null && owner.batchStarted() && share.stage()==CoverageShare.Stage.ALLOCATED) throw new IllegalStateException("Begun batch retains ingredient allocation");
+        try (var plan = new ReductionPlan()) {
+            plan.releaseShare(share, share.quantity()); plan.resize(); plan.commit();
+        }
     }
     public void reduceRequired(UUID demandId, long required) { reduce(demandId, required, false); }
-    public void cancel(UUID demandId) { reduce(demandId, demand(demandId).snapshot().required(), true); }
+    public void cancel(UUID demandId) {
+        if (productionSurplus(demandId)) throw new IllegalStateException("Begun output requires physical surplus delivery");
+        reduce(demandId, demand(demandId).snapshot().required(), true);
+    }
     private void reduce(UUID demandId, long required, boolean cancel) {
         Demand d = demand(demandId); var old = d.snapshot(); Demand.quantity(required);
+        if (productionSurplus(demandId) && (cancel || required < old.required()))
+            throw new IllegalStateException("Begun output requires physical surplus delivery");
+        var producer = productions.get(old.ownerId());
+        if (producer != null && producer.batchStarted()) {
+            long minimum = old.fulfilled();
+            for (var ingredient : producer.recipe().ingredients()) if (ingredient.matcher().equals(old.matcher())) minimum = Math.addExact(minimum, ingredient.count());
+            if (cancel || required < minimum) throw new IllegalStateException("Begun batch retains its indivisible ingredient goal");
+        }
         if (!cancel && required > old.required()) throw new IllegalArgumentException("Required reduction cannot increase goal");
         if (old.status() == Demand.Status.CANCELLED || !cancel && required == old.required()) return;
-        long excess = cancel ? Long.MAX_VALUE : Math.max(0, old.fulfilled() + old.allocated() + old.covered() - required);
-        Map<UUID, CoverageShare> staged = new LinkedHashMap<>(shares); Map<UUID, Long> reductions = new LinkedHashMap<>();
-        for (CoverageShare.Stage stage : List.of(CoverageShare.Stage.PROMISED_OUTPUT, CoverageShare.Stage.RESERVED_STOCK, CoverageShare.Stage.ALLOCATED)) {
-            for (CoverageShare share : shares.values()) if (share.demandId().equals(demandId) && share.stage() == stage && excess > 0) {
-                long released = Math.min(excess, share.quantity()), kept = share.quantity() - released; excess -= released;
-                if (kept == 0) staged.remove(share.id()); else staged.put(share.id(), resized(share, kept));
+        try (var plan = new ReductionPlan()) {
+            plan.reduceDemand(demandId, required, cancel); plan.resize(); plan.commit();
+        }
+    }
+    /** All recursively released producer inputs and physical outputs are admitted before any owner changes. */
+    private final class ReductionPlan implements AutoCloseable {
+        private final Map<UUID, CoverageShare> staged = new LinkedHashMap<>(shares);
+        private final Map<UUID, Demand.Snapshot> states = new LinkedHashMap<>();
+        private final Map<UUID, ProductionOrder> orders = new LinkedHashMap<>(productions);
+        private final Map<UUID, Demand> surplus = new LinkedHashMap<>();
+        private final Map<UUID, AdmissionLedger.Lease> admitted = new LinkedHashMap<>();
+        private final Map<UUID, Long> reductions = new LinkedHashMap<>();
+        private final List<StorageRegistry.OwnershipTransfer> transfers = new ArrayList<>();
+        private final Set<UUID> returning = new LinkedHashSet<>();
+        private Demand.Snapshot current(UUID id) { return states.getOrDefault(id, demand(id).snapshot()); }
+        private void reduceDemand(UUID id, long required, boolean cancel) {
+            var old = current(id); var producer = orders.get(old.ownerId());
+            if (producer != null && producer.batchStarted()) {
+                long minimum = old.fulfilled();
+                for (var ingredient : producer.recipe().ingredients()) if (ingredient.matcher().equals(old.matcher())) minimum = Math.addExact(minimum, ingredient.count());
+                if (cancel || required < minimum) throw new IllegalStateException("Begun batch retains its indivisible ingredient goal");
+            }
+            if (old.status() == Demand.Status.CANCELLED || !cancel && required == old.required()) return;
+            long excess = cancel ? Long.MAX_VALUE : Math.max(0, old.fulfilled() + old.allocated() + old.covered() - required);
+            for (var stage : List.of(CoverageShare.Stage.PROMISED_OUTPUT, CoverageShare.Stage.RESERVED_STOCK, CoverageShare.Stage.ALLOCATED, CoverageShare.Stage.IN_TRANSIT))
+                for (var share : List.copyOf(staged.values())) if (share.demandId().equals(id) && share.stage() == stage && excess > 0) {
+                    if (stage == CoverageShare.Stage.IN_TRANSIT && !share.physicallyProduced()) {
+                        if (cancel) returning.add(share.sourceOrderId());
+                        continue;
+                    }
+                    long released = Math.min(excess, share.quantity()); excess -= released; releaseShare(share, released);
+                }
+            states.put(id, totals(old, staged.values(), required, old.deliveredTotal(), cancel ? Demand.Status.CANCELLED : Demand.Status.ACTIVE));
+        }
+        private void releaseShare(CoverageShare share, long released) {
+            long kept = share.quantity() - released;
+            if (kept == 0) staged.remove(share.id()); else staged.put(share.id(), resized(share, kept));
+            if (!share.physicallyProduced()) {
                 if (share.obligationId() != null) reductions.put(share.obligationId(), kept);
+            } else {
+                if (demands.size() + surplus.size() >= MAX_DEMANDS) throw new IllegalArgumentException("Surplus demand envelope exceeded");
+                var old = current(share.demandId()); UUID id = fresh();
+                var destination = registry.storage().registrations(share.colonyId()).stream()
+                        .filter(r -> surplusBuffer(share.colonyId(), r, share.slot().storage().dimension()))
+                        .min(Comparator.comparing(StorageRegistry.Registration::id)).map(StorageRegistry.Registration::address).orElse(old.destination());
+                var goal = new Demand(new Demand.Snapshot(id, share.colonyId(), id, new ItemMatcher(share.item().itemId(), share.item()),
+                        Demand.GoalKind.DELIVERY, destination, released, 0, 0, released, 0, 0, old.lane(), old.priority(), old.createdTick(), Demand.Status.ACTIVE, List.of()));
+                admitted.put(id, admit(share.colonyId(), old.lane(), Resource.DEMANDS)); surplus.put(id, goal);
+                UUID shareId = kept == 0 ? share.id() : fresh(), obligation = kept == 0 ? share.obligationId() : fresh();
+                if (kept > 0) {
+                    if (staged.size() >= MAX_SHARES) throw new IllegalArgumentException("Surplus share envelope exceeded");
+                    admitted.put(shareId, admit(share.colonyId(), old.lane(), Resource.COVERAGE_SHARES));
+                }
+                boolean cargo = share.stage() == CoverageShare.Stage.IN_TRANSIT;
+                staged.put(shareId, new CoverageShare(shareId, share.colonyId(), id, cargo ? share.sourceOrderId() : null,
+                        share.productionOrderId(), obligation, share.slot(), share.item(), released, Math.incrementExact(share.revision()),
+                        cargo ? CoverageShare.Stage.IN_TRANSIT : CoverageShare.Stage.RESERVED_STOCK));
+                transfers.add(new StorageRegistry.OwnershipTransfer(share.obligationId(), obligation, id, released));
+                if (cargo) returning.add(share.sourceOrderId());
+            }
+            var old = current(share.demandId()); states.put(old.id(), totals(old, staged.values(), old.required(), old.deliveredTotal(), old.status()));
+        }
+        private void resize() {
+            boolean changed;
+            do {
+                changed = false;
+                for (var p : List.copyOf(orders.values())) {
+                    if (p.terminal()) continue;
+                    long promised = 0;
+                    for (var share : staged.values()) if (p.id().equals(share.sourceOrderId()) && share.stage() == CoverageShare.Stage.PROMISED_OUTPUT) promised = Math.addExact(promised, share.quantity());
+                    long needed = Math.max(p.batchStarted() ? 1 : 0, promised == 0 ? 0 : p.recipe().batchesFor(promised));
+                    if (needed >= p.batches()) continue;
+                    orders.put(p.id(), p.update(needed, needed == 0 ? 0 : p.remainingActiveTicks(), p.completedBatches(), p.batchStarted(), p.workId(), p.citizenId(), needed == 0 ? ProductionOrder.State.CANCELLED : p.state(), p.lane(), p.priority()));
+                    changed = true;
+                    for (int i = 0; i < p.recipe().ingredients().size(); i++) {
+                        UUID child = UUID.nameUUIDFromBytes((p.id() + ":ingredient:" + i).getBytes(StandardCharsets.UTF_8));
+                        reduceDemand(child, Math.multiplyExact(Math.addExact(p.completedBatches(), needed), p.recipe().ingredients().get(i).count()), needed == 0);
+                    }
+                }
+            } while (changed);
+        }
+        private void commit() {
+            try (var physical = registry.storage().prepareOwnership(transfers, reductions)) {
+                registry.beforeMutation(); physical.commit();
+                demands.putAll(surplus); leases.putAll(admitted); admitted.clear();
+                publishShares(staged); states.forEach((id, value) -> demand(id).replace(value)); productions.putAll(orders);
+                for (UUID id : returning) { var order = delivery(id); deliveries.put(id, delivery(order, order.transferred(), DeliveryOrder.State.RETURNING)); }
+                blockUnreferencedDeliveries(); recomputePriorities();
             }
         }
-        var next = totals(old, staged.values(), required, old.deliveredTotal(), cancel ? Demand.Status.CANCELLED : Demand.Status.ACTIVE);
-        registry.beforeMutation(); registry.storage().reduceObligations(reductions); publishShares(staged); d.replace(next);
-        if (cancel) for (CoverageShare share : staged.values()) if (share.demandId().equals(demandId) && share.stage() == CoverageShare.Stage.IN_TRANSIT) {
-            DeliveryOrder order = deliveries.get(share.sourceOrderId()); if (order != null) deliveries.put(order.id(), delivery(order, order.transferred(), DeliveryOrder.State.RETURNING));
-        }
-        blockUnreferencedDeliveries(); recomputePriorities();
+        @Override public void close() { admitted.values().forEach(AdmissionLedger.Lease::close); admitted.clear(); }
     }
     private void blockUnreferencedDeliveries() {
         for (DeliveryOrder order : List.copyOf(deliveries.values())) if (!order.terminal() && !hasCargo(order.id())
@@ -581,14 +991,15 @@ public final class SupplyRegistry {
             changed = false;
             for (ProductionOrder order : List.copyOf(productions.values())) {
                 Lane lane = Lane.NORMAL; int priority = Integer.MIN_VALUE; boolean found = false;
-                for (CoverageShare share : shares.values()) if (order.id().equals(share.sourceOrderId()) && share.stage() != CoverageShare.Stage.FULFILLED) {
+                for (CoverageShare share : shares.values()) if ((order.id().equals(share.sourceOrderId()) || order.id().equals(share.productionOrderId())) && share.stage() != CoverageShare.Stage.FULFILLED) {
                     var d = demand(share.demandId()).snapshot(); if (d.status() == Demand.Status.CANCELLED) continue;
                     if (!found || laneRank(d.lane()) > laneRank(lane)) lane = d.lane(); priority = Math.max(priority, d.priority()); found = true;
                 }
                 if (!found) priority = 0;
                 if (lane != order.lane() || priority != order.priority()) {
-                    productions.put(order.id(), new ProductionOrder(order.id(), order.colonyId(), order.ownerDemandId(), order.recipe(), order.batches(), order.remainingActiveTicks(), Math.addExact(order.revision(), 1), order.workId(), order.citizenId(), order.state(), lane, priority)); changed = true;
+                    productions.put(order.id(), order.update(order.batches(), order.remainingActiveTicks(), order.completedBatches(), order.batchStarted(), order.workId(), order.citizenId(), order.state(), lane, priority)); changed = true;
                 }
+                if(order.workId()!=null) { var work=registry.workBoard().work(order.workId()); int inherited=Math.max(0,Math.min(10,priority)); if(!work.terminal() && work.priority()!=inherited) registry.workBoard().priority(work.id(),inherited); }
                 for (Demand ingredient : demands.values()) {
                     var s = ingredient.snapshot(); if (!s.ownerId().equals(order.id()) || s.status() == Demand.Status.CANCELLED) continue;
                     if (s.lane() != lane || s.priority() != priority) {
@@ -626,8 +1037,16 @@ public final class SupplyRegistry {
             var d = ds.get(share.demandId()); if (d == null || !d.colonyId().equals(share.colonyId()) || !d.matcher().matches(share.item())) throw new IllegalArgumentException("Invalid share consumer");
             ProductionOrder p = share.sourceOrderId() == null ? null : ps.get(share.sourceOrderId()); DeliveryOrder l = share.sourceOrderId() == null ? null : ls.get(share.sourceOrderId());
             if (share.sourceOrderId() != null && p == null && l == null) throw new IllegalArgumentException("Missing share source order");
-            if (p != null) { if (!p.colonyId().equals(share.colonyId()) || !p.recipe().output().equals(share.item())) throw new IllegalArgumentException("Invalid pinned output share"); output.merge(p.id(), share.quantity(), Math::addExact); }
-            if (l != null && (!l.colonyId().equals(share.colonyId()) || !l.ownerDemandId().equals(d.id()) || !l.item().equals(share.item()))) throw new IllegalArgumentException("Invalid delivery share");
+            if (p != null) { if (!p.colonyId().equals(share.colonyId()) || !p.recipe().output().equals(share.item())) throw new IllegalArgumentException("Invalid pinned output share"); if (share.stage() == CoverageShare.Stage.PROMISED_OUTPUT) output.merge(p.id(), share.quantity(), Math::addExact); }
+            if (share.productionOrderId() != null) {
+                var producer = ps.get(share.productionOrderId());
+                if (producer == null || !producer.colonyId().equals(share.colonyId()) || !producer.recipe().output().equals(share.item())
+                        || share.stage() == CoverageShare.Stage.PROMISED_OUTPUT && !producer.id().equals(share.sourceOrderId()))
+                    throw new IllegalArgumentException("Invalid recorded production provenance");
+            }
+            boolean returningSurplus = l != null && l.returnRequired() && d.goalKind() == Demand.GoalKind.DELIVERY
+                    && d.id().equals(d.ownerId()) && share.stage() == CoverageShare.Stage.IN_TRANSIT && share.physicallyProduced();
+            if (l != null && (!l.colonyId().equals(share.colonyId()) || !l.ownerDemandId().equals(d.id()) && !returningSurplus || !l.item().equals(share.item()))) throw new IllegalArgumentException("Invalid delivery share");
             if (share.stage() == CoverageShare.Stage.PROMISED_OUTPUT && p == null || share.stage() == CoverageShare.Stage.IN_TRANSIT && (l == null || l.terminal())) throw new IllegalArgumentException("Share/order stage mismatch");
             if (share.obligationId() != null) {
                 if (!obligationIds.add(share.obligationId())) throw new IllegalArgumentException("Physical obligation counted twice");
@@ -644,7 +1063,7 @@ public final class SupplyRegistry {
         for (var d : ds.values()) {
             long f = 0, a = 0, c = 0;
             for (var s : staged.values()) if (s.demandId().equals(d.id())) { if (s.stage() == CoverageShare.Stage.FULFILLED) f += s.quantity(); else if (s.stage() == CoverageShare.Stage.ALLOCATED) a += s.quantity(); else c += s.quantity(); }
-            if (f != d.fulfilled() || a != d.allocated() || c != d.covered() || d.deliveredTotal() < Math.addExact(a, f)) throw new IllegalArgumentException("Saved share arithmetic mismatch");
+            if (f != d.fulfilled() || a != d.allocated() || c != d.covered() || d.goalKind() == Demand.GoalKind.DELIVERY && d.deliveredTotal() < f) throw new IllegalArgumentException("Saved share arithmetic mismatch");
         }
         validatePins(List.of(), ps.values().stream().map(ProductionOrder::recipe).toList(), null);
         for (ProductionOrder order : ps.values()) {
@@ -652,7 +1071,16 @@ public final class SupplyRegistry {
                 UUID id = UUID.nameUUIDFromBytes((order.id() + ":ingredient:" + i).getBytes(StandardCharsets.UTF_8));
                 var child = ds.get(id); var ingredient = order.recipe().ingredients().get(i);
                 if (child == null || !child.ownerId().equals(order.id()) || !child.colonyId().equals(order.colonyId()) || !child.matcher().equals(ingredient.matcher())
-                        || child.required() > Math.multiplyExact(order.batches(), ingredient.count())) throw new IllegalArgumentException("Missing/invalid production ingredient goal");
+                        || child.goalKind() != Demand.GoalKind.CONSUMPTION || child.required() != Math.multiplyExact(order.batches() + order.completedBatches(), ingredient.count())
+                        || child.fulfilled() != Math.multiplyExact(order.completedBatches(), ingredient.count())
+                        || !order.terminal() && child.status() == Demand.Status.CANCELLED) throw new IllegalArgumentException("Missing/invalid production ingredient goal");
+                if (order.pinned()) {
+                    var workshop = storage.workshops().stream().filter(w -> w.id().equals(order.workshopId())).findFirst().orElse(null);
+                    if (workshop != null) {
+                        var registration = storage.registrations().stream().filter(r -> r.id().equals(workshop.registrationId())).findFirst().orElse(null);
+                        if (registration != null && registration.storages().contains(order.workshopStorage()) && !child.destination().equals(registration.positions().get(registration.storages().indexOf(order.workshopStorage())))) throw new IllegalArgumentException("Ingredient destination differs from pinned barrel");
+                    }
+                }
             }
         }
         for (Demand.Snapshot d : ds.values()) {
@@ -680,7 +1108,7 @@ public final class SupplyRegistry {
             registry.requireOwner(); if (snapshot == null) throw new IllegalStateException("Supply restore already closed");
             leases.values().forEach(AdmissionLedger.Lease::close); leases.clear(); leases.putAll(admitted); admitted.clear();
             demands.clear(); snapshot.demands().forEach(s -> demands.put(s.id(), new Demand(s)));
-            productions.clear(); snapshot.productionOrders().forEach(p -> productions.put(p.id(), p));
+            productions.clear(); productionIds.clear(); snapshot.productionOrders().forEach(p -> { productions.put(p.id(), p); productionIds.add(p.id()); });
             clearShares(); snapshot.shares().forEach(s -> putShare(s.id(), s)); dirtyObligations.clear();
             deliveries.clear(); deliveryIds.clear(); deliveryOffsets.clear(); snapshot.deliveries().forEach(SupplyRegistry.this::addDelivery); snapshot = null;
         }

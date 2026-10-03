@@ -10,7 +10,7 @@ public record ConstructionSnapshot(UUID workId, UUID colonyId, String blueprintD
     public ConstructionSnapshot {
         Objects.requireNonNull(workId); Objects.requireNonNull(colonyId); Objects.requireNonNull(blueprintDigest); Objects.requireNonNull(origin);
         if (blueprintDigest.length()!=64 || !(rotation==0 || rotation==90 || rotation==180 || rotation==270)
-                || cursor<0 || cursor>65536 || consumed<0 || consumed>cursor || claimRevision<0 || revision<0)
+                || cursor<0 || cursor>65536 || consumed<0 || consumed>1_000_000 || claimRevision<0 || revision<0)
             throw new IllegalArgumentException("Invalid construction snapshot");
     }
 }

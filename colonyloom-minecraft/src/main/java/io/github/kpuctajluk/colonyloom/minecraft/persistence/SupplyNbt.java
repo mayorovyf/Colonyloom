@@ -19,7 +19,7 @@ final class SupplyNbt {
     static Set<UUID> opaqueColonies(Map<String,List<CompoundTag>> retained) {
         Set<UUID> result=new HashSet<>();
         for(String key:List.of("demands","productionOrders","deliveries","evidence")) for(var tag:retained.get(key)) {
-            if((!key.equals("evidence") || tag.hasUUID("demandId") || tag.hasUUID("ownerDemandId")) && tag.hasUUID("colonyId")) result.add(colony(tag));
+            if((!key.equals("evidence") || tag.hasUUID("demandId") || tag.hasUUID("ownerDemandId") || tag.hasUUID("productionId")) && tag.hasUUID("colonyId")) result.add(colony(tag));
         }
         return result;
     }
@@ -43,6 +43,7 @@ final class SupplyNbt {
             if(tag.hasUUID("ownerDemandId"))reference(tag,"ownerDemandId",demandIds,opaqueDemands,opaque);
             if(tag.hasUUID("demandId"))reference(tag,"demandId",demandIds,opaqueDemands,opaque);
             if(tag.hasUUID("sourceOrderId"))reference(tag,"sourceOrderId",orderIds,opaqueOrders,opaque);
+            if(tag.hasUUID("productionOrderId"))reference(tag,"productionOrderId",orderIds,opaqueOrders,opaque);
             if(tag.hasUUID("workId"))reference(tag,"workId",works,unknownWorks,opaque);
             if(tag.hasUUID("obligationId"))reference(tag,"obligationId",obligations,opaqueObligations,opaque);
             if(tag.contains("recipeDigest")) {String digest=text(tag,"recipeDigest");if(!pins.containsKey(digest)){if(!unknownPins.contains(digest))throw new IllegalArgumentException("Missing production recipe snapshot");opaque.add(colony);}}
@@ -70,8 +71,8 @@ final class SupplyNbt {
         UUID reference=RegistryNbt.uuid(tag,key);if(known.contains(reference))return;if(!unknown.contains(reference))throw new IllegalArgumentException("Supply references missing "+key);opaque.add(colony(tag));
     }
     static boolean supported(CompoundTag tag) {
-        if(RegistryNbt.integer(tag,"schemaVersion")!=1) return false;
         String type=text(tag,"typeId");
+        int schema=RegistryNbt.integer(tag,"schemaVersion"); if (type.equals(PRODUCTION) ? schema!=1 && schema!=2 : schema!=1) return false;
         return switch(type) {
             case DEMAND -> member(Demand.Status.values(),text(tag,"status")) && member(Demand.GoalKind.values(),text(tag,"goalKind")) && member(Lane.values(),text(tag,"lane"));
             case SHARE -> member(CoverageShare.Stage.values(),text(tag,"stage"));
@@ -97,17 +98,25 @@ final class SupplyNbt {
         return new Demand.Snapshot(id(tag),colony(tag),RegistryNbt.uuid(tag,"ownerId"),matcher(compound(tag,"matcher")),Demand.GoalKind.valueOf(text(tag,"goalKind")),StorageNbt.position(compound(tag,"destination")),number(tag,"required"),number(tag,"fulfilled"),number(tag,"allocated"),number(tag,"covered"),number(tag,"deliveredTotal"),number(tag,"revision"),Lane.valueOf(text(tag,"lane")),RegistryNbt.integer(tag,"priority"),number(tag,"createdTick"),Demand.Status.valueOf(text(tag,"status")),sources);
     }
     static CompoundTag share(CoverageShare value) {
-        var tag=typed(SHARE,value.id(),value.colonyId());tag.putUUID("demandId",value.demandId());optional(tag,"sourceOrderId",value.sourceOrderId());optional(tag,"obligationId",value.obligationId());if(value.slot()!=null)tag.put("slot",StorageNbt.slot(value.slot()));tag.put("item",StorageNbt.item(value.item()));tag.putLong("quantity",value.quantity());tag.putLong("revision",value.revision());tag.putString("stage",value.stage().name());return tag;
+        var tag=typed(SHARE,value.id(),value.colonyId());tag.putUUID("demandId",value.demandId());optional(tag,"sourceOrderId",value.sourceOrderId());optional(tag,"productionOrderId",value.productionOrderId());optional(tag,"obligationId",value.obligationId());if(value.slot()!=null)tag.put("slot",StorageNbt.slot(value.slot()));tag.put("item",StorageNbt.item(value.item()));tag.putLong("quantity",value.quantity());tag.putLong("revision",value.revision());tag.putString("stage",value.stage().name());return tag;
     }
     static CoverageShare share(CompoundTag tag) {
-        return new CoverageShare(id(tag),colony(tag),RegistryNbt.uuid(tag,"demandId"),optional(tag,"sourceOrderId"),optional(tag,"obligationId"),tag.contains("slot")?StorageNbt.slot(compound(tag,"slot")):null,StorageNbt.item(compound(tag,"item")),number(tag,"quantity"),number(tag,"revision"),CoverageShare.Stage.valueOf(text(tag,"stage")));
+        return new CoverageShare(id(tag),colony(tag),RegistryNbt.uuid(tag,"demandId"),optional(tag,"sourceOrderId"),optional(tag,"productionOrderId"),optional(tag,"obligationId"),tag.contains("slot")?StorageNbt.slot(compound(tag,"slot")):null,StorageNbt.item(compound(tag,"item")),number(tag,"quantity"),number(tag,"revision"),CoverageShare.Stage.valueOf(text(tag,"stage")));
     }
     static CompoundTag production(ProductionOrder value) {
-        var tag=typed(PRODUCTION,value.id(),value.colonyId());tag.putUUID("ownerDemandId",value.ownerDemandId());tag.putString("recipeDigest",value.recipe().digest());tag.putLong("batches",value.batches());tag.putLong("remainingActiveTicks",value.remainingActiveTicks());order(tag,value.revision(),value.workId(),value.citizenId(),value.state().name(),value.lane(),value.priority());return tag;
+        var tag=typed(PRODUCTION,value.id(),value.colonyId());tag.putInt("schemaVersion",2);tag.putUUID("ownerDemandId",value.ownerDemandId());tag.putString("recipeDigest",value.recipe().digest());tag.putLong("batches",value.batches());tag.putLong("remainingActiveTicks",value.remainingActiveTicks());tag.putLong("completedBatches",value.completedBatches());tag.putBoolean("batchStarted",value.batchStarted());tag.putBoolean("pinned",value.pinned());if(value.pinned()){tag.putUUID("workshopId",value.workshopId());tag.put("equipmentPosition",StorageNbt.position(value.equipmentPosition()));tag.put("workshopStorage",StorageNbt.storage(value.workshopStorage()));}order(tag,value.revision(),value.workId(),value.citizenId(),value.state().name(),value.lane(),value.priority());return tag;
     }
     static ProductionOrder production(CompoundTag tag,Map<String,RecipeDefinition> pins) {
         var recipe=pins.get(text(tag,"recipeDigest"));if(recipe==null)throw new IllegalArgumentException("Missing pinned recipe");
-        return new ProductionOrder(id(tag),colony(tag),RegistryNbt.uuid(tag,"ownerDemandId"),recipe,number(tag,"batches"),number(tag,"remainingActiveTicks"),number(tag,"revision"),optional(tag,"workId"),optional(tag,"citizenId"),ProductionOrder.State.valueOf(text(tag,"state")),Lane.valueOf(text(tag,"lane")),RegistryNbt.integer(tag,"priority"));
+        if(RegistryNbt.integer(tag,"schemaVersion")==1) {
+            long batches=number(tag,"batches");
+            if(number(tag,"remainingActiveTicks")!=Math.multiplyExact(batches,recipe.activeTicks()) || optional(tag,"workId")!=null || optional(tag,"citizenId")!=null) throw new IllegalArgumentException("Legacy production contains unsupported physical progress");
+            var state=ProductionOrder.State.valueOf(text(tag,"state"));
+            return new ProductionOrder(id(tag),colony(tag),RegistryNbt.uuid(tag,"ownerDemandId"),recipe,batches,recipe.activeTicks(),number(tag,"revision"),null,null,state,Lane.valueOf(text(tag,"lane")),RegistryNbt.integer(tag,"priority"),null,null,null,0,false);
+        }
+        if (!tag.contains("batchStarted",Tag.TAG_BYTE) || !tag.contains("pinned",Tag.TAG_BYTE)) throw new IllegalArgumentException("Missing production batch phase/pin");
+        boolean pinned=tag.getBoolean("pinned");
+        return new ProductionOrder(id(tag),colony(tag),RegistryNbt.uuid(tag,"ownerDemandId"),recipe,number(tag,"batches"),number(tag,"remainingActiveTicks"),number(tag,"revision"),optional(tag,"workId"),optional(tag,"citizenId"),ProductionOrder.State.valueOf(text(tag,"state")),Lane.valueOf(text(tag,"lane")),RegistryNbt.integer(tag,"priority"),pinned?RegistryNbt.uuid(tag,"workshopId"):null,pinned?StorageNbt.position(compound(tag,"equipmentPosition")):null,pinned?StorageNbt.storage(compound(tag,"workshopStorage")):null,number(tag,"completedBatches"),tag.getBoolean("batchStarted"));
     }
     static CompoundTag delivery(DeliveryOrder value) {
         var tag=typed(DELIVERY,value.id(),value.colonyId());tag.putUUID("ownerDemandId",value.ownerDemandId());tag.put("source",StorageNbt.slot(value.source()));tag.put("destination",StorageNbt.position(value.destination()));tag.put("item",StorageNbt.item(value.item()));tag.putLong("quantity",value.quantity());tag.putLong("transferred",value.transferred());order(tag,value.revision(),value.workId(),value.citizenId(),value.state().name(),value.lane(),value.priority());return tag;

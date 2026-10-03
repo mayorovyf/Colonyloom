@@ -291,10 +291,19 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         @Override protected void trimPath() { /* Search already validates the exact target; do not re-read arbitrary sky columns. */ }
         @Override public boolean canCutCorner(net.minecraft.world.level.pathfinder.PathType type) { return false; }
         @Override protected double getGroundY(Vec3 target) { return target.y; }
+        // Airborne block-coordinate advancement can skip a descending corner before its center.
+        @Override protected boolean canUpdatePath() { return true; }
         @Override protected void followThePath() {
-            if (path.getNextNodeIndex()!=path.getNodeCount()-1) { super.followThePath(); return; }
-            Node last=path.getNextNode();
-            if (mob.distanceToSqr(last.x+0.5,last.y,last.z+0.5)<=0.01) path.advance();
+            Node next=path.getNextNode();
+            // Cardinal search validates center-to-center transitions, not early diagonal turns beside containers.
+            if (mob.distanceToSqr(next.x+0.5,next.y,next.z+0.5)<=0.01) {
+                path.advance();
+                if(!path.isDone()) {
+                    Node following=path.getNextNode();
+                    if(following.x!=next.x && Math.abs(mob.getDeltaMovement().z)>0 || following.z!=next.z && Math.abs(mob.getDeltaMovement().x)>0)
+                        mob.setDeltaMovement(mob.getDeltaMovement().multiply(0,1,0));
+                }
+            }
             doStuckDetection(getTempMobPos());
         }
     }

@@ -155,11 +155,10 @@ public final class ConstructionPersistenceGameTests {
         reject(helper,() -> registry.effects().update(changed),"Immutable expected state rewritten");
         var observed=before.observed(3,false); registry.effects().update(observed);
         reject(helper,() -> registry.effects().update(new EffectRecord(observed.operationId(),observed.colonyId(),observed.workId(),observed.citizenId(),1,observed.kind(),observed.target(),observed.expectedBlock(),observed.itemId(),4,4,EffectRecord.State.PREPARED,2,null)),"Observed fact rewound");
-        var progressed=new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),2,1,1,1,false); registry.construction().update(progressed);
-        reject(helper,() -> registry.construction().update(new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),1,1,1,2,false)),"Cursor moved backwards");
-        reject(helper,() -> registry.construction().update(new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),2,2,1,2,false)),"Consumed material increased without progress");
-        registry.construction().update(new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),2,1,1,2,true));
-        reject(helper,() -> registry.construction().update(new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),2,1,1,3,false)),"Closed site reopened");
+        var progressed=new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),1,1,1,1,false); registry.construction().update(progressed);
+        reject(helper,() -> registry.construction().update(new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),1,2,1,2,false)),"Consumed material increased without progress");
+        registry.construction().update(new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),1,1,1,2,true));
+        reject(helper,() -> registry.construction().update(new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),1,1,1,3,false)),"Closed site reopened");
         helper.succeed();
     }
 

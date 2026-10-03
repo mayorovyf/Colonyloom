@@ -53,6 +53,8 @@ public final class StorageService {
         try {
             Physical physical = physical(address, true);
             if (physical == null) throw new IllegalStateException("CHUNK_NOT_READY or unsupported native inventory");
+            if(role.equals("construction") && (physical.halves().size()!=1 || !(physical.halves().getFirst() instanceof BarrelBlockEntity)))
+                throw new IllegalArgumentException("Construction buffer requires a real barrel");
             for (WorldPosition position : physical.positions()) requirePosition(colony, position);
             var registration = storage.register(colony, address, role, physical.identities(), physical.slots(), physical.positions());
             remember(registration);
@@ -92,6 +94,23 @@ public final class StorageService {
         Physical physical = physical(inventory, false);
         if (physical == null || !physical.identities().equals(registration.storages())) throw new IllegalStateException("Workshop storage identity is not current");
         return storage.registerWorkshop(colony, table, registration.id());
+    }
+    /** Fixed-size workshop guard: actual current crafting table and one registered native barrel, no loading. */
+    public BarrelBlockEntity currentWorkshopBarrel(StorageRegistry.Workshop workshop) {
+        owner(); Objects.requireNonNull(workshop);
+        if (!storage.workshops().contains(workshop) || !registry.colony(workshop.colonyId()).available()) return null;
+        var registration=storage.registrations(workshop.colonyId()).stream()
+                .filter(value -> value.id().equals(workshop.registrationId())).findFirst().orElse(null);
+        if (registration==null || !registration.role().equals("workshop") || registration.storages().size()!=1
+                || registration.positions().size()!=1 || !registration.address().equals(registration.positions().getFirst())
+                || !registration.address().dimension().equals(workshop.position().dimension())) return null;
+        var colony=registry.colony(workshop.colonyId());
+        if (!colony.territory().contains(workshop.position()) || !colony.territory().contains(registration.address())) return null;
+        ServerLevel nativeLevel=level(workshop.position().dimension()); BlockPos table=blockPos(workshop.position());
+        if (!ready(nativeLevel,table) || !nativeLevel.getBlockState(table).is(Blocks.CRAFTING_TABLE)) return null;
+        Container container=currentContainer(registration.slots().getFirst());
+        return container instanceof BarrelBlockEntity barrel && barrel.getBlockPos().equals(blockPos(registration.address()))
+                && nativeLevel.getBlockEntity(blockPos(registration.address()))==barrel ? barrel : null;
     }
 
     /** Renewing identity never carries old promises; retirement persists across restarts. */
@@ -222,7 +241,7 @@ public final class StorageService {
         if (!container.canPlaceItem(slot,candidate) || !current.isEmpty() && !ItemStack.isSameItemSameComponents(current,candidate)) return 0;
         return Math.max(0,Math.min(container.getMaxStackSize(),candidate.getMaxStackSize())-current.getCount());
     }
-    long observationTick() { owner(); return Math.max(0,budgets.tick()); }
+    public long observationTick() { owner(); return Math.max(0,budgets.tick()); }
 
     /** Rechecks current binding, lifecycle, active admission and entity-ticking readiness. */
     public CitizenEntity currentCitizen(UUID id, long epoch, String dimension) {

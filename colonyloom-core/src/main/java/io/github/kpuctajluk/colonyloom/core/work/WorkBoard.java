@@ -62,6 +62,9 @@ public final class WorkBoard {
     public WorkOrder createDelivery(UUID id, UUID colony, WorldPosition target, int priority, Lane lane) {
         return create(id, colony, target, "colonyloom:courier", priority, lane, WorkOrder.DELIVERY, "delivery", 0);
     }
+    public WorkOrder createProduction(UUID id, UUID colony, WorldPosition target, String profession, int priority, Lane lane) {
+        return create(id, colony, target, profession, priority, lane, WorkOrder.PRODUCTION, "production", 0);
+    }
     private WorkOrder create(UUID id, UUID colony, WorldPosition target, String profession, int priority, Lane lane, String type, String stage, long duration) {
         registry.requireOwner();
         if (!registry.colony(colony).territory().contains(target) || works.containsKey(id) || registry.usedId(id)) throw new IllegalArgumentException("Invalid work identity or target");
@@ -111,6 +114,10 @@ public final class WorkBoard {
     }
     public void cancel(UUID id) {
         WorkOrder value = work(id); if (value.terminal()) return;
+        var production = registry.supply().productionForWork(id);
+        if (production != null && !production.terminal()) {
+            throw new IllegalStateException("Cancel consumer shares instead of an indivisible production batch");
+        }
         var delivery = registry.supply().deliveryForWork(id);
         if (delivery != null) {
             registry.supply().cancel(delivery.ownerDemandId());
@@ -133,6 +140,8 @@ public final class WorkBoard {
     public void markColonyChanged(UUID id) { registry.requireOwner(); colonyChanged.accept(id); }
     public void transition(UUID id, WorkOrder.State state, WorkOrder.Reason reason, String stage) {
         WorkOrder value = work(id);
+        var production = registry.supply().productionForWork(id);
+        if (production != null && !production.terminal() && (state == WorkOrder.State.CANCELLED || state == WorkOrder.State.COMPLETED || state == WorkOrder.State.FAILED)) throw new IllegalStateException("Production retains live batch");
         if (value.state() == state && value.waitingReason() == reason && value.stage().equals(stage)) return;
         if (state == WorkOrder.State.CANCELLED && registry.supply().deliveryForWork(id) != null
                 && registry.supply().hasCargo(registry.supply().deliveryForWork(id).id())) { cancel(id); return; }
@@ -163,6 +172,9 @@ public final class WorkBoard {
         if (delivery != null && registry.supply().hasCargo(delivery.id()) && !citizenId.equals(delivery.citizenId())) return false;
         if (value.state() != WorkOrder.State.READY || citizen.assignedWorkId() != null || !citizen.colonyId().equals(value.colonyId()) || citizen.lifecycle() != CitizenRecord.Lifecycle.ALIVE || citizen.admission() != CitizenRecord.Admission.ACTIVE || citizen.readiness() != CitizenRecord.Readiness.READY) return false;
         if (value.professionId() != null && !value.professionId().equals(citizen.professionId())) return false;
+        var production = registry.supply().productionForWork(id);
+        if (production != null && (!production.workshopId().equals(citizen.workplaceId()) || registry.supply().completeProductionKit(production.id()).isEmpty()
+                || production.batchStarted() && production.citizenId() != null && !citizenId.equals(production.citizenId()))) return false;
         registry.beforeMutation(); value.assignment(citizenId); value.transition(WorkOrder.State.ASSIGNED,WorkOrder.Reason.NONE,value.stage());
         registry.updateCitizen(citizen.withAssignment(id)); changed.accept(id); return true;
     }
@@ -198,7 +210,8 @@ public final class WorkBoard {
         WorkOrder value = work(id);
         if (!value.terminal() || !(WorkOrder.ACTIVE_WAIT.equals(value.typeId()) || WorkOrder.MOVE.equals(value.typeId())
                 || WorkOrder.CONSTRUCTION.equals(value.typeId()) && registry.construction().site(id)==null
-                || WorkOrder.DELIVERY.equals(value.typeId()) && !registry.supply().hasDeliveryWork(id))) throw new IllegalStateException("Work has retained obligations");
+                || WorkOrder.DELIVERY.equals(value.typeId()) && !registry.supply().hasDeliveryWork(id)
+                || WorkOrder.PRODUCTION.equals(value.typeId()) && registry.supply().productionForWork(id) == null)) throw new IllegalStateException("Work has retained obligations");
         for (var effect : registry.effects().snapshots()) if (id.equals(effect.workId())) throw new IllegalStateException("Work has retained witness");
         for (var citizen : registry.citizensView()) if (id.equals(citizen.assignedWorkId())) throw new IllegalStateException("Work has retained assignment");
         for (var claim : registry.targetClaims().snapshots()) if (id.equals(claim.ownerId())) throw new IllegalStateException("Work has retained target");

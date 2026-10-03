@@ -10,5 +10,5 @@ public interface WorldAccess {
 
     boolean matches(WorldPosition target, BlockDescriptor expected);
 
-    Placement place(ActionContext context, long bindingEpoch, BlockDescriptor expected);
+    Placement place(ActionContext context, long bindingEpoch, BlockDescriptor expected, int sourceSlot);
 }

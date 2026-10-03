@@ -39,13 +39,18 @@ final class ConstructionNbt {
         if(value.workId()!=null) tag.putUUID("workId",value.workId()); tag.putLong("bindingEpoch",value.bindingEpoch()); tag.putString("kind",value.kind().name());
         tag.put("target",position(value.target())); tag.putString("expectedBlock",value.expectedBlock()); tag.putString("itemId",value.itemId());
         tag.putInt("countBefore",value.countBefore()); tag.putInt("countAfter",value.countAfter()); tag.putString("state",value.state().name()); tag.putLong("revision",value.revision());
-        if(value.transfer()!=null) tag.put("transfer",transfer(value.transfer())); return tag;
+        if(value.transfer()!=null) tag.put("transfer",transfer(value.transfer()));
+        if(value.craft()!=null) {
+            tag.put("craft",craft(value.craft())); tag.putUUID("productionId",value.craft().productionId());
+            tag.putUUID("buildingId",value.craft().workshopId());
+        }
+        return tag;
     }
     static EffectRecord effect(CompoundTag tag) {
         return new EffectRecord(uuid(tag,"operationId"),uuid(tag,"colonyId"),tag.contains("workId")?uuid(tag,"workId"):null,uuid(tag,"citizenId"),number(tag,"bindingEpoch"),
                 ActionContext.Kind.valueOf(text(tag,"kind",64)),position(compound(tag,"target")),boundedText(tag,"expectedBlock",1024),boundedText(tag,"itemId",256),
                 integer(tag,"countBefore"),integer(tag,"countAfter"),EffectRecord.State.valueOf(text(tag,"state",64)),number(tag,"revision"),
-                tag.contains("transfer")?transfer(compound(tag,"transfer")):null);
+                tag.contains("transfer")?transfer(compound(tag,"transfer")):null,tag.contains("craft")?craft(compound(tag,"craft")):null);
     }
     private static CompoundTag transfer(EffectRecord.Transfer value) {
         var tag=new CompoundTag(); tag.putInt("schemaVersion",1);
@@ -59,6 +64,40 @@ final class ConstructionNbt {
         return new EffectRecord.Transfer(StorageNbt.slot(compound(tag,"source")),StorageNbt.slot(compound(tag,"destination")),StorageNbt.item(compound(tag,"item")),
                 integer(tag,"sourceBefore"),integer(tag,"sourceAfter"),integer(tag,"destinationBefore"),integer(tag,"destinationAfter"),
                 integer(tag,"maximum"),integer(tag,"extracted"),integer(tag,"inserted"),integer(tag,"returned"));
+    }
+    private static CompoundTag craft(EffectRecord.Craft value) {
+        var tag=new CompoundTag(); tag.putInt("schemaVersion",1); tag.putUUID("productionId",value.productionId()); tag.putLong("batchOrdinal",value.batchOrdinal());
+        tag.putUUID("workshopId",value.workshopId()); tag.putUUID("registrationId",value.registrationId()); tag.putLong("workshopRevision",value.workshopRevision());
+        tag.put("table",position(value.table())); tag.put("inventory",position(value.inventory())); tag.putString("recipeId",value.recipeId());
+        tag.putInt("recipeVersion",value.recipeVersion()); tag.putString("recipeDigest",value.recipeDigest()); tag.putString("phase",value.phase().name());
+        tag.put("output",StorageNbt.item(value.output())); tag.putInt("outputCount",value.outputCount());
+        tag.put("inputs",craftSlots(value.inputs())); tag.put("outputs",craftSlots(value.outputs())); return tag;
+    }
+    private static EffectRecord.Craft craft(CompoundTag tag) {
+        if(integer(tag,"schemaVersion")!=1) throw new IllegalArgumentException("Unsupported craft evidence schema");
+        return new EffectRecord.Craft(uuid(tag,"productionId"),number(tag,"batchOrdinal"),uuid(tag,"workshopId"),uuid(tag,"registrationId"),number(tag,"workshopRevision"),
+                position(compound(tag,"table")),position(compound(tag,"inventory")),text(tag,"recipeId",256),integer(tag,"recipeVersion"),text(tag,"recipeDigest",64),
+                craftSlots(RegistryNbt.list(tag,"inputs")),StorageNbt.item(compound(tag,"output")),integer(tag,"outputCount"),
+                craftSlots(RegistryNbt.list(tag,"outputs")),EffectRecord.CraftPhase.valueOf(text(tag,"phase",64)));
+    }
+    private static ListTag craftSlots(java.util.List<EffectRecord.CraftSlot> values) {
+        var list=new ListTag();
+        for(var value:values) {
+            var tag=new CompoundTag(); tag.put("slot",StorageNbt.slot(value.slot())); tag.putInt("beforeCount",value.beforeCount()); tag.putInt("afterCount",value.afterCount());
+            tag.putInt("amount",value.amount()); if(value.beforeItem()!=null) tag.put("beforeItem",StorageNbt.item(value.beforeItem()));
+            if(value.afterItem()!=null) tag.put("afterItem",StorageNbt.item(value.afterItem())); list.add(tag);
+        }
+        return list;
+    }
+    private static java.util.List<EffectRecord.CraftSlot> craftSlots(ListTag values) {
+        if(values.isEmpty() || values.size()>EffectRecord.Craft.MAX_SLOTS) throw new IllegalArgumentException("Craft slot envelope exceeded");
+        var result=new ArrayList<EffectRecord.CraftSlot>(values.size());
+        for(var value:values) {
+            var tag=(CompoundTag)value;
+            result.add(new EffectRecord.CraftSlot(StorageNbt.slot(compound(tag,"slot")),tag.contains("beforeItem")?StorageNbt.item(compound(tag,"beforeItem")):null,
+                    integer(tag,"beforeCount"),tag.contains("afterItem")?StorageNbt.item(compound(tag,"afterItem")):null,integer(tag,"afterCount"),integer(tag,"amount")));
+        }
+        return result;
     }
     static final int MAX_PALETTE = 512;
     static CompoundTag blueprint(BlueprintDefinition definition) {
@@ -85,7 +124,14 @@ final class ConstructionNbt {
         boolean knownKind=false, knownState=false;
         for(var value:ActionContext.Kind.values()) knownKind |= value.name().equals(kind);
         for(var value:EffectRecord.State.values()) knownState |= value.name().equals(state);
-        return knownKind && knownState && (!tag.contains("transfer") || integer(compound(tag,"transfer"),"schemaVersion")==1);
+        boolean knownCraft=true;
+        if(tag.contains("craft")) {
+            var craft=compound(tag,"craft");
+            if(integer(craft,"schemaVersion")!=1) return false;
+            knownCraft=false;
+            for(var phase:EffectRecord.CraftPhase.values()) knownCraft |= phase.name().equals(text(craft,"phase",64));
+        }
+        return knownKind && knownState && knownCraft && (!tag.contains("transfer") || integer(compound(tag,"transfer"),"schemaVersion")==1);
     }
     static BlueprintDefinition blueprint(CompoundTag tag) {
         if(!knownBlueprintSchema(tag)) throw new IllegalArgumentException("Unsupported pinned blueprint schema");
