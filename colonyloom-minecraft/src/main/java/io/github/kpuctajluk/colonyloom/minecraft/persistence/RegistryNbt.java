@@ -53,7 +53,7 @@ final class RegistryNbt {
                 case "colonies" -> 3;
                 case "citizens" -> 300;
                 case "buildings" -> 512;
-                case "bindingObservations" -> 256;
+                case "bindingObservations" -> BindingRegistry.MAX_OBSERVATIONS;
                 case "works", "productionOrders", "deliveries" -> 8192;
                 case "demands" -> 16384;
                 case "reservations", "allocations" -> 32768;
@@ -70,7 +70,7 @@ final class RegistryNbt {
                 String type = string(entry, "typeId");
                 if (type.equals(KNOWN_TYPES.get(key)) || key.equals("works") && (type.equals(WorkOrder.MOVE) || type.equals(WorkOrder.CONSTRUCTION))
                         || key.equals("evidence") && (type.equals(ConstructionNbt.SITE) || type.equals(ConstructionNbt.EFFECT))
-                        || key.equals("pinnedDefinitions") && type.equals(ConstructionNbt.PIN)) {
+                        || StorageNbt.known(key,type) || key.equals("pinnedDefinitions") && type.equals(ConstructionNbt.PIN)) {
                     if (key.equals("pinnedDefinitions") && type.equals(ConstructionNbt.PIN) && !ConstructionNbt.knownBlueprintSchema(entry)
                             || key.equals("evidence") && type.equals(ConstructionNbt.EFFECT) && !ConstructionNbt.knownEffect(entry)) {
                         opaque.add(entry.copy());
@@ -287,8 +287,60 @@ final class RegistryNbt {
                 retained.get("evidence").add(entry.copy()); blocked.add(effect.colonyId());
             } else effects.add(effect);
         }
+        var registrations=new ArrayList<io.github.kpuctajluk.colonyloom.core.storage.StorageRegistry.Registration>();
+        var workshops=new ArrayList<io.github.kpuctajluk.colonyloom.core.storage.StorageRegistry.Workshop>();
+        var reservations=new ArrayList<io.github.kpuctajluk.colonyloom.core.storage.ReservationLedger.Entry>();
+        var allocations=new ArrayList<io.github.kpuctajluk.colonyloom.core.storage.AllocationLedger.Entry>();
+        var retired=new ArrayList<io.github.kpuctajluk.colonyloom.core.storage.StorageRegistry.RetiredIdentity>();
+        Set<UUID> unknownRegistrations=referencedIds(retained.get("evidence"),"registrationId");
+        Set<UUID> unknownStockColonies=new HashSet<>();
+        for(var entry:retained.get("evidence")) if(entry.hasUUID("registrationId") && entry.hasUUID("colonyId")) unknownStockColonies.add(uuid(entry,"colonyId"));
+        Set<UUID> registrationIds=new HashSet<>();
+        for(var entry:retained.get("evidence")) {
+            String idKey=entry.hasUUID("buildingId")?"buildingId":entry.hasUUID("registrationId")?"registrationId":null;
+            if(idKey!=null && !objectIds.add(uuid(entry,idKey))) throw invalid("Duplicate opaque stock object identity");
+        }
+        for(var entry:known.get("evidence")) if(string(entry,"typeId").equals(StorageNbt.REGISTRATION)) {
+            var value=StorageNbt.registration(entry);
+            if(!objectIds.add(value.id())) throw invalid("Duplicate stock registration identity");
+            if(!colonyIds.contains(value.colonyId())) {
+                if(!unknownColonies.contains(value.colonyId())) throw invalid("Stock references missing colony");
+                unknownStockColonies.add(value.colonyId());
+                retained.get("evidence").add(entry.copy());unknownRegistrations.add(value.id());
+            } else { registrations.add(value);registrationIds.add(value.id()); }
+        }
+        for(var entry:known.get("evidence")) if(string(entry,"typeId").equals(StorageNbt.WORKSHOP)) {
+            var value=StorageNbt.workshop(entry);
+            if(!objectIds.add(value.id())) throw invalid("Duplicate stock workshop identity");
+            if(!colonyIds.contains(value.colonyId()) && !unknownColonies.contains(value.colonyId())) throw invalid("Workshop references missing colony");
+            if(!registrationIds.contains(value.registrationId()) && !unknownRegistrations.contains(value.registrationId())) throw invalid("Workshop references missing storage");
+            if(!colonyIds.contains(value.colonyId()) || unknownRegistrations.contains(value.registrationId())) { retained.get("evidence").add(entry.copy());blocked.add(value.colonyId()); }
+            else workshops.add(value);
+        }
+        for(var entry:known.get("evidence")) if(string(entry,"typeId").equals(StorageNbt.RETIRED)) {
+            var value=StorageNbt.retired(entry);
+            if(!colonyIds.contains(value.colonyId())) {
+                if(!unknownColonies.contains(value.colonyId())) throw invalid("Retired storage references missing colony");
+                retained.get("evidence").add(entry.copy());
+            } else retired.add(value);
+        }
+        for(String key:List.of("reservations","allocations")) {
+            for(var entry:retained.get(key)) if(entry.hasUUID("obligationId") && !objectIds.add(uuid(entry,"obligationId"))) throw invalid("Duplicate opaque stock obligation");
+            for(var entry:known.get(key)) {
+                UUID colony=uuid(entry,"colonyId"),id=uuid(entry,"obligationId");
+                if(!objectIds.add(id)) throw invalid("Duplicate stock obligation");
+                if(!colonyIds.contains(colony)) {
+                    if(!unknownColonies.contains(colony)) throw invalid("Stock obligation references missing colony");
+                    retained.get(key).add(entry.copy());continue;
+                }
+                if(unknownStockColonies.contains(colony)) { retained.get(key).add(entry.copy());blocked.add(colony);continue; }
+                if(key.equals("reservations")) reservations.add(StorageNbt.reservation(entry));
+                else allocations.add(StorageNbt.allocation(entry));
+            }
+        }
+        var storage=new io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot(registrations,reservations,allocations,workshops,retired);
         blocked.retainAll(colonyIds);
-        return new Decoded(new RegistrySnapshot(colonies, citizens, buildings, tombstones, observations, works, claims, effects, sites, pins), retained, blocked);
+        return new Decoded(new RegistrySnapshot(colonies, citizens, buildings, tombstones, observations, works, claims, effects, sites, pins, storage), retained, blocked);
     }
 
     static CompoundTag encode(RegistrySnapshot snapshot, UUID checkpoint, Map<String, List<CompoundTag>> retained) {
@@ -304,6 +356,11 @@ final class RegistryNbt {
         for (var effect : snapshot.effects()) root.getList("evidence",Tag.TAG_COMPOUND).add(ConstructionNbt.effect(effect));
         for (var site : snapshot.constructionSites()) root.getList("evidence",Tag.TAG_COMPOUND).add(ConstructionNbt.site(site));
         for (var pin : snapshot.pinnedBlueprints()) root.getList("pinnedDefinitions",Tag.TAG_COMPOUND).add(ConstructionNbt.blueprint(pin));
+        for(var value:snapshot.storage().registrations()) root.getList("evidence",Tag.TAG_COMPOUND).add(StorageNbt.registration(value));
+        for(var value:snapshot.storage().workshops()) root.getList("evidence",Tag.TAG_COMPOUND).add(StorageNbt.workshop(value));
+        for(var value:snapshot.storage().reservations()) root.getList("reservations",Tag.TAG_COMPOUND).add(StorageNbt.reservation(value));
+        for(var value:snapshot.storage().allocations()) root.getList("allocations",Tag.TAG_COMPOUND).add(StorageNbt.allocation(value));
+        for(var value:snapshot.storage().retiredIdentities()) root.getList("evidence",Tag.TAG_COMPOUND).add(StorageNbt.retired(value));
         for (BuildingRecord value : snapshot.buildings()) {
             CompoundTag entry = typed("colonyloom:building");
             entry.putUUID("buildingId", value.buildingId());

@@ -66,6 +66,7 @@ public final class IdentityScenarioMod {
         NeoForge.EVENT_BUS.addListener(this::stopped);
         new ConstructionScenario();
         new PlatformScenario();
+        new StorageScenario();
     }
 
     private void register(RegisterCommandsEvent event) {

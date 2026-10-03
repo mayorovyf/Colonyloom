@@ -68,6 +68,23 @@ final class ColonyloomBrigadier {
                         .then(argument("pos",BlockPosArgument.blockPos())
                                 .then(argument("rotation",IntegerArgumentType.integer(0,270)).executes(ctx -> execute(ctx,resolve,platform ->
                                         platform.build(ctx.getSource(),uuid(ctx,"colony"),ResourceLocationArgument.getId(ctx,"blueprint").toString(),pos(ctx,"pos"),IntegerArgumentType.getInteger(ctx,"rotation")))))))));
+        var storage = literal("storage");
+        var storageRegister = argument("role", StringArgumentType.word()).executes(ctx -> execute(ctx, resolve, platform ->
+                platform.registerStorage(ctx.getSource(), uuid(ctx, "colony"), pos(ctx, "pos"), StringArgumentType.getString(ctx, "role"))));
+        storage.then(literal("register").then(argument("colony", UuidArgument.uuid()).then(argument("pos", BlockPosArgument.blockPos()).then(storageRegister))));
+        var storageRepair = argument("pos", BlockPosArgument.blockPos()).executes(ctx -> execute(ctx, resolve, platform ->
+                platform.reidentifyStorage(ctx.getSource(), uuid(ctx, "colony"), pos(ctx, "pos"))));
+        storage.then(literal("reidentify").requires(source -> source.hasPermission(2)).then(argument("colony", UuidArgument.uuid()).then(storageRepair)));
+        storage.then(literal("stock").then(argument("colony", UuidArgument.uuid()).executes(ctx -> execute(ctx, resolve, platform ->
+                platform.stock(ctx.getSource(), uuid(ctx, "colony"))))));
+        var citizenStorage = argument("role", StringArgumentType.word()).executes(ctx -> execute(ctx, resolve, platform ->
+                platform.registerCitizenStorage(ctx.getSource(), uuid(ctx, "colony"), uuid(ctx, "citizen"), StringArgumentType.getString(ctx, "role"))));
+        storage.then(literal("register-citizen").then(argument("colony", UuidArgument.uuid()).then(argument("citizen", UuidArgument.uuid()).then(citizenStorage))));
+        root.then(storage);
+        var workshopStorage = argument("workshop_storage_pos", BlockPosArgument.blockPos()).executes(ctx -> execute(ctx, resolve, platform ->
+                platform.registerBuilding(ctx.getSource(), uuid(ctx, "colony"), pos(ctx, "crafting_table_pos"), pos(ctx, "workshop_storage_pos"))));
+        root.then(literal("building").then(literal("register").then(argument("colony", UuidArgument.uuid())
+                .then(argument("crafting_table_pos", BlockPosArgument.blockPos()).then(workshopStorage)))));
         var recovery = literal("recovery").requires(source -> source.hasPermission(2));
         recovery.then(literal("inspect").then(argument("colony", UuidArgument.uuid()).executes(ctx -> execute(ctx, resolve, platform ->
                 platform.inspect(ctx.getSource(), uuid(ctx, "colony"))))));

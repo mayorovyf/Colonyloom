@@ -123,7 +123,7 @@ public final class ConstructionPersistenceGameTests {
         var pins=new ArrayList<BlueprintDefinition>();
         for(int version=1;version<=2;version++) pins.add(BlueprintDefinition.create("colonyloom:large",version,blocks,Map.of("work_origin",new BlockOffset(0,0,1))));
         var current=loaded.snapshot();
-        loaded.capture(new RegistrySnapshot(current.colonies(),current.citizens(),current.buildings(),current.tombstones(),current.observations(),current.works(),current.targetClaims(),current.effects(),current.constructionSites(),pins));
+        loaded.capture(new RegistrySnapshot(current.colonies(), current.citizens(), current.buildings(), current.tombstones(), current.observations(), current.works(), current.targetClaims(), current.effects(), current.constructionSites(), pins, current.storage()));
         reject(helper,() -> loaded.save(new CompoundTag(),helper.getLevel().registryAccess()),"Known plus retained pins over 64MiB encoded");
         helper.succeed();
     }
@@ -169,7 +169,7 @@ public final class ConstructionPersistenceGameTests {
         var work=new WorkOrder.Snapshot(WorkOrder.CONSTRUCTION,id(30),id(1),position(),"colonyloom:builder",0,Lane.NORMAL,state,assigned?id(20):null,"construction",0,List.of(),WorkOrder.Reason.NONE,0,0);
         var site=new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),0,0,1,0,closed);
         var claims=closed?List.<io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot>of():List.of(new io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot(id(30),id(1),null,"minecraft:overworld",0,64,0,63,79,63,1));
-        return new RegistrySnapshot(List.of(colony),List.of(citizen),List.of(),List.of(),List.of(),List.of(work),claims,effects,List.of(site),List.of(pin));
+        return new RegistrySnapshot(List.of(colony), List.of(citizen), List.of(), List.of(), List.of(), List.of(work), claims, effects, List.of(site), List.of(pin), io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty());
     }
     private static BlueprintDefinition blueprint(int count) {
         var blocks=new ArrayList<BlueprintDefinition.BlockSpec>(count); var descriptor=stairs();

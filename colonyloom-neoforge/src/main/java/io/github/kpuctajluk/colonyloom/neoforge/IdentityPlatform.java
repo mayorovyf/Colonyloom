@@ -198,6 +198,48 @@ final class IdentityPlatform {
         var work=bridge.core().commands().prioritizeWork(context(source),workId,priority);
         bridge.persistence().capture(); return "work="+work.id()+" priority="+work.priority();
     }
+    String registerStorage(CommandSourceStack source, UUID colony, BlockPos pos, String role) throws CommandSyntaxException {
+        requireStorageManager(source, colony, pos);
+        var registration = bridge.storage().register(colony, position(source.getLevel(), pos), role);
+        bridge.persistence().capture();
+        return "storage=" + registration.id() + " slots=" + registration.slots().size() + " revision=" + registration.revision();
+    }
+    String registerCitizenStorage(CommandSourceStack source, UUID colony, UUID citizen, String role) throws CommandSyntaxException {
+        requireStorageManager(source, colony, null);
+        var registration = bridge.storage().registerCitizen(colony, citizen, role);
+        bridge.persistence().capture();
+        return "storage=" + registration.id() + " slots=" + registration.slots().size();
+    }
+    String registerBuilding(CommandSourceStack source, UUID colony, BlockPos table, BlockPos inventory) throws CommandSyntaxException {
+        requireStorageManager(source, colony, table);
+        requireStorageManager(source, colony, inventory);
+        var workshop = bridge.storage().registerWorkshop(colony, position(source.getLevel(), table), position(source.getLevel(), inventory));
+        bridge.persistence().capture();
+        return "workshop=" + workshop.id() + " storage=" + workshop.registrationId();
+    }
+    String reidentifyStorage(CommandSourceStack source, UUID colony, BlockPos pos) throws CommandSyntaxException {
+        if (!source.hasPermission(2)) throw new SecurityException("Storage repair requires operator permission");
+        requireStorageManager(source, colony, pos);
+        UUID id = bridge.storage().reidentify(colony, position(source.getLevel(), pos));
+        bridge.persistence().capture();
+        return "storage identity=" + id + " old obligations=UNKNOWN";
+    }
+    String stock(CommandSourceStack source, UUID colony) throws CommandSyntaxException {
+        bridge.core().commands().status(context(source), colony);
+        return bridge.storage().diagnostics(colony, bridge.serverTick());
+    }
+    private void requireStorageManager(CommandSourceStack source, UUID colonyId, BlockPos pos) throws CommandSyntaxException {
+        context(source);
+        var colony = bridge.core().registry().colony(colonyId);
+        UUID actor = source.getEntity() instanceof ServerPlayer player ? player.getUUID() : null;
+        MemberRank rank = colony.rank(actor);
+        if (!source.hasPermission(2) && rank != MemberRank.OWNER && rank != MemberRank.MANAGER) throw new SecurityException("Storage changes require owner or manager permission");
+        if (!colony.available()) throw new IllegalStateException("Colony recovery/content blocked");
+        if (pos != null) {
+            if (!colony.territory().contains(position(source.getLevel(), pos))) throw new SecurityException("Storage position outside colony territory");
+            if (source.getEntity() instanceof ServerPlayer player && !source.getLevel().mayInteract(player, pos)) throw new SecurityException("Storage world interaction denied");
+        }
+    }
     String metrics(CommandSourceStack source,UUID colony) throws CommandSyntaxException {
         if(colony==null) { if(!source.hasPermission(2)) throw new SecurityException("Server metrics require operator permission"); }
         else bridge.core().commands().status(context(source),colony);

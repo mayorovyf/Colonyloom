@@ -38,6 +38,25 @@ final class ColonyCommandsTest {
         runtime.bindings().observe(citizen.citizenId(), citizen.entityId(), citizen.bindingEpoch());
         return citizen;
     }
+    @Test void scaleResidentsRetainIdentityAndCompetingEmbodimentAcrossRestore() {
+        ServerRuntime runtime=runtime();
+        runtime.registry().admission().updateLimits(runtime.registry().admission().limits().scale300Capacity());
+        ColonyRuntime colony=colony(runtime,0);
+        List<CitizenRecord> residents=new ArrayList<>();
+        for(int i=0;i<300;i++) residents.add(citizen(runtime,colony));
+        CitizenRecord first=residents.getFirst();UUID competitor=new UUID(1,1);
+        runtime.bindings().observe(first.citizenId(),competitor,first.bindingEpoch());
+        assertTrue(runtime.bindings().activeEntity(first.citizenId()).isEmpty());
+        ServerRuntime restored=runtime();
+        restored.registry().admission().updateLimits(restored.registry().admission().limits().scale300Capacity());
+        restored.registry().restore(runtime.registry().snapshot());
+        for(CitizenRecord resident:residents) {
+            restored.bindings().observe(resident.citizenId(),resident.entityId(),resident.bindingEpoch());
+            if(!resident.citizenId().equals(first.citizenId())) assertEquals(resident.entityId(),restored.bindings().activeEntity(resident.citizenId()).orElseThrow());
+        }
+        assertTrue(restored.bindings().activeEntity(first.citizenId()).isEmpty());
+        assertTrue(restored.bindings().observations(first.citizenId()).stream().allMatch(BindingRegistry.Observation::quarantined));
+    }
     @Test void validInactiveEmbodimentCanReconcileWithoutAdmissionCatchup() {
         ServerRuntime runtime = runtime(); ColonyRuntime colony = colony(runtime,0); CitizenRecord citizen = citizen(runtime,colony);
         runtime.commands().updateCitizenReadiness(citizen.citizenId(),CitizenRecord.Readiness.READY);
@@ -217,7 +236,7 @@ final class ColonyCommandsTest {
         assertTrue(restored.bindings().activeEntity(citizen.citizenId()).isEmpty());
         assertThrows(IllegalStateException.class, () -> restored.commands().bind(context(owner, true), citizen.citizenId(), citizen.entityId()));
         RegistrySnapshot before = restored.registry().snapshot();
-        RegistrySnapshot invalid = new RegistrySnapshot(before.colonies(), List.of(citizen, citizen), before.buildings(), before.tombstones(), before.observations(), before.works(), before.targetClaims(), java.util.List.of(), java.util.List.of(), java.util.List.of());
+        RegistrySnapshot invalid = new RegistrySnapshot(before.colonies(), List.of(citizen, citizen), before.buildings(), before.tombstones(), before.observations(), before.works(), before.targetClaims(), java.util.List.of(), java.util.List.of(), java.util.List.of(), io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty());
         assertThrows(IllegalArgumentException.class, () -> restored.registry().restore(invalid));
         assertEquals(before, restored.registry().snapshot());
     }

@@ -24,6 +24,7 @@ public final class MinecraftServerRuntime {
     private CitizenAdmissionService citizens;
     private io.github.kpuctajluk.colonyloom.gameplay.construction.ConstructionController construction;
     private io.github.kpuctajluk.colonyloom.minecraft.construction.MinecraftConstructionService constructionService;
+    private io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService storage;
     private long metricsTickStart;
     public void metricsTickStarted() { runtime.requireOwnerThread(); metricsTickStart=System.nanoTime(); }
     public void metricsTickFinished() { runtime.requireOwnerThread(); if(metricsTickStart!=0) { metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.MSPT,System.nanoTime()-metricsTickStart); metricsTickStart=0; } }
@@ -76,6 +77,12 @@ public final class MinecraftServerRuntime {
         runtime.commands().construction(construction);
         runtime.setSimulationEnabled(persistence.isAvailable());
     }
+    public void configureStorage(io.github.kpuctajluk.colonyloom.minecraft.storage.StorageIdentity identity) {
+        runtime.requireOwnerThread();
+        if (storage != null) throw new IllegalStateException("Storage service already configured");
+        storage = new io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService(server, runtime.registry(), runtime.budgets(), identity);
+    }
+    public io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService storage() { runtime.requireOwnerThread(); return storage; }
     public void configurePhysical(io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager.ChunkAccess access,
             io.github.kpuctajluk.colonyloom.minecraft.construction.BlockPlacementExecutor.ItemInteraction interaction,
             io.github.kpuctajluk.colonyloom.minecraft.construction.BlockPlacementExecutor.FaultObserver observer) {
@@ -90,9 +97,13 @@ public final class MinecraftServerRuntime {
         runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.CONSTRUCTION,constructionService);
         citizens = new CitizenAdmissionService(server, runtime, chunks);
         runtime.scheduler().beforeWork(tick -> {
-            chunks.tick(tick);
-            citizens.tick();
-            navigation.tick(tick);
+            // Rotate every physical consumer, including stock, under the same guard.
+            switch ((int)(tick % 4)) {
+                case 0 -> { chunks.tick(tick); citizens.tick(); navigation.tick(tick); if (storage != null) storage.tick(tick); }
+                case 1 -> { citizens.tick(); navigation.tick(tick); if (storage != null) storage.tick(tick); chunks.tick(tick); }
+                case 2 -> { navigation.tick(tick); if (storage != null) storage.tick(tick); chunks.tick(tick); citizens.tick(); }
+                default -> { if (storage != null) storage.tick(tick); chunks.tick(tick); citizens.tick(); navigation.tick(tick); }
+            }
             runtime.registry().targetClaims().tick();
         });
         runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.MOVE, new io.github.kpuctajluk.colonyloom.core.scheduler.SimulationScheduler.PhysicalExecutor() {

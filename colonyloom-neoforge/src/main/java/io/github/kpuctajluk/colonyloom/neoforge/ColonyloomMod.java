@@ -39,6 +39,7 @@ public final class ColonyloomMod {
     public ColonyloomMod(IEventBus modBus, net.neoforged.fml.ModContainer container) {
         simulationConfig = new SimulationConfig(container);
         CitizenRegistration.register(modBus);
+        NeoForgeStorageIdentity.register(modBus);
         modBus.addListener((net.neoforged.neoforge.common.world.chunk.RegisterTicketControllersEvent event) -> event.register(tickets));
         NeoForge.EVENT_BUS.addListener(this::onBlockChange);
         NeoForge.EVENT_BUS.addListener(this::onReload);
@@ -69,6 +70,7 @@ public final class ColonyloomMod {
         configuredLimits.put(server, limits);
         contentManagers.put(server,server.getResourceManager());
         var executorEvent=NeoForge.EVENT_BUS.post(new ConstructionExecutorEvent(server,runtime));
+        runtime.configureStorage(new NeoForgeStorageIdentity());
         runtime.configurePhysical(new NeoForgeChunkAccess(server, tickets),new NeoForgeItemInteraction(),executorEvent.observer());
         IdentityPlatform identity = new IdentityPlatform(server, runtime);
         identities.put(server, identity);
@@ -142,6 +144,8 @@ public final class ColonyloomMod {
             var runtime = runtimes.get(level.getServer());
             if (runtime != null && runtime.navigation() != null) runtime.navigation().invalidate(new io.github.kpuctajluk.colonyloom.core.chunk.ChunkKey(
                     level.dimension().location().toString(), event.getPos().getX() >> 4, event.getPos().getZ() >> 4));
+            if (runtime != null && runtime.storage() != null) runtime.storage().invalidate(new io.github.kpuctajluk.colonyloom.core.colony.WorldPosition(
+                    level.dimension().location().toString(), event.getPos().getX(), event.getPos().getY(), event.getPos().getZ()));
         }
     }
 
