@@ -11,7 +11,7 @@ public final class RuntimeMetrics {
         MSPT, MANAGED_TICK, ASSIGNMENT_UNIT, NAVIGATION_UNIT, BLUEPRINT_UNIT, PHYSICAL_UNIT,
         CHUNK_UNIT, DIRTY_RESCAN_UNIT, ENTITY_TICK, MOVEMENT, COLLISION, DAMAGE, BLOCK_CHANGE,
         SAVE, LOAD, NAVIGATION_EXTERNAL, CHUNK_EXTERNAL, BLOCK_CHANGE_EXTERNAL, SAVE_ENCODE, NAVIGATION_POLL,
-        GRAPH_UNIT, STORAGE_EXTERNAL
+        GRAPH_UNIT, STORAGE_EXTERNAL, VIEW_UNIT
     }
     public record Sample(long count, long totalNanos, long maxNanos, long p50Nanos,
             long p95Nanos, long p99Nanos, long p999Nanos) {}

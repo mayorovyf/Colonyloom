@@ -443,7 +443,8 @@ final class RegistryNbt {
                 integer(entry, "priority"), AdmissionLedger.Lane.valueOf(string(entry, "lane")),
                 WorkOrder.State.valueOf(string(entry, "state")), optionalUuid(entry, "assignee"), string(entry, "stage"),
                 number(entry, "revision"), dependencies, WorkOrder.Reason.valueOf(string(entry, "waitingReason")),
-                number(entry, "remainingActiveTicks"), number(entry, "ageActiveTicks"), optionalUuid(entry,"subjectId"), entry.contains("criticalService") && bool(entry,"criticalService"));
+                number(entry, "remainingActiveTicks"), number(entry, "ageActiveTicks"), optionalUuid(entry,"subjectId"), entry.contains("criticalService") && bool(entry,"criticalService"),
+                entry.contains("commandRevision") ? number(entry,"commandRevision") : number(entry,"revision"));
     }
 
     private static CompoundTag work(WorkOrder.Snapshot value) {
@@ -454,6 +455,7 @@ final class RegistryNbt {
         entry.putInt("priority", value.priority()); entry.putString("lane", value.lane().name());
         entry.putString("state", value.state().name()); optionalUuid(entry, "assignee", value.assignee());
         entry.putString("stage", value.stage()); entry.putLong("revision", value.revision());
+        entry.putLong("commandRevision", value.commandRevision());
         entry.putString("waitingReason", value.waitingReason().name());
         entry.putLong("remainingActiveTicks", value.remainingActiveTicks()); entry.putLong("ageActiveTicks", value.ageActiveTicks());
         optionalUuid(entry,"subjectId",value.subjectId()); entry.putBoolean("criticalService",value.criticalService());

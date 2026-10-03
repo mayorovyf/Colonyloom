@@ -27,6 +27,9 @@ public final class WorkBoard {
     private final ColonyRegistry registry;
     private AdmissionLedger ledger;
     private final LinkedHashMap<UUID,WorkOrder> works = new LinkedHashMap<>();
+    private final java.util.NavigableMap<Long, UUID> workViewKeys = new java.util.TreeMap<>();
+    private final Map<UUID, Long> workViewIds = new HashMap<>();
+    private long workViewSequence;
     private final Map<UUID,Lease> leases = new HashMap<>();
     private final Collection<WorkOrder> view = Collections.unmodifiableCollection(works.values());
     private Consumer<UUID> changed = ignored -> {};
@@ -48,6 +51,9 @@ public final class WorkBoard {
     public void onRemaining(ToLongFunction<WorkOrder> provider) { registry.requireOwner(); remaining = Objects.requireNonNull(provider); }
     public WorkOrder work(UUID id) { registry.requireOwner(); WorkOrder value = works.get(id); if (value == null) throw new IllegalArgumentException("Unknown work " + id); return value; }
     public Collection<WorkOrder> works() { registry.requireOwner(); return view; }
+    public long workViewCutoff() { registry.requireOwner(); return workViewSequence; }
+    public Long nextWorkViewKey(Long after) { registry.requireOwner(); return after == null ? workViewKeys.isEmpty() ? null : workViewKeys.firstKey() : workViewKeys.higherKey(after); }
+    public WorkOrder workAtViewKey(Long key) { registry.requireOwner(); return works.get(workViewKeys.get(key)); }
     public WorkOrder createTimer(UUID id, UUID colony, WorldPosition target, String profession, int priority, Lane lane, long duration) {
         registry.requireOwner();
         if (duration < 1 || duration > 1_000_000_000L) throw new IllegalArgumentException("Duration must be 1..1000000000");
@@ -80,10 +86,12 @@ public final class WorkBoard {
         registry.requireOwner();
         if (!registry.colony(colony).territory().contains(target) || works.containsKey(id) || registry.usedId(id)) throw new IllegalArgumentException("Invalid work identity or target");
         if (registry.colony(colony).recoveryBlocked() || registry.colony(colony).contentBlocked()) throw new IllegalStateException("Colony unavailable");
-        WorkOrder value = WorkOrder.restore(new WorkOrder.Snapshot(type,id,colony,target,profession,priority,lane,WorkOrder.State.PLANNED,null,stage,0,List.of(),WorkOrder.Reason.NONE,duration,0,subjectId,false));
+        WorkOrder value = WorkOrder.restore(new WorkOrder.Snapshot(type,id,colony,target,profession,priority,lane,WorkOrder.State.PLANNED,null,stage,0,List.of(),WorkOrder.Reason.NONE,duration,0,subjectId,false,0));
         Lease lease = ledger.reserveRoot(colony,lane,ROOT);
         try { registry.beforeMutation(); } catch (RuntimeException failure) { lease.close(); throw failure; }
-        works.put(id,value); leases.put(id,lease); changed.accept(id); return value;
+        works.put(id,value); leases.put(id,lease);
+        Long key = ++workViewSequence; workViewKeys.put(key,id); workViewIds.put(id,key);
+        changed.accept(id); return value;
     }
     public List<WorkOrder.Snapshot> snapshots() {
         registry.requireOwner(); ArrayList<WorkOrder.Snapshot> result = new ArrayList<>(works.size());
@@ -122,6 +130,8 @@ public final class WorkBoard {
         }
         for (Map.Entry<UUID,Lease> entry : leases.entrySet()) if (entry.getValue() != admitted.get(entry.getKey())) entry.getValue().close();
         works.clear(); works.putAll(staged); leases.clear(); leases.putAll(admitted); ledger = replacement;
+        workViewKeys.clear(); workViewIds.clear();
+        for (UUID id : works.keySet()) { Long key = ++workViewSequence; workViewKeys.put(key,id); workViewIds.put(id,key); }
     }
     public void cancel(UUID id) {
         WorkOrder value = work(id); if (value.terminal()) return;
@@ -257,6 +267,6 @@ public final class WorkBoard {
         for (var citizen : registry.citizensView()) if (id.equals(citizen.assignedWorkId())) throw new IllegalStateException("Work has retained assignment");
         for (var claim : registry.targetClaims().snapshots()) if (id.equals(claim.ownerId())) throw new IllegalStateException("Work has retained target");
         for (WorkOrder other : works.values()) if (other.dependencies().contains(id)) throw new IllegalStateException("Work has dependents");
-        registry.beforeMutation(); works.remove(id); leases.remove(id).close(); retired.accept(id);
+        registry.beforeMutation(); works.remove(id); workViewKeys.remove(workViewIds.remove(id)); leases.remove(id).close(); retired.accept(id);
     }
 }

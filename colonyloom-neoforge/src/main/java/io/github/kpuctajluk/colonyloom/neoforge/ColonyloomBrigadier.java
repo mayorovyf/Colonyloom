@@ -20,8 +20,14 @@ import static net.minecraft.commands.Commands.literal;
 
 /** Syntax and decoding only; all mutations pass through the core command owner. */
 final class ColonyloomBrigadier {
-    static void register(CommandDispatcher<CommandSourceStack> dispatcher, Function<MinecraftServer, IdentityPlatform> resolve) {
+    static void register(CommandDispatcher<CommandSourceStack> dispatcher, Function<MinecraftServer, IdentityPlatform> resolve,
+            java.util.function.BiConsumer<net.minecraft.server.level.ServerPlayer,UUID> openUi) {
         var root = literal("colonyloom");
+        root.then(literal("ui").executes(ctx -> execute(ctx,resolve,platform -> {
+            openUi.accept(ctx.getSource().getPlayerOrException(),null);return "UI_OPENED";
+        })).then(argument("colony",UuidArgument.uuid()).executes(ctx -> execute(ctx,resolve,platform -> {
+            openUi.accept(ctx.getSource().getPlayerOrException(),uuid(ctx,"colony"));return "UI_OPENED";
+        }))));
         root.then(literal("colony").then(literal("create")
                 .then(argument("name", StringArgumentType.string())
                         .then(argument("from", BlockPosArgument.blockPos())

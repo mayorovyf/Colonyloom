@@ -70,6 +70,7 @@ public final class IdentityScenarioMod {
         new DeliveryScenario();
         new ProductionScenario();
         new NeedsScenario();
+        new ManagementScenario();
     }
 
     private void register(RegisterCommandsEvent event) {

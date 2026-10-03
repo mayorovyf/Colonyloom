@@ -7,6 +7,8 @@ import io.github.kpuctajluk.colonyloom.core.colony.ColonyRuntime;
 import io.github.kpuctajluk.colonyloom.core.colony.MemberRank;
 import io.github.kpuctajluk.colonyloom.core.colony.Territory;
 import io.github.kpuctajluk.colonyloom.core.colony.WorldPosition;
+import io.github.kpuctajluk.colonyloom.core.management.ManagementProtocol.*;
+import io.github.kpuctajluk.colonyloom.core.management.ManagementSession;
 import io.github.kpuctajluk.colonyloom.core.persistence.RegistrySnapshot;
 import io.github.kpuctajluk.colonyloom.core.runtime.ServerRuntime;
 import java.util.ArrayList;
@@ -38,6 +40,76 @@ final class ColonyCommandsTest {
         runtime.bindings().observe(citizen.citizenId(), citizen.entityId(), citizen.bindingEpoch());
         return citizen;
     }
+    @Test void clockAndPositionDoNotStaleAssignmentButControlChangesDo() {
+        var runtime=runtime();var colony=colony(runtime,0);var initial=citizen(runtime,colony);
+        var current=new CitizenRecord[]{initial};
+        var backend=new ManagementSession.Backend() {
+            public ManagementSession.Authority authorize(UUID id) {
+                return new ManagementSession.Authority(true,1);
+            }
+            public long targetRevision(Command command) {return current[0].revision();}
+            public Result execute(Command command) {
+                current[0]=runtime.commands().assignProfession(context(owner,false),initial.citizenId(),"colonyloom:builder");
+                return new Result(command.sequence(),Status.ACCEPTED,"ACCEPTED",initial.citizenId(),current[0].revision());
+            }
+            public ViewData view(Subscription subscription) {throw new UnsupportedOperationException();}
+        };
+        var transport=new ManagementSession.Transport() {
+            public boolean writable(){return true;}
+            public void sendResult(Result result){}
+            public void sendSnapshot(UUID id,ViewData data){}
+            public void sendDelta(UUID id,long base,ViewData data){}
+            public void closeView(UUID id,String reason){}
+        };
+        var session=new ManagementSession(backend,transport);
+        current[0]=initial.withActiveTime(10).withPosition(new WorldPosition("minecraft:overworld",3,64,3));runtime.registry().updateCitizen(current[0]);
+        var first=session.command(new Command(session.sessionId(),0,colony.colonyId(),initial.revision(),new AssignProfession(initial.citizenId(),"colonyloom:builder")));
+        assertEquals(Status.ACCEPTED,first.status());
+        assertEquals("colonyloom:builder",runtime.registry().citizen(initial.citizenId()).professionId());
+        var duplicateEditor=session.command(new Command(session.sessionId(),1,colony.colonyId(),initial.revision(),new AssignProfession(initial.citizenId(),"colonyloom:builder")));
+        assertEquals(Status.STALE,duplicateEditor.status());
+        assertTrue(current[0].withActiveTime(1200).revision()>current[0].revision());
+    }
+    @Test void schedulerInvalidationsDoNotStaleWorkControlsButCompetingEditorsDo() {
+        var runtime = runtime();
+        var colony = colony(runtime, 0);
+        var work = runtime.commands().createTimerWork(context(owner, false), UUID.randomUUID(),
+                colony.colonyId(), new WorldPosition("minecraft:overworld", 8, 64, 8), null, 0, 20);
+        var backend = new ManagementSession.Backend() {
+            public ManagementSession.Authority authorize(UUID colonyId) { return new ManagementSession.Authority(true, 0); }
+            public long targetRevision(Command command) { return work.commandRevision(); }
+            public Result execute(Command command) {
+                var priority = (PrioritizeWork) command.body();
+                runtime.commands().prioritizeWork(context(owner, false), priority.workId(), priority.priority());
+                return new Result(command.sequence(), Status.ACCEPTED, "ACCEPTED", work.id(), work.commandRevision());
+            }
+            public ViewData view(Subscription subscription) { throw new AssertionError("No subscription"); }
+        };
+        var transport = new ManagementSession.Transport() {
+            public boolean writable() { return true; }
+            public void sendResult(Result result) {}
+            public void sendSnapshot(UUID id, ViewData data) {}
+            public void sendDelta(UUID id, long base, ViewData data) {}
+            public void closeView(UUID id, String reason) {}
+        };
+        long observed = work.commandRevision();
+        for (int tick = 0; tick < 100; tick++) runtime.workBoard().invalidate(work.id());
+        var first = new ManagementSession(backend, transport);
+        var second = new ManagementSession(backend, transport);
+        assertEquals(Status.ACCEPTED, first.command(new Command(first.sessionId(), 0, colony.colonyId(),
+                observed, new PrioritizeWork(work.id(), 7))).status());
+        assertEquals(7, work.priority());
+        assertEquals(Status.STALE, second.command(new Command(second.sessionId(), 0, colony.colonyId(),
+                observed, new PrioritizeWork(work.id(), 9))).status());
+        assertEquals(7, work.priority());
+        long beforeCancel = work.commandRevision();
+        runtime.commands().cancelWork(context(owner, false), work.id());
+        assertTrue(work.commandRevision() > beforeCancel);
+        var restored = runtime();
+        restored.registry().restore(runtime.registry().snapshot());
+        assertEquals(work.commandRevision(), restored.workBoard().work(work.id()).commandRevision());
+    }
+
     @Test void workplaceAssignmentRequiresCurrentManagerAndLocalRegisteredWorkshop() {
         ServerRuntime runtime=runtime();var local=colony(runtime,0);var foreign=colony(runtime,64);var citizen=citizen(runtime,local);
         var stock=runtime.registry().storage();var a=new WorldPosition("minecraft:overworld",8,64,8);var b=new WorldPosition("minecraft:overworld",72,64,8);

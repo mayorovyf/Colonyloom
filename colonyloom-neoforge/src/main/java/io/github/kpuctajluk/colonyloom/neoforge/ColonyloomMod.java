@@ -33,11 +33,16 @@ public final class ColonyloomMod {
     private final Map<MinecraftServer, net.minecraft.server.packs.resources.ResourceManager> contentManagers = new IdentityHashMap<>();
     private final SimulationConfig simulationConfig;
     private final Map<MinecraftServer, io.github.kpuctajluk.colonyloom.core.config.SimulationLimits> configuredLimits = new IdentityHashMap<>();
+    private final Map<MinecraftServer,java.util.List<String>> managementBlueprints=new IdentityHashMap<>();
+    private final ManagementNetwork management;
     private final net.neoforged.neoforge.common.world.chunk.TicketController tickets = new net.neoforged.neoforge.common.world.chunk.TicketController(
             net.minecraft.resources.ResourceLocation.fromNamespaceAndPath(MOD_ID, "runtime"), NeoForgeChunkAccess::validate);
 
     public ColonyloomMod(IEventBus modBus, net.neoforged.fml.ModContainer container) {
         simulationConfig = new SimulationConfig(container);
+        management=new ManagementNetwork(container.getModInfo().getVersion().toString(),this::requireRuntime,
+                server -> identities.get(server),server -> managementBlueprints.getOrDefault(server,java.util.List.of()));
+        modBus.addListener(management::register);
         CitizenRegistration.register(modBus);
         NeoForgeStorageIdentity.register(modBus);
         modBus.addListener((net.neoforged.neoforge.common.world.chunk.RegisterTicketControllersEvent event) -> event.register(tickets));
@@ -64,7 +69,9 @@ public final class ColonyloomMod {
         }
         MinecraftServerRuntime runtime = MinecraftServerRuntime.start(server,net.neoforged.neoforge.common.IOUtilities::waitUntilIOWorkerComplete);
         runtimes.put(server, runtime);
-        runtime.configureContent(ContentLoader.load(server.getResourceManager(),server.registryAccess()));
+        var content=ContentLoader.load(server.getResourceManager(),server.registryAccess());
+        runtime.configureContent(content);
+        managementBlueprints.put(server,content.blueprints().keySet().stream().sorted().toList());
         var limits = simulationConfig.snapshot();
         runtime.core().updateLimits(limits);
         configuredLimits.put(server, limits);
@@ -100,14 +107,18 @@ public final class ColonyloomMod {
         }
         var manager=event.getServer().getResourceManager();
         if (contentManagers.get(event.getServer())!=manager) {
-            runtime.configureContent(ContentLoader.load(manager,event.getServer().registryAccess()));
+            var content=ContentLoader.load(manager,event.getServer().registryAccess());
+            runtime.configureContent(content);
+            managementBlueprints.put(event.getServer(),content.blueprints().keySet().stream().sorted().toList());
             contentManagers.put(event.getServer(),manager);
         }
         runtime.postTick(event.getServer());
+        management.tick(event.getServer(),runtime.serverTick());
     }
 
     private synchronized void onServerStopping(ServerStoppingEvent event) {
         MinecraftServerRuntime runtime = requireRuntime(event.getServer());
+        management.stopped(event.getServer());
         runtime.beginStopping(event.getServer());
         LOGGER.info("Colonyloom runtime stopping: session={}, world={}, ticks={}, activeRuntimes={}",
                 runtime.sessionId(), runtime.worldPath(), runtime.serverTick(), runtimes.size());
@@ -124,6 +135,7 @@ public final class ColonyloomMod {
             identities.remove(server);
             contentManagers.remove(server);
             configuredLimits.remove(server);
+            managementBlueprints.remove(server);
             LOGGER.info("Colonyloom runtime released: session={}, world={}, ticks={}, activeRuntimes={}",
                     runtime.sessionId(), runtime.worldPath(), runtime.serverTick(), runtimes.size());
         }
@@ -158,7 +170,7 @@ public final class ColonyloomMod {
                 if (identity == null) throw new IllegalStateException("Colonyloom server is not ready");
                 return identity;
             }
-        });
+        },management::open);
     }
 
     private synchronized void onEntityJoin(EntityJoinLevelEvent event) {

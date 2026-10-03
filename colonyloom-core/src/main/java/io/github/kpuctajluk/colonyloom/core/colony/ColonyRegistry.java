@@ -40,6 +40,8 @@ public final class ColonyRegistry {
     private Runnable afterRestore = () -> {};
     private final LinkedHashMap<UUID, ColonyRuntime> colonies = new LinkedHashMap<>();
     private final LinkedHashMap<UUID, CitizenRecord> citizens = new LinkedHashMap<>();
+    private final java.util.NavigableMap<Long, UUID> citizenViewKeys = new java.util.TreeMap<>();
+    private long citizenViewSequence;
     private final LinkedHashMap<UUID, BuildingRecord> buildings = new LinkedHashMap<>();
     private final LinkedHashMap<UUID, Tombstone> tombstones = new LinkedHashMap<>();
     private final BindingRegistry bindings;
@@ -72,6 +74,10 @@ public final class ColonyRegistry {
     public io.github.kpuctajluk.colonyloom.core.storage.StorageRegistry storage() { requireOwner(); return storage; }
     public io.github.kpuctajluk.colonyloom.core.supply.SupplyRegistry supply() { requireOwner(); return supply; }
     public Collection<CitizenRecord> citizensView() { requireOwner(); return Collections.unmodifiableCollection(citizens.values()); }
+    /** Live insertion keys let bounded readers resume without retaining fail-fast iterators. */
+    public long citizenViewCutoff() { requireOwner(); return citizenViewSequence; }
+    public Long nextCitizenViewKey(Long after) { requireOwner(); return after == null ? citizenViewKeys.isEmpty() ? null : citizenViewKeys.firstKey() : citizenViewKeys.higherKey(after); }
+    public CitizenRecord citizenAtViewKey(Long key) { requireOwner(); return citizens.get(citizenViewKeys.get(key)); }
     public List<ColonyRuntime> colonies() { requireOwner(); return List.copyOf(colonies.values()); }
     public List<CitizenRecord> citizens() { requireOwner(); return List.copyOf(citizens.values()); }
     public List<BuildingRecord> buildings() { requireOwner(); return List.copyOf(buildings.values()); }
@@ -103,6 +109,7 @@ public final class ColonyRegistry {
         try { spawn.accept(citizen); }
         catch (RuntimeException | Error failure) { citizenLeases.remove(citizen.citizenId()); lease.close(); throw failure; }
         citizens.put(citizen.citizenId(), citizen);
+        citizenViewKeys.put(++citizenViewSequence, citizen.citizenId());
         workBoard.markCitizenChanged(citizen.citizenId());
     }
     public void updateCitizen(CitizenRecord citizen) {
@@ -320,6 +327,8 @@ public final class ColonyRegistry {
         colonyLeases = newColonyLeases; citizenLeases = newCitizenLeases; tombstoneLeases = newTombstoneLeases;
         colonies.clear(); colonies.putAll(newColonies);
         citizens.clear(); citizens.putAll(newCitizens);
+        citizenViewKeys.clear();
+        for (UUID id : citizens.keySet()) citizenViewKeys.put(++citizenViewSequence, id);
         buildings.clear(); buildings.putAll(newBuildings);
         tombstones.clear(); tombstones.putAll(newTombstones);
         bindings.restore(snapshot.observations());

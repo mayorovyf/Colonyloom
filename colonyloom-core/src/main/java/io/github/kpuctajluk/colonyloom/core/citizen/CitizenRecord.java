@@ -11,6 +11,7 @@ public record CitizenRecord(UUID citizenId, UUID colonyId, UUID entityId, long b
         Map<String, Integer> skills, Map<String, Integer> needs, Lifecycle lifecycle,
         Admission admission, Readiness readiness, long activeTimeTicks,
         Map<String, Long> remainingTimers, WorldPosition lastKnownPosition, long revision) {
+    // Control-state revision excludes clock/position telemetry; transport pages have their own state revision.
     public enum Lifecycle { ALIVE, DEAD, REMOVED }
     public enum Admission { ACTIVE, INACTIVE }
     public enum Readiness { UNKNOWN, RECONCILING, READY, BLOCKED }
@@ -49,7 +50,7 @@ public record CitizenRecord(UUID citizenId, UUID colonyId, UUID entityId, long b
         nextNeeds.put("food", (int)Math.max(0, food() - losses));
         var timers = new HashMap<>(remainingTimers);
         timers.put(FOOD_TIMER, remaining);
-        return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, nextNeeds, lifecycle, admission, readiness, ticks, timers, lastKnownPosition, Math.incrementExact(revision));
+        return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, nextNeeds, lifecycle, admission, readiness, ticks, timers, lastKnownPosition, losses == 0 ? revision : Math.incrementExact(revision));
     }
     public int food() { return needs.get("food"); }
     public long foodDecayTicks() { return remainingTimers.getOrDefault(FOOD_TIMER, FOOD_INTERVAL); }
@@ -62,7 +63,7 @@ public record CitizenRecord(UUID citizenId, UUID colonyId, UUID entityId, long b
         return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, needs, lifecycle, value, readiness, activeTimeTicks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));
     }
     public CitizenRecord withPosition(WorldPosition value) {
-        return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, needs, lifecycle, admission, readiness, activeTimeTicks, remainingTimers, value, Math.incrementExact(revision));
+        return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, needs, lifecycle, admission, readiness, activeTimeTicks, remainingTimers, value, revision);
     }
     public CitizenRecord withProfession(String id) {
         return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, id, skills, needs, lifecycle, admission, readiness, activeTimeTicks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));

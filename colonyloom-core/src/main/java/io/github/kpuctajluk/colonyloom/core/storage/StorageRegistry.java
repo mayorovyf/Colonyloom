@@ -82,6 +82,9 @@ public final class StorageRegistry {
     private final AllocationLedger allocations;
     private final Map<UUID, Registration> registrations = new LinkedHashMap<>();
     private final Map<UUID, Workshop> workshops = new LinkedHashMap<>();
+    private final java.util.NavigableMap<Long, UUID> registrationViewKeys = new java.util.TreeMap<>();
+    private final java.util.NavigableMap<Long, UUID> workshopViewKeys = new java.util.TreeMap<>();
+    private long registrationViewSequence, workshopViewSequence;
     private final Map<StorageId, RetiredIdentity> retired = new LinkedHashMap<>();
     private final Map<UUID, AdmissionLedger.Lease> registrationLeases = new LinkedHashMap<>(), workshopLeases = new LinkedHashMap<>();
     private final Map<StorageId, AdmissionLedger.Lease> retiredLeases = new LinkedHashMap<>();
@@ -103,6 +106,12 @@ public final class StorageRegistry {
     public List<Registration> registrations() { requireOwner(); return List.copyOf(registrations.values()); }
     public List<Registration> registrations(UUID colonyId) { registry.colony(colonyId); return registrations.values().stream().filter(r -> r.colonyId().equals(colonyId)).toList(); }
     public List<Workshop> workshops() { requireOwner(); return List.copyOf(workshops.values()); }
+    public long registrationViewCutoff() { requireOwner(); return registrationViewSequence; }
+    public Long nextRegistrationViewKey(Long after) { requireOwner(); return after == null ? registrationViewKeys.isEmpty() ? null : registrationViewKeys.firstKey() : registrationViewKeys.higherKey(after); }
+    public Registration registrationAtViewKey(Long key) { requireOwner(); return registrations.get(registrationViewKeys.get(key)); }
+    public long workshopViewCutoff() { requireOwner(); return workshopViewSequence; }
+    public Long nextWorkshopViewKey(Long after) { requireOwner(); return after == null ? workshopViewKeys.isEmpty() ? null : workshopViewKeys.firstKey() : workshopViewKeys.higherKey(after); }
+    public Workshop workshopAtViewKey(Long key) { requireOwner(); return workshops.get(workshopViewKeys.get(key)); }
     public boolean isRetired(StorageId storage) { requireOwner(); return retired.containsKey(storage); }
     public boolean usedId(UUID id) { requireOwner(); return registrations.containsKey(id) || workshops.containsKey(id) || claims.containsKey(id); }
 
@@ -132,6 +141,7 @@ public final class StorageRegistry {
             admitted.values().forEach(AdmissionLedger.Lease::close); throw failure;
         }
         registrations.put(next.id(), next);
+        if (previous == null) registrationViewKeys.put(++registrationViewSequence, next.id());
         if (registrationLease != null) registrationLeases.put(next.id(), registrationLease);
         slotLeases.putAll(admitted); additions.forEach(index::add);
         rebuildViews();
@@ -153,7 +163,9 @@ public final class StorageRegistry {
                 previous == null ? 0 : Math.addExact(previous.revision(), 1));
         AdmissionLedger.Lease lease = previous == null ? registry.admission().reserve(colony, Lane.NORMAL, Map.of(Resource.PHYSICAL_TARGETS, 1)) : null;
         try { registry.beforeMutation(); } catch (RuntimeException failure) { if (lease != null) lease.close(); throw failure; }
-        workshops.put(next.id(), next); if (lease != null) workshopLeases.put(next.id(), lease); return next;
+        workshops.put(next.id(), next); if (lease != null) workshopLeases.put(next.id(), lease);
+        if (previous == null) workshopViewKeys.put(++workshopViewSequence, next.id());
+        return next;
     }
 
     public void retire(StorageId storage, UUID colony) {
@@ -602,6 +614,9 @@ public final class StorageRegistry {
             StorageRegistry.this.claims.values().forEach(c -> c.lease.close());
             StorageRegistry.this.registrations.clear(); snapshot.registrations().forEach(r -> StorageRegistry.this.registrations.put(r.id(), r));
             StorageRegistry.this.workshops.clear(); snapshot.workshops().forEach(w -> StorageRegistry.this.workshops.put(w.id(), w));
+            registrationViewKeys.clear(); workshopViewKeys.clear();
+            for (UUID id : StorageRegistry.this.registrations.keySet()) registrationViewKeys.put(++registrationViewSequence, id);
+            for (UUID id : StorageRegistry.this.workshops.keySet()) workshopViewKeys.put(++workshopViewSequence, id);
             StorageRegistry.this.retired.clear(); snapshot.retiredIdentities().forEach(r -> StorageRegistry.this.retired.put(r.storage(), r));
             registrationLeases.clear(); registrationLeases.putAll(registrations); workshopLeases.clear(); workshopLeases.putAll(workshops);
             retiredLeases.clear(); retiredLeases.putAll(retired); slotLeases.clear(); slotLeases.putAll(slots);

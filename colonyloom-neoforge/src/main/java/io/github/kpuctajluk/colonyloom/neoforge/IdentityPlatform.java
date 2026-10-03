@@ -242,7 +242,7 @@ final class IdentityPlatform {
         bridge.core().commands().status(context(source), colony);
         return bridge.storage().diagnostics(colony, bridge.serverTick());
     }
-    private void requireStorageManager(CommandSourceStack source, UUID colonyId, BlockPos pos) throws CommandSyntaxException {
+    void requireStorageManager(CommandSourceStack source, UUID colonyId, BlockPos pos) throws CommandSyntaxException {
         context(source);
         var colony = bridge.core().registry().colony(colonyId);
         UUID actor = source.getEntity() instanceof ServerPlayer player ? player.getUUID() : null;
@@ -391,13 +391,14 @@ final class IdentityPlatform {
         if(identityFailure!=null)throw new IllegalStateException(identityFailure);
         if(!bridge.persistence().isAvailable())throw new IllegalStateException(bridge.persistence().failureReason());
     }
-    private ColonyCommands.CommandContext context(CommandSourceStack source) throws CommandSyntaxException {
+    ColonyCommands.CommandContext context(CommandSourceStack source) throws CommandSyntaxException {
         requireAvailable();
         UUID actor=source.getEntity() instanceof ServerPlayer player?player.getUUID():null;
         return new ColonyCommands.CommandContext(actor,source.hasPermission(2),new ColonyCommands.PhysicalChecks(){
             public void validateTerritory(Territory territory){
                 if(!(source.getEntity() instanceof ServerPlayer player))throw new SecurityException("Colony founding requires a real player");
                 ServerLevel level=source.getLevel();
+                if(!territory.dimension().equals(level.dimension().location().toString()))throw new SecurityException("Territory dimension differs from player level");
                 for(int x=territory.minX();x<=territory.maxX();x++)for(int z=territory.minZ();z<=territory.maxZ();z++){
                     BlockPos pos=new BlockPos(x,player.blockPosition().getY(),z);
                     if(!level.getWorldBorder().isWithinBounds(pos)||!level.mayInteract(player,pos))throw new SecurityException("Territory permission/world border denied");

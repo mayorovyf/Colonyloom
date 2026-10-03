@@ -71,6 +71,9 @@ public final class SimulationLimits {
         EnumMap<Budget, Integer> budgets = new EnumMap<>(Budget.class);
         for (Resource resource : Resource.values()) resources.put(resource, resource.development);
         for (Budget budget : Budget.values()) budgets.put(budget, budget.development);
+        // Real two-client UI runs: conservative p99 196607 ns; floor(400000 / p99).
+        // This early unit count is not the frozen full-duration scale profile.
+        budgets.put(Budget.VIEW_ROWS, 2);
         return new SimulationLimits(resources, budgets, 5_000_000L);
     }
 

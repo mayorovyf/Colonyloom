@@ -28,20 +28,30 @@ public final class StockIndex {
     private static final Comparator<StockRegion> ORDER = Comparator.comparing((StockRegion s) -> s.storage().dimension())
             .thenComparing(s -> s.storage().identity()).thenComparingLong(s -> s.storage().bindingEpoch()).thenComparingInt(StockRegion::slot);
     private static final class Observed {
+        final Long viewKey;
+        Observed(Long viewKey) { this.viewKey = viewKey; }
         Observation value = UNKNOWN;
         long tick;
     }
     private final StorageRegistry storage;
     private final TreeMap<StockRegion, Observed> observations = new TreeMap<>(ORDER);
+    private final TreeMap<Long, StockRegion> viewKeys = new TreeMap<>();
+    private long viewSequence;
     private final LinkedHashSet<StockRegion> hot = new LinkedHashSet<>();
     private StockRegion cursor;
     private boolean hotTurn;
 
     StockIndex(StorageRegistry storage) { this.storage = storage; }
-    void add(StockRegion slot) { observations.putIfAbsent(slot, new Observed()); }
-    void remove(StockRegion slot) { observations.remove(slot); hot.remove(slot); }
-    void clear() { observations.clear(); hot.clear(); cursor = null; hotTurn = false; }
+    void add(StockRegion slot) {
+        if (observations.containsKey(slot)) return;
+        Long key = ++viewSequence; observations.put(slot, new Observed(key)); viewKeys.put(key, slot);
+    }
+    void remove(StockRegion slot) { Observed removed = observations.remove(slot); if (removed != null) viewKeys.remove(removed.viewKey); hot.remove(slot); }
+    void clear() { observations.clear(); viewKeys.clear(); hot.clear(); cursor = null; hotTurn = false; }
     public List<StockRegion> slots() { storage.requireOwner(); return List.copyOf(observations.keySet()); }
+    public long viewCutoff() { storage.requireOwner(); return viewSequence; }
+    public Long nextViewKey(Long after) { storage.requireOwner(); return after == null ? viewKeys.isEmpty() ? null : viewKeys.firstKey() : viewKeys.higherKey(after); }
+    public StockRegion slotAtViewKey(Long key) { storage.requireOwner(); return viewKeys.get(key); }
     public Observation observation(StockRegion slot) {
         storage.requireOwner(); Observed value = observations.get(slot); return value == null ? UNKNOWN : value.value;
     }

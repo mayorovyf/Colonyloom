@@ -570,3 +570,102 @@ max-tick-time=120000
         logger.lifecycle('Physical critical food evidence: {}',report)
     }
 }
+
+neoForge.runs {
+    managementServer {
+        server()
+        programArgument '--nogui'
+        gameDirectory = project.file('runs/management-server')
+        loadedMods = [neoForge.mods.colonyloom, neoForge.mods.colonyloom_tests]
+        jvmArguments.addAll('-Xms4G', '-Xmx4G')
+    }
+    managementOwner {
+        client()
+        programArguments.addAll('--username', 'UIOwner', '--width', '1100', '--height', '760')
+        gameDirectory = project.file('runs/management-owner')
+        loadedMods = [neoForge.mods.colonyloom, neoForge.mods.colonyloom_tests]
+        jvmArguments.addAll('-Xms1G', '-Xmx2G')
+    }
+    managementViewer {
+        client()
+        programArguments.addAll('--username', 'UIGuest', '--width', '1100', '--height', '760')
+        gameDirectory = project.file('runs/management-viewer')
+        loadedMods = [neoForge.mods.colonyloom, neoForge.mods.colonyloom_tests]
+        jvmArguments.addAll('-Xms1G', '-Xmx2G')
+    }
+}
+tasks.register('managementSmoke') {
+    group = 'verification'
+    description = 'Exercises production management with two actual graphical clients and a disposable dedicated server.'
+    dependsOn provider {
+        ['runManagementServer', 'runManagementOwner', 'runManagementViewer'].collectMany { name ->
+            def run = tasks.named(name, JavaExec).get()
+            run.taskDependencies.getDependencies(run)
+        }
+    }
+    doLast {
+        def eula = file(providers.gradleProperty('colonyloomEulaFile').getOrElse('runs/server/eula.txt'))
+        if (!eula.isFile() || !eula.readLines().any { it.trim() == 'eula=true' }) throw new GradleException('Provide an owner-accepted disposable-instance EULA.')
+        def root = layout.buildDirectory.dir('reports/colonyloom/management-' + java.time.Instant.now().toEpochMilli()).get().asFile
+        root.mkdirs()
+        new File(root, 'colonyloom-management-test').text = 'Disposable graphical management scenario\n'
+        def instance = new File(root, 'server'), world = new File(instance, 'world')
+        world.mkdirs()
+        java.nio.file.Files.copy(eula.toPath(), new File(instance, 'eula.txt').toPath())
+        new File(world, 'colonyloom-test-world').text = 'Disposable Colonyloom management fixture\n'
+        new File(instance, 'server.properties').text = '''level-name=world
+level-seed=424242
+level-type=minecraft:flat
+generator-settings={"biome":"minecraft:plains","layers":[{"block":"minecraft:bedrock","height":1},{"block":"minecraft:dirt","height":2},{"block":"minecraft:grass_block","height":1}]}
+online-mode=false
+enforce-secure-profile=false
+server-ip=127.0.0.1
+server-port=25576
+gamemode=creative
+difficulty=peaceful
+view-distance=4
+simulation-distance=4
+spawn-protection=0
+max-tick-time=60000
+'''
+        def children = []
+        try {
+            [[role:'server',task:'runManagementServer'],[role:'owner',task:'runManagementOwner'],[role:'viewer',task:'runManagementViewer']].each { entry ->
+                def run = tasks.named(entry.task, JavaExec).get()
+                def directory = new File(root, entry.role)
+                directory.mkdirs()
+                if (entry.role != 'server') new File(directory, 'options.txt').text = 'guiScale:2\nmaxFps:30\nrenderDistance:4\nsimulationDistance:4\nfullscreen:false\npauseOnLostFocus:false\ntutorialStep:none\n'
+                def argv = [run.javaLauncher.get().executablePath.asFile.absolutePath]
+                argv.addAll(run.allJvmArgs)
+                argv.addAll(['-Dcolonyloom.test.managementRoot=' + root.absolutePath, '-Dcolonyloom.test.identityAction='])
+                def launchClasspath = run.classpath + run.classpathProvider
+                if (!launchClasspath.isEmpty()) argv.addAll(['-cp', launchClasspath.asPath])
+                argv.add(run.mainClass.get()); argv.addAll(run.args)
+                def builder = new ProcessBuilder(argv.collect { it.toString() }).directory(directory)
+                run.environment.each { key,value -> builder.environment().put(key.toString(),value.toString()) }
+                run.environmentProperty.get().each { key,value -> builder.environment().put(key.toString(),value.toString()) }
+                builder.redirectOutput(new File(root,entry.role + '.stdout.log')).redirectError(new File(root,entry.role + '.stderr.log'))
+                children.add([role:entry.role,process:builder.start()])
+            }
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MINUTES.toNanos(18)
+            def results = []
+            children.each { child ->
+                boolean exited = child.process.waitFor(Math.max(1L, deadline-System.nanoTime()),java.util.concurrent.TimeUnit.NANOSECONDS)
+                def observation = new File(root,child.role + '-observations.jsonl')
+                def facts = observation.isFile() ? observation.readLines().findAll { !it.isBlank() }.collect { new groovy.json.JsonSlurper().parseText(it) } : []
+                boolean passed = exited && child.process.exitValue()==0 && new File(root,child.role + '-done').isFile() && !facts.isEmpty() && !facts.any { !it.passed }
+                results.add([role:child.role,exit:exited ? child.process.exitValue() : null,timedOut:!exited,facts:facts,passed:passed])
+                new File(root,'report.json').text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([roles:results]))
+            }
+            if (results.any { !it.passed }) throw new GradleException("Management graphical verification failed; see ${root}")
+            logger.lifecycle('Actual two-client management evidence: {}',root)
+        } finally {
+            children.each { child ->
+                if (child.process.isAlive()) {
+                    child.process.destroy()
+                    if (!child.process.waitFor(20,java.util.concurrent.TimeUnit.SECONDS)) child.process.destroyForcibly().waitFor(10,java.util.concurrent.TimeUnit.SECONDS)
+                }
+            }
+        }
+    }
+}

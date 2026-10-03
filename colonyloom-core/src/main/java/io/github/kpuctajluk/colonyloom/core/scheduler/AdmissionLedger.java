@@ -237,6 +237,12 @@ public final class AdmissionLedger {
 
     public int used(Resource resource) { ownerCheck.run(); return used[resource.ordinal()]; }
     public int used(Resource resource, Lane lane) { ownerCheck.run(); return lanes[lane.ordinal()][resource.ordinal()]; }
+    public int used(UUID colonyId,Resource resource) {
+        ownerCheck.run();ColonyUsage usage=colonies.get(colonyId);
+        if(usage==null)return 0;int result=0;
+        for(Lane lane:LANES)result=Math.addExact(result,usage.lanes[lane.ordinal()][resource.ordinal()]);
+        return result;
+    }
     public int highWater(Resource resource) { ownerCheck.run(); return highWater[resource.ordinal()]; }
     public long rejected(Resource resource) { ownerCheck.run(); return rejected[resource.ordinal()]; }
     public int overLimit(Resource resource) { ownerCheck.run(); return Math.max(0, used[resource.ordinal()] - limits.resource(resource)); }

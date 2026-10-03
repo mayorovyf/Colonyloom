@@ -165,7 +165,7 @@ public final class ConstructionPersistenceGameTests {
     private static RegistrySnapshot snapshot(BlueprintDefinition pin,WorkOrder.State state,boolean assigned,boolean closed,List<EffectRecord> effects) {
         var colony=new ColonyRuntime(id(1),"Construction",new Territory("minecraft:overworld",0,0,63,63),id(10),Map.of(),0,0,false,null,false);
         var citizen=new CitizenRecord(id(20),id(1),id(21),1,null,null,assigned?id(30):null,"colonyloom:builder",Map.of(),Map.of("food",20),CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.UNKNOWN,0,Map.of(),position(),0);
-        var work=new WorkOrder.Snapshot(WorkOrder.CONSTRUCTION,id(30),id(1),position(),"colonyloom:builder",0,Lane.NORMAL,state,assigned?id(20):null,"construction",0,List.of(),WorkOrder.Reason.NONE,0,0,null,false);
+        var work=new WorkOrder.Snapshot(WorkOrder.CONSTRUCTION,id(30),id(1),position(),"colonyloom:builder",0,Lane.NORMAL,state,assigned?id(20):null,"construction",0,List.of(),WorkOrder.Reason.NONE,0,0,null,false,0);
         var site=new ConstructionSnapshot(id(30),id(1),pin.digest(),position(),0,id(10),0,0,1,0,closed);
         var claims=closed?List.<io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot>of():List.of(new io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot(id(30),id(1),null,"minecraft:overworld",0,64,0,63,79,63,1));
         return new RegistrySnapshot(List.of(colony),List.of(citizen),List.of(),List.of(),List.of(),List.of(work),claims,effects,List.of(site),List.of(pin),io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty(),io.github.kpuctajluk.colonyloom.core.supply.SupplySnapshot.empty());
