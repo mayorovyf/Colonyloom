@@ -43,7 +43,7 @@ public final class RecipeExecutor {
     @FunctionalInterface public interface Protection {
         boolean allow(ActionContext context,UUID principal,EffectRecord.Craft prepared);
     }
-    public enum FaultPoint { BEFORE_EFFECT, AFTER_NATIVE_EFFECT, AFTER_FACT_BEFORE_NOTIFY }
+    public enum FaultPoint { BEFORE_EFFECT, AFTER_SOURCE_CHANGE, AFTER_DESTINATION_CHANGE, AFTER_NATIVE_EFFECT, AFTER_FACT_BEFORE_NOTIFY }
     @FunctionalInterface public interface FaultObserver { void observe(FaultPoint point,ActionContext context); }
     public record Result(int produced,WorkOrder.Reason reason,boolean ambiguous,UUID operationId) {
         public Result {
@@ -128,7 +128,7 @@ public final class RecipeExecutor {
                 registry.effects().discardUnchanged(effect.operationId());
                 return denied(reason==WorkOrder.Reason.NONE?WorkOrder.Reason.TARGET_CONFLICT:reason);
             }
-            // No callbacks or repeated slot reads between this exact snapshot and the native effect.
+            // No callbacks or repeated slot reads between this exact snapshot and the first native expense.
             Snapshot current=snapshot(context,epoch,workshop,inputs,outputs,outputProbe);
             if(!same(before,current)) {
                 registry.effects().discardUnchanged(effect.operationId());
@@ -143,6 +143,7 @@ public final class RecipeExecutor {
                 if(source.reference().isEmpty()) current.barrel().setItem(source.region().slot(),ItemStack.EMPTY);
             }
             phase=EffectRecord.CraftPhase.INPUTS_CONSUMED;
+            current.barrel().setChanged(); observe(FaultPoint.AFTER_SOURCE_CHANGE,context);
             // New stacks are created only by the accepted recipe after the entire real kit was expended.
             for(var destination:current.outputs()) {
                 if(destination.reference().isEmpty()) current.barrel().setItem(destination.region().slot(),
@@ -151,7 +152,8 @@ public final class RecipeExecutor {
                 produced=Math.addExact(produced,destination.amount());
             }
             phase=EffectRecord.CraftPhase.OUTPUT_INSERTED;
-            current.barrel().setChanged(); observe(FaultPoint.AFTER_NATIVE_EFFECT,context);
+            current.barrel().setChanged(); observe(FaultPoint.AFTER_DESTINATION_CHANGE,context);
+            observe(FaultPoint.AFTER_NATIVE_EFFECT,context);
             fact=measure(fact,current.barrel(),EffectRecord.CraftPhase.FACT_OBSERVED); measured=true;
             if(!fact.complete()) throw new IllegalStateException("Native craft disagrees with admitted batch");
             effect=effect.observedCraft(fact,false); registry.effects().update(effect);

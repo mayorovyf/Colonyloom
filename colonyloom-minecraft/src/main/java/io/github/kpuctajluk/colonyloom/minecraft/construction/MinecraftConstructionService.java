@@ -148,6 +148,7 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
             if(result==WorldAccess.Placement.AMBIGUOUS || after!=before-1 || work.terminal()
                     || !citizen.citizenId().equals(work.assignee()) || !site.equals(registry.construction().site(work.id()))) { ambiguous(work,effect,after); return; }
             registry.effects().update(effect.observed(after,false));
+            placement.observe(BlockPlacementExecutor.FaultPoint.AFTER_FACT_BEFORE_NOTIFY,context);
             try {consumption.commit(1);}
             catch(RuntimeException changed) {registry.effects().update(effect.observed(after,false).observed(after,true));registry.effects().blockAmbiguous(work.colonyId(),checkpoint.get());navigation.cancel(work.id());throw changed;}
             controller.advance(work.id(),true);

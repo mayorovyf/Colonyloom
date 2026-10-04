@@ -33,6 +33,11 @@ final class IdentityPlatform {
     private UUID provisioningEntity;
 
     IdentityPlatform(MinecraftServer server,MinecraftServerRuntime bridge) { this.server=server; this.bridge=bridge; }
+    private CitizenEntity.DeathFaultObserver deathObserver;
+    void deathObserver(CitizenEntity.DeathFaultObserver observer) {
+        if(deathObserver!=null)throw new IllegalStateException("Death observer already installed");
+        deathObserver=Objects.requireNonNull(observer);
+    }
 
     void reconcileLoaded() {
         for (ServerLevel level : server.getAllLevels()) for (Entity entity : level.getAllEntities()) join(entity);
@@ -97,10 +102,14 @@ final class IdentityPlatform {
             var inventory=new net.minecraft.nbt.CompoundTag(); net.minecraft.world.ContainerHelper.saveAllItems(inventory,citizen.inventory().getItems(),server.registryAccess());
             var effect=new io.github.kpuctajluk.colonyloom.core.action.EffectRecord(UUID.randomUUID(),record.colonyId(),record.assignedWorkId(),record.citizenId(),record.bindingEpoch(),io.github.kpuctajluk.colonyloom.core.action.ActionContext.Kind.DEATH,position((ServerLevel)citizen.level(),citizen.blockPosition()),"inventoryHash:"+Integer.toHexString(inventory.hashCode()),"colonyloom:inventory",before,before,io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.PREPARED,0,null,null,null);
             bridge.core().registry().effects().prepare(effect,io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);
+            var observer=deathObserver;
+            var context=observer==null ? null : new io.github.kpuctajluk.colonyloom.core.action.ActionContext(record.colonyId(),record.citizenId(),io.github.kpuctajluk.colonyloom.core.action.ActionContext.Kind.DEATH,effect.target(),io.github.kpuctajluk.colonyloom.core.action.ActionContext.AuthorityMode.COLONY,null,bridge.core().registry().colony(record.colonyId()).revision());
+            if(observer!=null) citizen.observeDeathFaults(observer,context);
             citizen.observeDeathInventory(remaining -> {
                 try {
                     bridge.core().registry().effects().update(effect.observed(remaining,remaining!=0));
                     if(remaining!=0) bridge.core().registry().markRecoveryBlocked(record.colonyId(),bridge.persistence().checkpointId());
+                    if(observer!=null) observer.observe(CitizenEntity.DeathFaultPoint.AFTER_FACT_BEFORE_NOTIFY,context);
                     bridge.persistence().capture();
                 } catch(RuntimeException error) {
                     bridge.core().registry().markRecoveryBlocked(record.colonyId(),bridge.persistence().checkpointId());
@@ -110,6 +119,9 @@ final class IdentityPlatform {
             bridge.core().commands().markDeath(citizen.citizenId());
             citizen.setQuarantined(true);
             bridge.persistence().capture();
+            // Existing lifecycle authority is already DEAD here. BEFORE_EFFECT means before native
+            // inventory removal/drop publication, not before the genuine LivingDeathEvent fact.
+            if(observer!=null) observer.observe(CitizenEntity.DeathFaultPoint.BEFORE_EFFECT,context);
         } catch (RuntimeException error) {
             citizen.setQuarantined(true);
             try {

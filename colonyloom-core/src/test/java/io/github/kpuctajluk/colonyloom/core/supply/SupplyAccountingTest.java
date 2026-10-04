@@ -89,6 +89,29 @@ final class SupplyAccountingTest {
         assertFalse(f.registry.storage().index().observation(slot(2)).ready()); f.supply.reconcile();
         assertEquals(supply, f.supply.snapshot()); assertEquals(48, f.supply.demand(id(10)).snapshot().allocated());
     }
+    @Test void restoredSpentDeliveryRejectsDuplicateSourcePublicationWithoutLosingHistory() {
+        Fixture f=new Fixture();f.stock(0,X,8);f.stock(2,null,0);
+        var demand=f.request(10,8,Demand.GoalKind.DELIVERY,Lane.NORMAL);
+        var order=f.supply.coverStock(demand.id(),slot(0),X,8,1);
+        f.pickup(order,8);
+        var cargo=f.cargo(order);
+        try(var original=f.supply.prepareTransfer(cargo.id(),slot(2),8,1)) {
+            f.stock(2,X,8);original.commit(8);f.stock(1,null,0);
+            // Consumer spent the physical contents before any wakeup/rescan replay.
+            f.stock(2,null,0);
+            var snapshot=f.registry.snapshot();
+            var restored=new ColonyRegistry(() -> {});restored.restore(snapshot);
+            var history=restored.supply().demand(demand.id()).snapshot();
+            assertEquals(8,history.deliveredTotal());assertEquals(8,history.fulfilled());
+            assertEquals(8,restored.supply().delivery(order.id()).transferred());
+            assertThrows(IllegalStateException.class,()->original.commit(8));
+            assertThrows(IllegalStateException.class,()->restored.supply().prepareTransfer(cargo.id(),slot(2),8,2));
+            restored.supply().reconcile();
+            assertEquals(history,restored.supply().demand(demand.id()).snapshot());
+            assertEquals(8,restored.supply().delivery(order.id()).transferred());
+        }
+    }
+
     @Test void partialDeliveryFulfilsWithoutConsumerAllocationAndReductionReleasesExcess() {
         Fixture f = new Fixture(); f.stock(0, X, 64); Demand d = f.request(10, 64, Demand.GoalKind.DELIVERY, Lane.NORMAL);
         var order = f.supply.coverStock(d.id(), slot(0), X, 64, 1); var share = f.share(order);

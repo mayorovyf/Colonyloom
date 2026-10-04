@@ -91,7 +91,7 @@ public final class SimulationScheduler {
         final ColonyQueue colony;
         final long birthClock;
         long queuedAt, schedulingSince;
-        long activeSince = -1, accrued, waitRevision = -1;
+        long activeSince = -1, accrued, waitRevision = -1, lastAttemptTick = -1;
         int score, queueIndex = -1;
         Lane queuedLane;
         boolean queued, linked, changedWhileExecuting;
@@ -303,6 +303,8 @@ public final class SimulationScheduler {
         unlink(node); long revision = node.work.revision();
         if (node.work.terminal()) { unqueue(node); deadlines.remove(node.due); removeAssignment(node); board.acknowledge(node.work.id(),revision); return true; }
         unqueue(node);
+        // Callback/fanout relinks retain debt, but cannot erase a physical wait in the same tick.
+        if(node.lastAttemptTick==tick) {deadlines.schedule(node.due,tick+1);return true;}
         if (!enqueue(node)) link(node);
         // Admission is not processing: acknowledge only after the step.
         return true;
@@ -373,6 +375,7 @@ public final class SimulationScheduler {
     }
     private void process(Node node) {
         WorkOrder work = node.work; long revision = work.revision(); executing = node; node.changedWhileExecuting = false; node.externallyInvalidated = false;
+        node.lastAttemptTick=tick;
         try {
             beforeStep.run();
             if (work.revision() != revision) { link(node); return; }

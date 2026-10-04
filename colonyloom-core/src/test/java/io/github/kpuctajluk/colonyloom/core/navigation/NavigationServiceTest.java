@@ -95,6 +95,25 @@ final class NavigationServiceTest {
         assertEquals(f.target,f.registry.workBoard().work(f.work).target());
         f.navigation.cancel(f.work);assertEquals(0,f.access.held);
     }
+    @Test void protectedDomainSaturationWaitsWithoutDeclaringRouteImpossible() {
+        Fixture f=new Fixture();f.navigation.cancel(f.work);
+        var limits=SimulationLimits.development().withResource(Resource.LOADED_FOOTPRINT,64)
+                .withResource(Resource.BLOCK_TICKING,24).withResource(Resource.ENTITY_TICKING,4);
+        f.registry.admission().updateLimits(limits);f.budgets.updateLimits(limits);f.chunks.limitsUpdated();
+        UUID protectedOwner=id(4000),idleOwner=id(4001);
+        f.chunks.request(protectedOwner,f.colony,List.of(new ChunkKey("minecraft:overworld",10,0)),ChunkDemandManager.Readiness.ENTITY_TICKING,Lane.NORMAL,0,false);
+        f.chunks.request(idleOwner,f.colony,List.of(new ChunkKey("minecraft:overworld",20,0)),ChunkDemandManager.Readiness.ENTITY_TICKING,Lane.NORMAL,0,false);
+        f.until(5);assertTrue(f.chunks.ready(protectedOwner));assertTrue(f.chunks.ready(idleOwner));
+        f.chunks.setProtection(protectedOwner,true,false,false);f.chunks.setProtection(idleOwner,true,false,false);
+        f.navigation.request(f.work,f.colony,f.citizen,1,0,f.target,Lane.NORMAL,0);
+        f.until(20);assertEquals(0,f.backend.searches);
+        assertEquals(NavigationService.State.WAITING,f.navigation.state(f.work));
+        assertEquals(WorkOrder.Reason.CHUNK_NOT_READY,f.navigation.reason(f.work));
+        f.chunks.setProtection(idleOwner,false,false,false);
+        f.until(40);assertEquals(NavigationService.State.MOVING,f.navigation.state(f.work));
+        assertTrue(f.chunks.ready(protectedOwner));assertFalse(f.chunks.admitted(idleOwner));
+        assertTrue(f.chunks.footprint()<=64);assertEquals(1,f.backend.applies);
+    }
     @Test void missingReadinessNeverSearchesEvenIfTicketWasAccepted() {
         Fixture f=new Fixture();f.access.available=false;f.until(100);
         assertEquals(0,f.backend.searches);assertEquals(0,f.backend.applies);

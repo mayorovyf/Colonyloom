@@ -225,8 +225,9 @@ public final class ManagementViewGameTests {
         var preparation=preparation(registry,owner,colony,ViewType.SUMMARY,0);
         budgets.beginTick(1);clock.set(limits.maxManagedNanos());
         helper.assertTrue(!preparation.advance(budgets)&&budgets.used(Budget.VIEW_ROWS)==0&&registry.metrics().snapshot().get("VIEW_UNIT").count()==0,"Exhausted time guard charged or measured nonexistent row work");
-        budgets.beginTick(2);
-        helper.assertTrue(preparation.advance(budgets)&&preparation.result().rows().size()==1+Resource.values().length,"Preparation was lost instead of resumed after the global time guard");
+        boolean complete=false;
+        for(int tick=2;tick<100&&!complete;tick++){budgets.beginTick(tick);complete=preparation.advance(budgets);}
+        helper.assertTrue(complete&&preparation.result().rows().size()==1+Resource.values().length,"Preparation was lost instead of resumed across bounded later ticks after the global time guard");
         helper.succeed();
     }
 

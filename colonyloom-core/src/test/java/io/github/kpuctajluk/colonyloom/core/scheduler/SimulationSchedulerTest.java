@@ -40,6 +40,28 @@ final class SimulationSchedulerTest {
         WorkOrder timer(long number, UUID colony, long duration) { return board.createTimer(id(number),colony,new WorldPosition("minecraft:overworld",registry.colony(colony).territory().minX(),64,0),null,0,AdmissionLedger.Lane.NORMAL,duration); }
         void ticks(int count) { for (int i=0;i<count;i++) scheduler.tick(++tick); }
     }
+    @Test void fullReceiverWaitRemainsVisibleAndRelinkedWorkResumesNextTick() {
+        Fixture f=new Fixture();UUID colony=f.colony(1,0);f.citizen(11,colony);f.citizen(12,colony);
+        var limits=LIMITS.withBudget(Budget.PHYSICAL_ACTIONS,8).withResource(Resource.READY_ENTRIES,8);
+        f.budgets.updateLimits(limits);f.registry.admission().updateLimits(limits);
+        WorkOrder blocked=f.board.createMove(id(21),colony,new WorldPosition("minecraft:overworld",8,64,0),0,AdmissionLedger.Lane.NORMAL);
+        WorkOrder independent=f.board.createMove(id(22),colony,new WorldPosition("minecraft:overworld",9,64,0),0,AdmissionLedger.Lane.NORMAL);
+        boolean[] full={true};int[] attempts={0};
+        f.scheduler.physicalExecutor(WorkOrder.MOVE,new SimulationScheduler.PhysicalExecutor() {
+            public void step(WorkOrder work,long tick) {
+                if(work==independent) {f.board.transition(work.id(),WorkOrder.State.COMPLETED,WorkOrder.Reason.NONE,"completed");return;}
+                if(++attempts[0]>1) {f.board.waitAssigned(work.id(),WorkOrder.Reason.BUDGET,"scan");return;}
+                if(full[0]) {f.board.transition(work.id(),WorkOrder.State.WAITING,WorkOrder.Reason.CAPACITY,"preflight-destination");f.board.invalidate(work.id());}
+                else f.board.transition(work.id(),WorkOrder.State.COMPLETED,WorkOrder.Reason.NONE,"completed");
+            }
+            public void cancel(UUID workId) {}
+        });
+        f.ticks(1);
+        assertEquals(1,attempts[0]);assertEquals(WorkOrder.State.WAITING,blocked.state());assertEquals(WorkOrder.Reason.CAPACITY,blocked.waitingReason());
+        assertNull(blocked.assignee());assertEquals(WorkOrder.State.COMPLETED,independent.state());
+        full[0]=false;attempts[0]=0;f.ticks(1);
+        assertEquals(1,attempts[0]);assertEquals(WorkOrder.State.COMPLETED,blocked.state());
+    }
     @Test void platformMaintenanceCannotStarveDirtyWorkAtOneGlobalUnit() {
         Fixture f=new Fixture();UUID colony=f.colony(1,0);f.citizen(11,colony);
         f.budgets.updateLimits(LIMITS.withBudget(Budget.DIRTY_RESCAN_OBJECTS,1));

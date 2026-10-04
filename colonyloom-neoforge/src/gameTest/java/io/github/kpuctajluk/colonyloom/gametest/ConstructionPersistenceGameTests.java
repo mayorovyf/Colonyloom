@@ -146,6 +146,30 @@ public final class ConstructionPersistenceGameTests {
         helper.assertTrue(roundtrip.works().isEmpty() && roundtrip.constructionSites().isEmpty(),"Compacted DTO retained dangling construction");
         helper.succeed();
     }
+    @GameTest(template="identity_empty")
+    public static void fullWitnessEnvelopeRefusesNewEffectsUntilResolvedCheckpoint(GameTestHelper helper) {
+        var registry=new ColonyRegistry(() -> {});
+        var before=effect(100,30,EffectRecord.State.PREPARED);
+        registry.restore(snapshot(blueprint(4),WorkOrder.State.PLANNED,false,false,List.of(before)));
+        var resources=new java.util.EnumMap<io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource,Integer>(io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.class);
+        var limits=registry.admission().limits();resources.putAll(limits.resources());
+        resources.put(io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.EVIDENCE,
+                registry.admission().used(io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.EVIDENCE));
+        registry.admission().updateLimits(new io.github.kpuctajluk.colonyloom.core.config.SimulationLimits(resources,limits.budgets(),limits.maxManagedNanos()));
+        boolean refused=false;
+        try {registry.effects().prepare(effect(101,30,EffectRecord.State.PREPARED),Lane.NORMAL);}
+        catch(io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.AdmissionException expected) {refused=true;}
+        helper.assertTrue(refused&&registry.effects().snapshots().equals(List.of(before)),"Full witness envelope accepted effect or discarded retained PREPARED fact");
+        registry.effects().compactAfterVerifiedCheckpoint();
+        helper.assertTrue(registry.effects().get(before.operationId()).equals(before),"Checkpoint erased unresolved witness at capacity");
+        registry.effects().update(before.observed(3,false));
+        registry.workBoard().cancel(id(30));
+        registry.effects().compactAfterVerifiedCheckpoint();
+        registry.effects().prepare(effect(102,30,EffectRecord.State.PREPARED),Lane.NORMAL);
+        helper.assertTrue(registry.effects().get(id(102))!=null&&registry.effects().get(before.operationId())==null,"Resolved terminal checkpoint did not release witness capacity");
+        helper.succeed();
+    }
+
 
     @GameTest(template="identity_empty")
     public static void immutableEvidenceAndMonotonicConstructionRejectRewrites(GameTestHelper helper) {

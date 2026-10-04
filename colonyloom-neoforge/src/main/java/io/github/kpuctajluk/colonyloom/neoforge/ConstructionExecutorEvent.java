@@ -33,4 +33,16 @@ public final class ConstructionExecutorEvent extends Event {
         if(foodObserver!=null)throw new IllegalStateException("Food observer already installed");foodObserver=Objects.requireNonNull(observer);
     }
     public io.github.kpuctajluk.colonyloom.minecraft.needs.FoodConsumptionExecutor.FaultObserver foodObserver() {return foodObserver;}
+    private Runnable checkpointObserver;
+    public void checkpointObserver(Runnable observer) {
+        if(checkpointObserver!=null)throw new IllegalStateException("Checkpoint observer already installed");
+        checkpointObserver=Objects.requireNonNull(observer);
+    }
+    public Runnable checkpointObserver() {return checkpointObserver;}
+    private io.github.kpuctajluk.colonyloom.minecraft.entity.CitizenEntity.DeathFaultObserver deathObserver;
+    public void deathObserver(io.github.kpuctajluk.colonyloom.minecraft.entity.CitizenEntity.DeathFaultObserver observer) {
+        if(deathObserver!=null)throw new IllegalStateException("Death observer already installed");
+        deathObserver=Objects.requireNonNull(observer);
+    }
+    public io.github.kpuctajluk.colonyloom.minecraft.entity.CitizenEntity.DeathFaultObserver deathObserver() {return deathObserver;}
 }

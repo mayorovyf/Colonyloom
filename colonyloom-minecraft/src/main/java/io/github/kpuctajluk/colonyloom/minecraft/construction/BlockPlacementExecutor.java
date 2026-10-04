@@ -38,7 +38,7 @@ public final class BlockPlacementExecutor implements WorldAccess {
     public interface ItemInteraction {
         InteractionResult use(ServerLevel level, CitizenEntity citizen, UUID principal, BlockPos target, ItemStack source);
     }
-    public enum FaultPoint { BEFORE_BLOCK_CHANGE, AFTER_BLOCK_CHANGE, BEFORE_EFFECT_COMMIT }
+    public enum FaultPoint { BEFORE_BLOCK_CHANGE, AFTER_BLOCK_CHANGE, BEFORE_EFFECT_COMMIT, AFTER_FACT_BEFORE_NOTIFY }
     @FunctionalInterface
     public interface FaultObserver {
         void observe(FaultPoint point, ActionContext context);

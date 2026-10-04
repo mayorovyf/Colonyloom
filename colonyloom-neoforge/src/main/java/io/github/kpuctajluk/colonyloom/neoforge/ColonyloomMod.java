@@ -77,11 +77,13 @@ public final class ColonyloomMod {
         configuredLimits.put(server, limits);
         contentManagers.put(server,server.getResourceManager());
         var executorEvent=NeoForge.EVENT_BUS.post(new ConstructionExecutorEvent(server,runtime));
+        if(executorEvent.checkpointObserver()!=null)runtime.persistence().checkpointObserver(executorEvent.checkpointObserver());
         runtime.configureStorage(new NeoForgeStorageIdentity());
         runtime.configurePhysical(new NeoForgeChunkAccess(server, tickets),new NeoForgeItemInteraction(),executorEvent.observer(),
                 (context,principal,source,destination,amount) -> !NeoForge.EVENT_BUS.post(new StorageTransferEvent(server,context,principal,source,destination,amount)).isCanceled(),executorEvent.transferObserver(),new NeoForgeRecipeProtection(server),executorEvent.recipeObserver(),
                 (context,principal,prepared) -> !NeoForge.EVENT_BUS.post(new FoodConsumeEvent(server,context,principal,prepared)).isCanceled(),executorEvent.foodObserver());
         IdentityPlatform identity = new IdentityPlatform(server, runtime);
+        if(executorEvent.deathObserver()!=null)identity.deathObserver(executorEvent.deathObserver());
         identities.put(server, identity);
         identity.reconcileLoaded();
         if (!runtime.persistence().isAvailable()) {

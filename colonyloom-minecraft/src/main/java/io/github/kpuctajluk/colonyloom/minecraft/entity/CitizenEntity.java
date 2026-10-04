@@ -32,6 +32,17 @@ public final class CitizenEntity extends PathfinderMob {
     public void runtimeMetrics(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics value) { requireServerThread(); metrics=Objects.requireNonNull(value); }
     private java.util.function.IntConsumer deathInventoryObserver;
     public void observeDeathInventory(java.util.function.IntConsumer observer) { requireServerThread(); deathInventoryObserver=Objects.requireNonNull(observer); }
+    public enum DeathFaultPoint { BEFORE_EFFECT, AFTER_SOURCE_CHANGE, AFTER_DESTINATION_CHANGE, AFTER_FACT_BEFORE_NOTIFY }
+    @FunctionalInterface
+    public interface DeathFaultObserver {
+        void observe(DeathFaultPoint point, io.github.kpuctajluk.colonyloom.core.action.ActionContext context);
+    }
+    private DeathFaultObserver deathFaultObserver;
+    private io.github.kpuctajluk.colonyloom.core.action.ActionContext deathActionContext;
+    private boolean deathInventoryDropped;
+    public void observeDeathFaults(DeathFaultObserver observer, io.github.kpuctajluk.colonyloom.core.action.ActionContext context) {
+        requireServerThread(); deathFaultObserver=Objects.requireNonNull(observer); deathActionContext=Objects.requireNonNull(context);
+    }
 
     public CitizenEntity(EntityType<? extends CitizenEntity> type, Level level) {
         super(type, level);
@@ -184,12 +195,26 @@ public final class CitizenEntity extends PathfinderMob {
         for (int slot = 0; slot < INVENTORY_SIZE; slot++) {
             ItemStack stack = inventory.removeItemNoUpdate(slot);
             if (!stack.isEmpty()) {
+                if (deathFaultObserver != null) deathFaultObserver.observe(DeathFaultPoint.AFTER_SOURCE_CHANGE, deathActionContext);
                 spawnAtLocation(stack);
             }
         }
         inventory.setChanged();
-        var observer=deathInventoryObserver; deathInventoryObserver=null;
-        if(observer!=null) { int remaining=0; for(int slot=0;slot<INVENTORY_SIZE;slot++) remaining+=inventory.getItem(slot).getCount(); observer.accept(remaining); }
+        deathInventoryDropped=true;
+    }
+
+    @Override
+    public void die(net.minecraft.world.damagesource.DamageSource source) {
+        super.die(source);
+        if (!deathInventoryDropped) return;
+        deathInventoryDropped=false;
+        var faultObserver=deathFaultObserver; deathFaultObserver=null;
+        var context=deathActionContext; deathActionContext=null;
+        var inventoryObserver=deathInventoryObserver; deathInventoryObserver=null;
+        // NeoForge captures spawnAtLocation during dropEquipment and publishes LivingDrops afterward.
+        // Returning from vanilla die proves actual drop publication, not merely a captured ItemEntity.
+        if(faultObserver!=null) faultObserver.observe(DeathFaultPoint.AFTER_DESTINATION_CHANGE,context);
+        if(inventoryObserver!=null) { int remaining=0; for(int slot=0;slot<INVENTORY_SIZE;slot++) remaining+=inventory.getItem(slot).getCount(); inventoryObserver.accept(remaining); }
     }
 
     private void requireServerThread() {

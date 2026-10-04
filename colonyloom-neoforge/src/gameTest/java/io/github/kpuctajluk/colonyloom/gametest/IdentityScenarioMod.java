@@ -71,6 +71,9 @@ public final class IdentityScenarioMod {
         new ProductionScenario();
         new NeedsScenario();
         new ManagementScenario();
+        new TransferRecoveryScenario();
+        new CraftFoodRecoveryScenario();
+        new DeathRecoveryScenario();
     }
 
     private void register(RegisterCommandsEvent event) {

@@ -21,6 +21,14 @@ public final class ColonyPersistence {
     private String failureReason;
     private boolean sessionDirty;
     private boolean checkpointFinished;
+    private Runnable checkpointObserver;
+
+    /** Optional per-server observer after verified persistence, before publishing the clean marker. */
+    public void checkpointObserver(Runnable observer) {
+        requireThread();
+        if(checkpointObserver!=null)throw new IllegalStateException("Checkpoint observer already installed");
+        checkpointObserver=Objects.requireNonNull(observer);
+    }
 
     private ColonyPersistence(MinecraftServer server, ServerRuntime runtime,Runnable flushPendingIo) {
         this.server = Objects.requireNonNull(server);
@@ -160,6 +168,7 @@ public final class ColonyPersistence {
             // SavedData.save catches IOException and even clears its dirty flag on failure.
             // saveEverything's boolean only reports that levels were visited, not DTO durability.
             DurableNbt.verifyForced(statePath, expected, DurableNbt.STATE_LIMIT);
+            if(checkpointObserver!=null)checkpointObserver.run();
             DurableNbt.writeVerified(markerPath, marker(true, checkpoint), DurableNbt.MARKER_LIMIT);
             checkpointFinished = true;
         } catch (IOException | RuntimeException exception) {

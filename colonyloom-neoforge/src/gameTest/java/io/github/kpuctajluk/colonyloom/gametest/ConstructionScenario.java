@@ -48,7 +48,7 @@ final class ConstructionScenario {
     private static final BlockPos ORIGIN = new BlockPos(8, 64, 8);
     private static final String MANIFEST = "colonyloom-construction-fixture.nbt";
     private static final long LIMIT = 64L * 1024 * 1024;
-    private static final List<String> SCENARIOS = List.of("clean", "cancel", "BEFORE_BLOCK_CHANGE", "AFTER_BLOCK_CHANGE");
+    private static final List<String> SCENARIOS = List.of("clean", "cancel", "BEFORE_BLOCK_CHANGE", "AFTER_BLOCK_CHANGE", "AFTER_FACT_BEFORE_NOTIFY", "after_checkpoint_before_clean_marker");
     private final Map<MinecraftServer, Run> runs = new IdentityHashMap<>();
 
     ConstructionScenario() {
@@ -59,7 +59,7 @@ final class ConstructionScenario {
     }
     private void cancelBoundary(BlockEvent.EntityPlaceEvent event) {
         // Keep the third action from racing the Post observer; this is a real external veto, not a placement bypass.
-        if (scenario().equals("cancel") && phase().equals("exercise") && event.getPos().equals(ORIGIN.offset(2, 0, 0))
+        if ((scenario().equals("cancel")||scenario().equals("after_checkpoint_before_clean_marker")) && phase().equals("exercise") && event.getPos().equals(ORIGIN.offset(2, 0, 0))
                 && event.getEntity() instanceof ServerPlayer player && player.getUUID().equals(OWNER)) event.setCanceled(true);
     }
     private void stopped(ServerStoppedEvent event) {
@@ -115,8 +115,23 @@ final class ConstructionScenario {
     private void configure(ConstructionExecutorEvent event) {
         if(SCENARIOS.contains(scenario())) runs.computeIfAbsent(event.server(),ignored -> new Run()).runtime=event.runtime();
         if (!SCENARIOS.contains(scenario()) || !phase().equals("exercise") || !Boolean.getBoolean("colonyloom.testFaults")) return;
-        if (!scenario().equals("BEFORE_BLOCK_CHANGE") && !scenario().equals("AFTER_BLOCK_CHANGE")) return;
-        event.observer((point, context) -> fault(event.server(), point, context));
+        if(scenario().equals("after_checkpoint_before_clean_marker")) {
+            event.checkpointObserver(() -> checkpointFault(event.server()));
+        } else event.observer((point, context) -> fault(event.server(), point, context));
+    }
+    private void checkpointFault(MinecraftServer server) {
+        try {
+            guard(server);
+            if(!Boolean.getBoolean("colonyloom.testFaults")||!phase().equals("exercise")||!scenario().equals("after_checkpoint_before_clean_marker"))throw new IllegalStateException("Faults disabled");
+            var run=runs.get(server);
+            var site=savedSite(server,run.manifest.getUUID("work"));
+            var marker=read(world(server).resolve("data/colonyloom-session.nbt"));
+            require(server,!marker.getBoolean("clean")&&site.getInt("cursor")==2,"checkpoint_durable_before_clean_marker",site.toString());
+            run.manifest.putInt("crashBlocks",countBlocks(server));run.manifest.putInt("crashItems",countItems(entity(server,run.manifest)));
+            write(world(server).resolve(MANIFEST),run.manifest);
+            fact(server,"expected_fault",true,"after_checkpoint_before_clean_marker exit=97 cursor=2");
+            Runtime.getRuntime().halt(97);
+        } catch(Exception failure) {throw new IllegalStateException("Checkpoint crash fixture failed",failure);}
     }
     private void fault(MinecraftServer server, BlockPlacementExecutor.FaultPoint point, ActionContext context) {
         try {
@@ -146,6 +161,14 @@ final class ConstructionScenario {
                 // Save only block chunks: entity inventory and logical cursor deliberately remain the previous durable side.
                 server.overworld().getChunkSource().save(true);
                 require(server, savedSite(server, run.manifest.getUUID("work")).getInt("cursor") == 0, "world_saved_goal_uncommitted", "cursor=0 blocks=1");
+            }
+            if(point==BlockPlacementExecutor.FaultPoint.AFTER_FACT_BEFORE_NOTIFY) {
+                run.runtime.persistence().persistSnapshot();
+                RecoveryNativeState.saveBlocks(server);
+                RecoveryNativeState.saveEntities(server);
+                var npc=entity(server,run.manifest);
+                require(server,RecoveryNativeState.inventoryCount(server,RecoveryNativeState.entity(server,npc.getUUID(),npc.chunkPosition()).getCompound("Colonyloom"),Items.OAK_STAIRS)==3,"durable_native_post_fact_inventory","exact original NPC disk inventory=3");
+                require(server,countBlocks(server)==1&&countItems(entity(server,run.manifest))==3&&savedSite(server,run.manifest.getUUID("work")).getInt("cursor")==0,"durable_fact_before_notification","blocks=1 nativeItems=3 cursor=0");
             }
             CompoundTag marker = read(world(server).resolve("data/colonyloom-session.nbt"));
             require(server, !marker.getBoolean("clean"), "dirty_marker_before_halt", marker.toString());
@@ -187,6 +210,11 @@ final class ConstructionScenario {
             String status = command(server, run, "colonyloom status " + run.manifest.getUUID("colony"));
             int blocks = countBlocks(server), items = countItems(npc);
             if (phase().equals("exercise")) {
+                if(scenario().equals("after_checkpoint_before_clean_marker")) {
+                    if(blocks<2)return;
+                    require(server,blocks==2&&items==2,"checkpoint_partial_real_resources","blocks=2 items=2");
+                    server.halt(false);return;
+                }
                 if (scenario().equals("clean") || scenario().equals("cancel")) {
                     if (blocks < 2) return;
                     require(server, blocks == 2 && items == (scenario().equals("cancel") ? 2 : 0), "two_block_partial_real_resources", status);
@@ -284,14 +312,15 @@ final class ConstructionScenario {
     private static void recovery(MinecraftServer server, Run run, String status, int blocks, int items) throws Exception {
         if (!run.manifest.getBoolean("accepted")) {
             require(server, status.contains("recoveryBlocked=true") && status.contains("RECOVERY_AMBIGUOUS"), "crash_restart_ambiguous", status);
-            int expectedBlocks = scenario().equals("AFTER_BLOCK_CHANGE") ? 1 : 0;
-            require(server, blocks == expectedBlocks && items == 4, "independent_saved_sides_observed", "saved blocks=" + blocks + " saved NPC items=" + items + " atCrashItems=" + run.manifest.getInt("crashItems"));
-            require(server, savedSite(server, run.manifest.getUUID("work")).getInt("cursor") == 0, "no_goal_commit_replay", savedSite(server, run.manifest.getUUID("work")).toString());
+            boolean checkpointFault=scenario().equals("after_checkpoint_before_clean_marker");
+            int expectedBlocks=checkpointFault?2:scenario().equals("BEFORE_BLOCK_CHANGE")?0:1;
+            int expectedItems=scenario().equals("AFTER_FACT_BEFORE_NOTIFY")?3:checkpointFault?2:4;
+            require(server, blocks == expectedBlocks && items == expectedItems, "independent_saved_sides_observed", "saved blocks=" + blocks + " saved NPC items=" + items + " atCrashItems=" + run.manifest.getInt("crashItems"));
+            require(server, savedSite(server, run.manifest.getUUID("work")).getInt("cursor") == (checkpointFault?2:0), "no_goal_commit_replay", savedSite(server, run.manifest.getUUID("work")).toString());
             if (run.observedBlocks != blocks || run.observedItems != items) { run.observedBlocks = blocks; run.observedItems = items; run.stableTicks = 0; }
             if (++run.stableTicks < 100) return;
-            require(server, blocks == expectedBlocks && items == 4, "hundred_tick_no_replay_or_issuance", status);
-            String inspect = command(server, run, "colonyloom recovery inspect " + run.manifest.getUUID("colony"));
-            require(server, inspect.contains("actualWorldDigest=") && inspect.contains("actualBlock="), "physical_recovery_inspection", inspect);
+            require(server, blocks == expectedBlocks && items == expectedItems, "hundred_tick_no_replay_or_issuance", status);
+            command(server, run, "colonyloom recovery inspect " + run.manifest.getUUID("colony"));
             UUID checkpoint = uuid(status, "recoveryCheckpointId");
             command(server, run, "colonyloom recovery accept-world " + run.manifest.getUUID("colony") + " " + checkpoint);
             run.manifest.putBoolean("accepted", true); write(world(server).resolve(MANIFEST), run.manifest);

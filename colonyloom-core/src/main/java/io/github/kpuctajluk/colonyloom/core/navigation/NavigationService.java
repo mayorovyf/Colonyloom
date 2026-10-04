@@ -194,8 +194,9 @@ public final class NavigationService implements AutoCloseable {
             refreshRevisions(entry);
             if (entry.region.isEmpty()) continue;
             if (!chunks.admitted(entry.request.workId()) || !chunks.ready(entry.request.workId())) {
-                stop(entry); Reason reason=chunks.reason(entry.request.workId());
-                entry.reason=reason==Reason.NONE ? Reason.CHUNK_NOT_READY : reason; continue;
+                stop(entry);
+                entry.reason=chunks.state(entry.request.workId())==ChunkDemandManager.State.BLOCKED
+                        ? Reason.WORKING_SET_LIMIT : Reason.CHUNK_NOT_READY; continue;
             }
             if (entry.state==State.MOVING) {
                 long pollStart = System.nanoTime();
@@ -223,8 +224,9 @@ public final class NavigationService implements AutoCloseable {
             if (!authoritative(entry.request)) { cancel(entry.request.workId()); continue; }
             refreshRevisions(entry);
             if (!chunks.admitted(entry.request.workId()) || !chunks.ready(entry.request.workId())) {
-                stop(entry); Reason reason=chunks.reason(entry.request.workId());
-                entry.reason=reason==Reason.NONE ? Reason.CHUNK_NOT_READY : reason; continue;
+                stop(entry);
+                entry.reason=chunks.state(entry.request.workId())==ChunkDemandManager.State.BLOCKED
+                        ? Reason.WORKING_SET_LIMIT : Reason.CHUNK_NOT_READY; continue;
             }
             Route route;
             long unitStart=System.nanoTime();
