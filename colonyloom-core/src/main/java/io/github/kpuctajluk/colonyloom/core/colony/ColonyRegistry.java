@@ -118,7 +118,8 @@ public final class ColonyRegistry {
         validateCitizen(citizen, colonies, buildings,storage.workshops());
         if (old.assignedWorkId() != null && !Objects.equals(old.assignedWorkId(), citizen.assignedWorkId())) workBoard.citizenDetached(old.citizenId());
         citizens.put(citizen.citizenId(), citizen);
-        workBoard.markCitizenChanged(citizen.citizenId());
+        // Position/active-clock telemetry preserves control revision and cannot change worker eligibility.
+        if (old.revision() != citizen.revision()) workBoard.markCitizenChanged(citizen.citizenId());
     }
     public void addTombstone(Tombstone tombstone) {
         requireOwner();
@@ -172,7 +173,13 @@ public final class ColonyRegistry {
         }
         for (CitizenRecord value : newCitizens.values()) if (value.lifecycle() != CitizenRecord.Lifecycle.ALIVE && !newTombstones.containsKey(value.citizenId())) throw new IllegalArgumentException("Nonliving citizen missing tombstone");
         Set<UUID> observedIds = new HashSet<>();
-        for (BindingRegistry.Observation value : snapshot.observations()) if (!observedIds.add(value.entityId())) throw new IllegalArgumentException("Duplicate observed entity UUID");
+        Map<UUID,Integer> observationScopes=new HashMap<>();
+        for (BindingRegistry.Observation value : snapshot.observations()) {
+            if (!observedIds.add(value.entityId())) throw new IllegalArgumentException("Duplicate observed entity UUID");
+            var citizen=newCitizens.get(value.citizenId());
+            UUID scope=citizen==null?new UUID(0,0):citizen.colonyId();
+            if(observationScopes.merge(scope,1,Integer::sum)>BindingRegistry.MAX_OBSERVATIONS_PER_COLONY)throw new IllegalArgumentException("Binding colony history envelope exceeded: "+scope);
+        }
         Map<UUID, WorkOrder.Snapshot> newWorks = new LinkedHashMap<>();
         Set<UUID> assignedCitizens = new HashSet<>();
         Set<UUID> foodSubjects = new HashSet<>();
@@ -217,6 +224,7 @@ public final class ColonyRegistry {
         for (var effect : snapshot.effects()) {
             var citizen = required(newCitizens,effect.citizenId(),"effect citizen");
             if (!objectIds.add(effect.operationId()) || !citizen.colonyId().equals(effect.colonyId()) || citizen.bindingEpoch()<effect.bindingEpoch()) throw new IllegalArgumentException("Invalid effect identity/binding");
+            if(effect.death()!=null && citizen.bindingEpoch()==effect.bindingEpoch() && !citizen.entityId().equals(effect.death().sourceEntityId()))throw new IllegalArgumentException("Death source UUID differs from canonical epoch");
             if (effect.workId()!=null && !required(newWorks,effect.workId(),"effect work").colonyId().equals(effect.colonyId())) throw new IllegalArgumentException("Foreign effect work");
         }
         var stockSlots=new java.util.HashSet<io.github.kpuctajluk.colonyloom.core.storage.StockRegion>();

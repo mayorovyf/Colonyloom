@@ -2,6 +2,7 @@ package io.github.kpuctajluk.colonyloom.gameplay.needs;
 
 import io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord;
 import io.github.kpuctajluk.colonyloom.core.colony.ColonyRegistry;
+import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Budget;
 import io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger;
 import io.github.kpuctajluk.colonyloom.core.supply.Demand;
 import io.github.kpuctajluk.colonyloom.core.supply.ItemMatcher;
@@ -22,15 +23,22 @@ public final class NeedsController {
     private final Port port;
     private final Map<UUID, UUID> works = new HashMap<>();
     private final Map<UUID, WorkOrder.Reason> blocked = new HashMap<>();
+    private Long citizenCursor;
+    private final java.util.LinkedHashSet<UUID> pending = new java.util.LinkedHashSet<>();
+    private boolean pendingTurn;
     public NeedsController(ColonyRegistry registry, Port port) {
         this.registry = Objects.requireNonNull(registry); this.port = Objects.requireNonNull(port);
         rebuild();
     }
     public void rebuild() {
-        registry.requireOwner(); works.clear(); blocked.clear();
+        registry.requireOwner(); works.clear(); blocked.clear(); pending.clear(); citizenCursor = null; pendingTurn = false;
         for (var work : registry.workBoard().works()) if (WorkOrder.FOOD.equals(work.typeId()) && !work.terminal()) {
             if (works.putIfAbsent(work.subjectId(), work.id()) != null) throw new IllegalArgumentException("Duplicate live food consumer");
         }
+    }
+    public void observe(UUID citizenId) {
+        registry.requireOwner();
+        if (registry.citizen(citizenId).food() <= 6) pending.add(citizenId);
     }
     public WorkOrder workForCitizen(UUID citizenId) {
         registry.requireOwner(); UUID id = works.get(citizenId);
@@ -42,15 +50,18 @@ public final class NeedsController {
         return registry.citizen(work.subjectId());
     }
     public Demand demandForWork(UUID workId) {
-        registry.requireOwner();
-        for (var demand : registry.supply().demands()) if (demand.snapshot().ownerId().equals(workId)) return demand;
-        return null;
+        registry.requireOwner(); return registry.supply().foodDemandForWork(workId);
     }
     public WorkOrder.Reason reason(UUID citizenId) {
         registry.requireOwner();
         if (registry.admission().normalAdmissionBlocked()) return WorkOrder.Reason.CRITICAL_CAPACITY;
-        for (var delivery : registry.supply().deliveries()) if (delivery.workId() != null && !delivery.terminal()) {
-            WorkOrder route = registry.workBoard().work(delivery.workId());
+        WorkOrder food = workForCitizen(citizenId);
+        Demand demand = food == null ? null : demandForWork(food.id());
+        if (demand != null) for (var share : registry.supply().demandShares(demand.id())) if (share.sourceOrderId() != null
+                && registry.supply().findProduction(share.sourceOrderId()) == null) {
+            var routeOrder = registry.supply().delivery(share.sourceOrderId());
+            if (routeOrder.workId() == null || routeOrder.terminal()) continue;
+            WorkOrder route = registry.workBoard().work(routeOrder.workId());
             if (citizenId.equals(route.subjectId()) && route.waitingReason() != WorkOrder.Reason.NONE) return route.waitingReason();
         }
         if (blocked.containsKey(citizenId)) return blocked.get(citizenId);
@@ -59,14 +70,27 @@ public final class NeedsController {
     }
     public void tick(long tick) {
         registry.requireOwner(); if (tick < 0) throw new IllegalArgumentException("Negative tick");
-        for (CitizenRecord initial : registry.citizensView()) {
+        long cutoff = registry.citizenViewCutoff();
+        for (int inspected = 0; inspected < 16; inspected++) {
+            boolean queued = !pending.isEmpty() && !pendingTurn;
+            Long next = queued ? null : registry.nextCitizenViewKey(citizenCursor);
+            if (!queued && (next == null || next > cutoff)) { citizenCursor = null; if (pending.isEmpty()) break; queued = true; }
+            if (!registry.budgets().tryConsume(Budget.DIRTY_RESCAN_OBJECTS, AdmissionLedger.Lane.SERVICE)) return;
+            pendingTurn = queued;
+            CitizenRecord initial;
+            if (queued) { UUID id = pending.removeFirst(); initial = registry.findCitizen(id).orElse(null); }
+            else { citizenCursor = next; initial = registry.citizenAtViewKey(next); }
+            if (initial == null) continue;
             if (initial.lifecycle() != CitizenRecord.Lifecycle.ALIVE) {
                 WorkOrder old = workForCitizen(initial.citizenId());
                 if (old != null && !old.terminal()) { var demand = demandForWork(old.id()); if (demand != null) registry.supply().cancel(demand.id()); registry.workBoard().cancel(old.id()); }
                 works.remove(initial.citizenId()); blocked.remove(initial.citizenId()); continue;
             }
-            if (initial.admission() != CitizenRecord.Admission.ACTIVE || initial.readiness() != CitizenRecord.Readiness.READY
-                    || !registry.colony(initial.colonyId()).available() || initial.food() > 6) continue;
+            if (!registry.colony(initial.colonyId()).available() || initial.food() > 6) continue;
+            if (initial.admission() != CitizenRecord.Admission.ACTIVE || initial.readiness() != CitizenRecord.Readiness.READY) {
+                if (queued) pending.add(initial.citizenId());
+                continue;
+            }
             WorkOrder work = workForCitizen(initial.citizenId());
             if (work != null && work.terminal()) { works.remove(initial.citizenId()); work = null; }
             try {
@@ -82,12 +106,13 @@ public final class NeedsController {
                 if (demand == null) demand = registry.supply().request(demandId(work.id()), initial.colonyId(), work.id(),
                         new ItemMatcher("minecraft:bread", null), 1, Demand.GoalKind.CONSUMPTION, work.target(), AdmissionLedger.Lane.CRITICAL, 10, tick);
                 blocked.remove(initial.citizenId());
-                if (!safe) continue;
+                if (!safe) { pending.add(initial.citizenId()); continue; }
                 if (demand.snapshot().allocated() == 0) {
                     if (work.assignee() == null) registry.workBoard().transition(work.id(), WorkOrder.State.WAITING,
                             registry.admission().normalAdmissionBlocked() ? WorkOrder.Reason.CRITICAL_CAPACITY : WorkOrder.Reason.MATERIALS, "food");
                 } else registry.workBoard().invalidate(work.id());
             } catch (AdmissionLedger.AdmissionException full) {
+                pending.add(initial.citizenId());
                 blocked.put(initial.citizenId(), WorkOrder.Reason.CRITICAL_CAPACITY);
                 if (work != null && !work.terminal() && work.assignee() == null) registry.workBoard().transition(work.id(),
                         WorkOrder.State.WAITING, WorkOrder.Reason.CRITICAL_CAPACITY, "food");

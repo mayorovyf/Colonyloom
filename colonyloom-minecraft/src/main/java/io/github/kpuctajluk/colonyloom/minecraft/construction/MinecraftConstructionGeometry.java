@@ -6,8 +6,11 @@ import io.github.kpuctajluk.colonyloom.core.content.BlockOffset;
 import io.github.kpuctajluk.colonyloom.core.content.BlueprintDefinition;
 import io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry;
 import io.github.kpuctajluk.colonyloom.gameplay.construction.ConstructionController;
+import java.util.AbstractList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.RandomAccess;
 import java.util.UUID;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -27,19 +30,33 @@ public final class MinecraftConstructionGeometry implements ConstructionControll
     public MinecraftConstructionGeometry(MinecraftServer server) { this.server=server; }
     public ConstructionController.Layout layout(UUID workId,UUID colonyId,BlueprintDefinition definition,WorldPosition origin,int degrees) {
         Rotation rotation=switch(degrees) { case 0 -> Rotation.NONE; case 90 -> Rotation.CLOCKWISE_90; case 180 -> Rotation.CLOCKWISE_180; case 270 -> Rotation.COUNTERCLOCKWISE_90; default -> throw new IllegalArgumentException("Rotation must be 0/90/180/270"); };
-        var targets=new ConstructionController.Target[definition.blocks().size()];
-        int minX=Integer.MAX_VALUE,minY=Integer.MAX_VALUE,minZ=Integer.MAX_VALUE,maxX=Integer.MIN_VALUE,maxY=Integer.MIN_VALUE,maxZ=Integer.MIN_VALUE;
-        Map<BlockDescriptor,BlockDescriptor> palette=new HashMap<>();
-        for(int i=0;i<targets.length;i++) {
-            var block=definition.blocks().get(i); var position=position(origin,block.offset(),rotation);
-            var expected=palette.computeIfAbsent(block.block(),descriptor -> descriptor(state(descriptor).rotate(rotation),descriptor.itemId()));
-            targets[i]=new ConstructionController.Target(position,expected);
-            minX=Math.min(minX,position.x()); minY=Math.min(minY,position.y()); minZ=Math.min(minZ,position.z());
-            maxX=Math.max(maxX,position.x()); maxY=Math.max(maxY,position.y()); maxZ=Math.max(maxZ,position.z());
-        }
+        var bounds=definition.bounds();
+        var first=position(origin,new BlockOffset(bounds.minX(),bounds.minY(),bounds.minZ()),rotation);
+        var last=position(origin,new BlockOffset(bounds.maxX(),bounds.maxY(),bounds.maxZ()),rotation);
+        var claim=new TargetClaimRegistry.Snapshot(workId,colonyId,null,origin.dimension(),
+                Math.min(first.x(),last.x()),Math.min(first.y(),last.y()),Math.min(first.z(),last.z()),
+                Math.max(first.x(),last.x()),Math.max(first.y(),last.y()),Math.max(first.z(),last.z()),0);
         var marker=definition.markers().get("work_origin"); if(marker==null) throw new IllegalArgumentException("Blueprint lacks work_origin");
         var buffer=definition.markers().get("delivery_buffer"); if(buffer==null) throw new IllegalArgumentException("Blueprint lacks delivery_buffer");
-        return new ConstructionController.Layout(targets,position(origin,marker,rotation),position(origin,buffer,rotation),new TargetClaimRegistry.Snapshot(workId,colonyId,null,origin.dimension(),minX,minY,minZ,maxX,maxY,maxZ,0));
+        // The accepted palette is capped at 512, independently of the 65,536 indexed targets.
+        Map<BlockDescriptor,BlockDescriptor> palette=new HashMap<>();
+        for(var block:definition.palette()) palette.put(block,descriptor(state(block).rotate(rotation),block.itemId()));
+        return new ConstructionController.Layout(Collections.unmodifiableList(new Targets(definition,origin,rotation,Map.copyOf(palette))),
+                position(origin,marker,rotation),position(origin,buffer,rotation),claim);
+    }
+    private static final class Targets extends AbstractList<ConstructionController.Target> implements RandomAccess {
+        private final BlueprintDefinition definition;
+        private final WorldPosition origin;
+        private final Rotation rotation;
+        private final Map<BlockDescriptor,BlockDescriptor> palette;
+        Targets(BlueprintDefinition definition,WorldPosition origin,Rotation rotation,Map<BlockDescriptor,BlockDescriptor> palette) {
+            this.definition=definition; this.origin=origin; this.rotation=rotation; this.palette=palette;
+        }
+        @Override public int size() { return definition.blocks().size(); }
+        @Override public ConstructionController.Target get(int index) {
+            var block=definition.blocks().get(index);
+            return new ConstructionController.Target(position(origin,block.offset(),rotation),palette.get(block.block()));
+        }
     }
     private static WorldPosition position(WorldPosition origin,BlockOffset offset,Rotation rotation) {
         BlockPos transformed=StructureTemplate.transform(new BlockPos(offset.x(),offset.y(),offset.z()),Mirror.NONE,rotation,BlockPos.ZERO);
@@ -49,9 +66,17 @@ public final class MinecraftConstructionGeometry implements ConstructionControll
         if(!server.isSameThread()) throw new IllegalStateException("Construction validation requires server thread");
         var origin=layout.workOrigin(); var level=server.getLevel(ResourceKey.create(Registries.DIMENSION,ResourceLocation.parse(origin.dimension())));
         if(level==null) throw new IllegalArgumentException("Unknown construction dimension");
-        for(var target:layout.targets()) { var position=target.position(); BlockPos pos=new BlockPos(position.x(),position.y(),position.z());
-            if(level.isOutsideBuildHeight(pos) || !level.getWorldBorder().isWithinBounds(pos)) throw new IllegalArgumentException("Construction target outside world");
-            state(target.expected()); }
+        var claim=layout.claim();
+        validatePosition(level,new BlockPos(claim.minX(),claim.minY(),claim.minZ()));
+        validatePosition(level,new BlockPos(claim.maxX(),claim.maxY(),claim.maxZ()));
+        validatePosition(level,new BlockPos(origin.x(),origin.y(),origin.z()));
+        var buffer=layout.deliveryBuffer(); validatePosition(level,new BlockPos(buffer.x(),buffer.y(),buffer.z()));
+    }
+    private static void validatePosition(net.minecraft.server.level.ServerLevel level,BlockPos position) {
+        // Border and build height are axis-aligned: exact extrema prove every occupied target.
+        // No block reads, chunk demands, or chunk loads are needed for admission.
+        if(level.isOutsideBuildHeight(position) || !level.getWorldBorder().isWithinBounds(position))
+            throw new IllegalArgumentException("Construction target or marker outside world");
     }
     public static BlockState state(BlockDescriptor descriptor) {
         return io.github.kpuctajluk.colonyloom.minecraft.content.ContentLoader.decodeBlockState(descriptor);

@@ -31,6 +31,7 @@ public final class WorkBoard {
     private final Map<UUID, Long> workViewIds = new HashMap<>();
     private long workViewSequence;
     private final Map<UUID,Lease> leases = new HashMap<>();
+    private final Map<UUID, Integer> pendingFood = new HashMap<>();
     private final Collection<WorkOrder> view = Collections.unmodifiableCollection(works.values());
     private Consumer<UUID> changed = ignored -> {};
     private Consumer<UUID> citizenChanged = ignored -> {};
@@ -50,6 +51,7 @@ public final class WorkBoard {
     public void onAge(ToLongFunction<WorkOrder> provider) { registry.requireOwner(); age = Objects.requireNonNull(provider); }
     public void onRemaining(ToLongFunction<WorkOrder> provider) { registry.requireOwner(); remaining = Objects.requireNonNull(provider); }
     public WorkOrder work(UUID id) { registry.requireOwner(); WorkOrder value = works.get(id); if (value == null) throw new IllegalArgumentException("Unknown work " + id); return value; }
+    public WorkOrder findWork(UUID id) { registry.requireOwner(); return works.get(id); }
     public Collection<WorkOrder> works() { registry.requireOwner(); return view; }
     public long workViewCutoff() { registry.requireOwner(); return workViewSequence; }
     public Long nextWorkViewKey(Long after) { registry.requireOwner(); return after == null ? workViewKeys.isEmpty() ? null : workViewKeys.firstKey() : workViewKeys.higherKey(after); }
@@ -90,6 +92,7 @@ public final class WorkBoard {
         Lease lease = ledger.reserveRoot(colony,lane,ROOT);
         try { registry.beforeMutation(); } catch (RuntimeException failure) { lease.close(); throw failure; }
         works.put(id,value); leases.put(id,lease);
+        indexFood(value);
         Long key = ++workViewSequence; workViewKeys.put(key,id); workViewIds.put(id,key);
         changed.accept(id); return value;
     }
@@ -130,6 +133,8 @@ public final class WorkBoard {
         }
         for (Map.Entry<UUID,Lease> entry : leases.entrySet()) if (entry.getValue() != admitted.get(entry.getKey())) entry.getValue().close();
         works.clear(); works.putAll(staged); leases.clear(); leases.putAll(admitted); ledger = replacement;
+        pendingFood.clear();
+        for (WorkOrder value : works.values()) indexFood(value);
         workViewKeys.clear(); workViewIds.clear();
         for (UUID id : works.keySet()) { Long key = ++workViewSequence; workViewKeys.put(key,id); workViewIds.put(id,key); }
     }
@@ -149,7 +154,7 @@ public final class WorkBoard {
                 return;
             }
         }
-        registry.beforeMutation(); releaseAssignmentInternal(value); value.transition(WorkOrder.State.CANCELLED,WorkOrder.Reason.NONE,"cancelled"); leases.get(id).finishRoot(); changed.accept(id);
+        registry.beforeMutation(); releaseAssignmentInternal(value); value.transition(WorkOrder.State.CANCELLED,WorkOrder.Reason.NONE,"cancelled"); unindexFood(value); leases.get(id).finishRoot(); changed.accept(id);
     }
     public void priority(UUID id, int priority) {
         if (priority < 0 || priority > 10) throw new IllegalArgumentException("Priority must be 0..10");
@@ -170,8 +175,11 @@ public final class WorkBoard {
                 && registry.supply().deliveryForWork(id) != null && registry.supply().hasCargo(registry.supply().deliveryForWork(id).id()))
             throw new IllegalStateException("Delivery work retains physical cargo");
         registry.beforeMutation();
+        boolean wasTerminal = value.terminal();
         if (state == WorkOrder.State.READY || state == WorkOrder.State.WAITING || state == WorkOrder.State.COMPLETED || state == WorkOrder.State.CANCELLED || state == WorkOrder.State.FAILED) releaseAssignmentInternal(value);
-        value.transition(state,reason,stage); if (value.terminal()) leases.get(id).finishRoot(); changed.accept(id);
+        value.transition(state,reason,stage);
+        if (value.terminal()) { if (!wasTerminal) unindexFood(value); leases.get(id).finishRoot(); }
+        changed.accept(id);
     }
     /** Physical waits retain their exact worker/cargo rather than silently choosing a substitute. */
     public void waitAssigned(UUID id, WorkOrder.Reason reason, String stage) {
@@ -213,8 +221,7 @@ public final class WorkBoard {
         if (current.subjectId() != null && current.subjectId().equals(citizenId)) return true;
         var delivery = registry.supply().deliveryForWork(current.id());
         boolean cargo = delivery != null && registry.supply().hasCargo(delivery.id());
-        for (var share : registry.supply().shares()) if (share.stage() == io.github.kpuctajluk.colonyloom.core.supply.CoverageShare.Stage.ALLOCATED
-                && share.slot().storage().identity().equals(citizenId) && share.slot().storage().bindingEpoch() == citizen.bindingEpoch()) cargo = true;
+        cargo |= registry.supply().hasAllocatedCitizenCargo(citizenId, citizen.bindingEpoch());
         if (cargo) {
             if (!current.criticalService()) { registry.beforeMutation(); current.criticalService(true); changed.accept(current.id()); }
             if (delivery != null && registry.supply().hasCargo(delivery.id())) registry.supply().returnDelivery(delivery.id());
@@ -229,8 +236,13 @@ public final class WorkBoard {
     }
     public boolean foodPending(UUID citizenId) {
         registry.requireOwner();
-        for (WorkOrder work : works.values()) if (WorkOrder.FOOD.equals(work.typeId()) && !work.terminal() && citizenId.equals(work.subjectId())) return true;
-        return false;
+        return pendingFood.containsKey(citizenId);
+    }
+    private void indexFood(WorkOrder work) {
+        if (WorkOrder.FOOD.equals(work.typeId()) && !work.terminal()) pendingFood.merge(work.subjectId(), 1, Integer::sum);
+    }
+    private void unindexFood(WorkOrder work) {
+        if (WorkOrder.FOOD.equals(work.typeId())) pendingFood.computeIfPresent(work.subjectId(), (subject, count) -> count == 1 ? null : count - 1);
     }
     /** Called by registry before replacing a citizen that clears its old assignment. No recursive registry write. */
     public void citizenDetached(UUID citizenId) {

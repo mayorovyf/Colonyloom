@@ -31,8 +31,13 @@ public final class Demand {
         public boolean acceptsSource(StorageId source) { return sourceStorages.isEmpty() || sourceStorages.contains(source); }
     }
     private Snapshot state;
+    private java.util.function.Consumer<Demand> beforeChange = ignored -> {}, afterChange = ignored -> {};
+    long planningSequence;
     Demand(Snapshot state) { this.state = Objects.requireNonNull(state); }
-    void replace(Snapshot state) { this.state = state; }
+    void index(java.util.function.Consumer<Demand> beforeChange, java.util.function.Consumer<Demand> afterChange) {
+        this.beforeChange = beforeChange; this.afterChange = afterChange;
+    }
+    void replace(Snapshot state) { beforeChange.accept(this); this.state = state; afterChange.accept(this); }
     public UUID id() { return state.id(); }
     public Snapshot snapshot() { return state; }
     public long deficit() { return state.deficit(); }

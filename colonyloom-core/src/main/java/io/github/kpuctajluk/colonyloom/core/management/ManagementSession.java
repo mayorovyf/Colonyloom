@@ -58,12 +58,17 @@ public final class ManagementSession {
             this.authorityRevision = authorityRevision;
         }
     }
+    private record ClosedNotice(String reason, long tick) {}
     private final UUID sessionId = UUID.randomUUID();
     private final Backend backend;
     private final Transport transport;
     private final Map<Long, CachedResult> results = new LinkedHashMap<>();
     private final Map<UUID, View> views = new LinkedHashMap<>();
     private final Map<UUID, String> closedViews = new LinkedHashMap<>();
+    private final Map<UUID, ClosedNotice> sentCloses = new LinkedHashMap<>();
+    private final long[] subscriptionTicks = new long[ManagementProtocol.SUBSCRIPTIONS_PER_SECOND];
+    private final long[] closeTicks = new long[ManagementProtocol.VIEW_CLOSES_PER_SECOND];
+    private int subscriptionHead, subscriptionCount, closeHead, closeCount;
     private long nextSequence;
     private long tick;
     private final long[] commandTicks = new long[ManagementProtocol.COMMANDS_PER_SECOND];
@@ -141,7 +146,9 @@ public final class ManagementSession {
         } catch (io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.AdmissionException exception) {
             return result(command, Status.REJECTED, exception.reason().name(), 0);
         } catch (IllegalArgumentException | IllegalStateException exception) {
-            return result(command, Status.REJECTED, "INVALID_COMMAND", 0);
+            String reason = exception.getMessage();
+            return result(command, Status.REJECTED,
+                    "MEMBER_LIMIT".equals(reason) || "FOUNDING_VALIDATION_LIMIT".equals(reason) ? reason : "INVALID_COMMAND", 0);
         }
     }
     private static Result result(Command command, Status status, String reason, long revision) {
@@ -189,21 +196,42 @@ public final class ManagementSession {
     public void subscribe(Subscription subscription) {
         Objects.requireNonNull(subscription);
         UUID id = subscription.subscriptionId();
-        if (closed || !sessionId.equals(subscription.sessionId())) { notifyClosed(id, "NO_SESSION"); return; }
+        if (closed) return;
+        // Revocation is never deferred behind the ingress gate, including an unrelated-ID burst.
+        refreshAuthority();
+        boolean admitted = admitSubscription();
+        if (!sessionId.equals(subscription.sessionId())) { notifyClosed(id, "NO_SESSION", false); return; }
+        boolean hadView = views.containsKey(id);
+        if (!admitted) {
+            removeView(id);
+            notifyClosed(id, "RATE_LIMIT", hadView);
+            return;
+        }
         Authority authority = backend.authorize(subscription.colonyId());
-        if (!authority.allowed()) { removeView(id); notifyClosed(id, "ACCESS_DENIED"); return; }
+        if (!authority.allowed()) { removeView(id); notifyClosed(id, "ACCESS_DENIED", hadView); return; }
         View old = views.get(id);
         if (old != null && !subscription.resync() && old.subscription.colonyId().equals(subscription.colonyId())
                 && old.subscription.type() == subscription.type() && old.subscription.page() == subscription.page()) {
             checkAuthority(old);
             return;
         }
-        if (old == null && views.size() >= ManagementProtocol.SUBSCRIPTIONS) { notifyClosed(id, "SUBSCRIPTION_LIMIT"); return; }
+        if (old == null && !closedViews.isEmpty()) { notifyClosed(id, "BACKPRESSURE", false); return; }
+        if (old == null && views.size() >= ManagementProtocol.SUBSCRIPTIONS) { notifyClosed(id, "SUBSCRIPTION_LIMIT", false); return; }
         removeView(id);
         closedViews.remove(id);
+        sentCloses.remove(id);
         View view = new View(subscription, authority.revision());
         views.put(id, view);
         prepare(view);
+    }
+    private boolean admitSubscription() {
+        while (subscriptionCount > 0 && tick - subscriptionTicks[subscriptionHead] >= 20) {
+            subscriptionHead = (subscriptionHead + 1) % subscriptionTicks.length;
+            subscriptionCount--;
+        }
+        if (subscriptionCount == subscriptionTicks.length) return false;
+        subscriptionTicks[(subscriptionHead + subscriptionCount++) % subscriptionTicks.length] = tick;
+        return true;
     }
     public void unsubscribe(UUID requestedSession, UUID subscriptionId) {
         if (closed || !sessionId.equals(requestedSession)) return;
@@ -348,21 +376,41 @@ public final class ManagementSession {
     }
     private void closeView(View view, String reason) {
         removeView(view.subscription.subscriptionId());
-        notifyClosed(view.subscription.subscriptionId(), reason);
+        notifyClosed(view.subscription.subscriptionId(), reason, true);
     }
-    private void notifyClosed(UUID id, String reason) {
+    private void notifyClosed(UUID id, String reason, boolean required) {
         if (closed) return;
-        if (transport.writable()) transport.closeView(id, reason);
-        else {
+        if (!required && closedViews.containsKey(id)) return;
+        ClosedNotice previous = sentCloses.get(id);
+        if (previous != null && previous.reason().equals(reason) && tick - previous.tick() < 20) return;
+        if (transport.writable() && admitClose()) {
+            closedViews.remove(id);
+            sendClose(id, reason);
+        } else if (required) {
+            // Only removed live views need durable connection-local close delivery. Arbitrary
+            // rejected IDs may not evict their revocation/timeout notices under backpressure.
             closedViews.put(id, reason);
-            while (closedViews.size() > ManagementProtocol.SUBSCRIPTIONS) closedViews.remove(closedViews.keySet().iterator().next());
         }
+    }
+    private boolean admitClose() {
+        while (closeCount > 0 && tick - closeTicks[closeHead] >= 20) {
+            closeHead = (closeHead + 1) % closeTicks.length;
+            closeCount--;
+        }
+        if (closeCount == closeTicks.length) return false;
+        closeTicks[(closeHead + closeCount++) % closeTicks.length] = tick;
+        return true;
+    }
+    private void sendClose(UUID id, String reason) {
+        sentCloses.put(id, new ClosedNotice(reason, tick));
+        while (sentCloses.size() > ManagementProtocol.VIEW_CLOSES_PER_SECOND) sentCloses.remove(sentCloses.keySet().iterator().next());
+        transport.closeView(id, reason);
     }
     private void flushClosed() {
         Iterator<Map.Entry<UUID, String>> iterator = closedViews.entrySet().iterator();
-        while (iterator.hasNext() && transport.writable()) {
+        while (iterator.hasNext() && transport.writable() && admitClose()) {
             Map.Entry<UUID, String> entry = iterator.next();
-            transport.closeView(entry.getKey(), entry.getValue());
+            sendClose(entry.getKey(), entry.getValue());
             iterator.remove();
         }
     }
@@ -372,6 +420,7 @@ public final class ManagementSession {
         views.clear();
         results.clear();
         closedViews.clear();
+        sentCloses.clear();
         java.util.Arrays.fill(iteration, null);
         bufferedBytes = 0;
         cachedBytes = 0;

@@ -35,15 +35,15 @@ public final class NavigationService implements AutoCloseable {
             if (epoch < 1 || goalRevision < 0 || priority < 0 || priority > 10) throw new IllegalArgumentException("Invalid navigation request");
         }
     }
-    public interface Route { int nodeCount(); }
-    /** Identity sentinel: this request needs another bounded search portion, not route application. */
-    public static final Route PENDING_ROUTE = () -> 0;
-    /** No search cursor was admitted; active portions must release bounded query capacity first. */
-    public static final Route CAPACITY_WAIT_ROUTE = () -> 0;
+    public sealed interface SearchResult permits Route, SearchOutcome { }
+    public non-sealed interface Route extends SearchResult { int nodeCount(); }
+    public enum SearchOutcome implements SearchResult {
+        PENDING, CAPACITY_WAIT, UNREACHABLE, EXHAUSTED, UNAVAILABLE, WORKING_SET_LIMIT
+    }
     public interface Backend {
         WorldPosition position(Request request);
-        /** Advances a portion; PENDING_ROUTE retains a cursor, CAPACITY_WAIT_ROUTE waits for admission, null is unreachable/unavailable. */
-        Route search(Request request, List<ChunkKey> admittedRegion);
+        /** Advances one bounded portion, returning a route or an explicit search outcome. */
+        SearchResult search(Request request, List<ChunkKey> admittedRegion);
         boolean apply(Request request, Route route, BooleanSupplier stillCurrent);
         Motion poll(Request request);
         void stop(Request request);
@@ -87,7 +87,7 @@ public final class NavigationService implements AutoCloseable {
         long searchedTick=Long.MIN_VALUE, startOrder;
         State state = State.WAITING;
         Reason reason = Reason.CHUNK_NOT_READY;
-        boolean queued, deferred, capacityWaiting;
+        boolean queued, deferred, capacityWaiting, domainReleased;
         int failures;
         long retryAt;
         BooleanSupplier validity;
@@ -162,6 +162,21 @@ public final class NavigationService implements AutoCloseable {
         for (int x=minX;x<=maxX;x++) for (int z=minZ;z<=maxZ;z++) keys.add(new ChunkKey(target.dimension(),x,z));
         return List.copyOf(keys);
     }
+    private boolean rebuildDisplacedDomain(Entry entry) {
+        WorldPosition position=backend.position(entry.request);
+        if (position==null) return false;
+        WorldPosition target=entry.request.target();
+        long dx=(long)position.x()-target.x(),dy=(long)position.y()-target.y(),dz=(long)position.z()-target.z();
+        int minX=(Math.min(position.x(),target.x())-2)>>4,maxX=(Math.max(position.x(),target.x())+2)>>4;
+        int minZ=(Math.min(position.z(),target.z())-2)>>4,maxZ=(Math.max(position.z(),target.z())+2)>>4;
+        boolean bounded=position.dimension().equals(target.dimension()) && Math.abs(dx)<=64 && Math.abs(dy)<=64
+                && Math.abs(dz)<=64 && dx*dx+dy*dy+dz*dz<=4096 && (long)(maxX-minX+1)*(maxZ-minZ+1)<=81;
+        if (bounded ? !entry.region.isEmpty() && entry.region.getFirst().x()==minX && entry.region.getFirst().z()==minZ
+                && entry.region.getLast().x()==maxX && entry.region.getLast().z()==maxZ : entry.region.isEmpty()) return false;
+        Request request=entry.request;
+        cancel(request.workId());request(request);
+        return true;
+    }
     private boolean authoritative(Request request) {
         CitizenRecord citizen=registry.findCitizen(request.citizenId()).orElse(null);
         if (citizen==null || !citizen.colonyId().equals(request.colonyId()) || citizen.bindingEpoch()!=request.epoch()
@@ -189,82 +204,124 @@ public final class NavigationService implements AutoCloseable {
             if (lane==null || !budgets.tryConsume(Budget.DIRTY_RESCAN_OBJECTS,lane)) break;
             int laneIndex=lane.ordinal(); Entry entry=laneCursors[laneIndex];
             laneCursors[laneIndex]=entry.laneNext; entry.polledTick=now;
-            if (entry.state==State.ARRIVED) continue;
-            if (!authoritative(entry.request)) { cancel(entry.request.workId()); continue; }
-            refreshRevisions(entry);
-            if (entry.region.isEmpty()) continue;
-            if (!chunks.admitted(entry.request.workId()) || !chunks.ready(entry.request.workId())) {
-                stop(entry);
-                entry.reason=chunks.state(entry.request.workId())==ChunkDemandManager.State.BLOCKED
-                        ? Reason.WORKING_SET_LIMIT : Reason.CHUNK_NOT_READY; continue;
-            }
-            if (entry.state==State.MOVING) {
-                long pollStart = System.nanoTime();
-                Motion motion;
-                try { motion=backend.poll(entry.request); }
-                finally { registry.metrics().record(Timer.NAVIGATION_POLL,System.nanoTime()-pollStart); }
-                if (motion==Motion.ARRIVED) {
-                    stop(entry); entry.state=State.ARRIVED; entry.reason=Reason.NONE; chunks.release(entry.request.workId());
-                } else if (motion==Motion.OBSTRUCTED) retry(entry);
-                else if (motion==Motion.UNAVAILABLE) {
-                    stop(entry); entry.reason=Reason.RECONCILING;
-                    WorldPosition displaced=backend.position(entry.request);
-                    if(displaced!=null && !region(displaced,entry.request.target()).equals(entry.region)) {
-                        Request request=entry.request;cancel(request.workId());request(request);
-                    }
-                }
-                else chunks.useful(entry.request.workId());
-            } else if (now>=entry.retryAt) enqueue(entry);
+            if (poll(entry)) enqueue(entry);
         }
         while (budgets.timeAvailable()) {
-            Lane lane=budgets.chooseLane(Budget.NAVIGATION_STARTS,!starts.get(1).isEmpty(),!starts.get(2).isEmpty(),!starts.get(0).isEmpty());
+            boolean queued=!starts.get(0).isEmpty() || !starts.get(1).isEmpty() || !starts.get(2).isEmpty();
+            Lane lane=budgets.chooseLane(Budget.NAVIGATION_STARTS,
+                    queued ? !starts.get(1).isEmpty() : pollable(1),
+                    queued ? !starts.get(2).isEmpty() : pollable(2),
+                    queued ? !starts.get(0).isEmpty() : pollable(0));
             if (lane==null || !budgets.tryConsume(Budget.NAVIGATION_STARTS,lane)) break;
-            Entry entry=starts.get(lane.ordinal()).pollFirst(); entry.queued=false;
-            if (!current(entry)) continue;
-            if (!authoritative(entry.request)) { cancel(entry.request.workId()); continue; }
-            refreshRevisions(entry);
-            if (!chunks.admitted(entry.request.workId()) || !chunks.ready(entry.request.workId())) {
-                stop(entry);
-                entry.reason=chunks.state(entry.request.workId())==ChunkDemandManager.State.BLOCKED
-                        ? Reason.WORKING_SET_LIMIT : Reason.CHUNK_NOT_READY; continue;
-            }
-            Route route;
             long unitStart=System.nanoTime();
-            entry.searchedTick=now;
             try {
-                long begin=System.nanoTime();
-                searchCount++;
-                try { route=backend.search(entry.request,entry.region); }
-                finally {
-                    lastSearchNanos=System.nanoTime()-begin; maxSearchNanos=Math.max(maxSearchNanos,lastSearchNanos);
-                    registry.metrics().record(Timer.NAVIGATION_EXTERNAL,lastSearchNanos);
+                Entry entry;
+                if (queued) {
+                    entry=starts.get(lane.ordinal()).pollFirst(); entry.queued=false;
+                } else {
+                    // An idle navigation quantum pays for exactly one discovery or motion poll.
+                    // Shared service cursors cannot bury ready requests behind dirty-only discovery.
+                    entry=laneCursors[lane.ordinal()]; laneCursors[lane.ordinal()]=entry.laneNext; entry.polledTick=now;
+                    if (!poll(entry)) continue;
                 }
+                search(entry);
             } finally { registry.metrics().record(Timer.NAVIGATION_UNIT,System.nanoTime()-unitStart); }
-            boolean stale=!current(entry) || !authoritative(entry.request) || !chunks.admitted(entry.request.workId())
-                    || !chunks.ready(entry.request.workId()) || !valid(entry);
-            if (stale) {
-                staleResults++;
-                if (current(entry)) {
-                    stop(entry); entry.retryAt=now;
-                    if (!authoritative(entry.request)) cancel(entry.request.workId());
-                }
-                continue;
-            }
-            if (route==PENDING_ROUTE || route==CAPACITY_WAIT_ROUTE) {
-                entry.capacityWaiting=route==CAPACITY_WAIT_ROUTE; enqueue(entry); continue;
-            }
-            entry.capacityWaiting=false;
-            if (route==null) { failedSearches++; retry(entry); continue; }
-            if (route.nodeCount()<1 || route.nodeCount()+1+entry.region.size()*2>registry.admission().limits().resource(Resource.CACHE_ENTRIES_PER_OWNER)) {
-                stop(entry); entry.reason=Reason.WORKING_SET_LIMIT; entry.retryAt=Long.MAX_VALUE; continue;
-            }
-            try { entry.routeLease=registry.admission().reserve(entry.request.workId(),entry.request.lane(),Map.of(Resource.CACHE_ENTRIES,route.nodeCount(),Resource.CACHE_ENTRIES_PER_OWNER,route.nodeCount())); }
-            catch (AdmissionLedger.AdmissionException denied) { stop(entry); entry.reason=Reason.STATE_LIMIT; continue; }
-            if (!backend.apply(entry.request,route,entry.validity)) { retry(entry); continue; }
-            entry.state=State.MOVING; entry.reason=Reason.NONE;
-            chunks.setProtection(entry.request.workId(),true,false,entry.request.lane()==Lane.CRITICAL);
-            chunks.useful(entry.request.workId());
         }
+    }
+    /** One paid request continuation; only a ready waiting request proceeds to a search. */
+    private boolean poll(Entry entry) {
+        if (entry.state==State.ARRIVED) return false;
+        if (!authoritative(entry.request)) { cancel(entry.request.workId()); return false; }
+        refreshRevisions(entry);
+        // Waiting/backoff owns no motion; displacement invalidates its old search domain too.
+        if (entry.state==State.WAITING && rebuildDisplacedDomain(entry)) return false;
+        if (entry.region.isEmpty()) return false;
+        if(entry.domainReleased) {
+            if(now<entry.retryAt)return false;
+            try {
+                chunks.request(entry.request.workId(),entry.request.colonyId(),entry.region,ChunkDemandManager.Readiness.ENTITY_TICKING,
+                        entry.request.lane(),entry.request.priority(),true);
+                entry.domainReleased=false;
+            } catch(AdmissionLedger.AdmissionException denied) {
+                entry.reason=denied.reason()==AdmissionLedger.Reason.CRITICAL_CAPACITY?Reason.CRITICAL_CAPACITY:Reason.STATE_LIMIT;return false;
+            }
+        }
+        if (!chunks.admitted(entry.request.workId()) || !chunks.ready(entry.request.workId())) {
+            stop(entry);
+            entry.reason=chunks.state(entry.request.workId())==ChunkDemandManager.State.BLOCKED
+                    ? Reason.WORKING_SET_LIMIT : Reason.CHUNK_NOT_READY; return false;
+        }
+        if (entry.state!=State.MOVING) return now>=entry.retryAt && entry.searchedTick!=now;
+        long pollStart=System.nanoTime();
+        Motion motion;
+        try { motion=backend.poll(entry.request); }
+        finally { registry.metrics().record(Timer.NAVIGATION_POLL,System.nanoTime()-pollStart); }
+        if (motion==Motion.ARRIVED) {
+            stop(entry); entry.state=State.ARRIVED; entry.reason=Reason.NONE; chunks.release(entry.request.workId());
+            removePollEntry(entry);
+        } else if (motion==Motion.OBSTRUCTED) retry(entry,Reason.RECONCILING);
+        else if (motion==Motion.UNAVAILABLE) {
+            stop(entry); entry.reason=Reason.RECONCILING;
+            rebuildDisplacedDomain(entry);
+        }
+        else chunks.useful(entry.request.workId());
+        return false;
+    }
+    private void search(Entry entry) {
+        if (!current(entry) || entry.searchedTick==now) return;
+        if (!authoritative(entry.request)) { cancel(entry.request.workId()); return; }
+        if (rebuildDisplacedDomain(entry)) return;
+        refreshRevisions(entry);
+        if (!chunks.admitted(entry.request.workId()) || !chunks.ready(entry.request.workId())) {
+            stop(entry);
+            entry.reason=chunks.state(entry.request.workId())==ChunkDemandManager.State.BLOCKED
+                    ? Reason.WORKING_SET_LIMIT : Reason.CHUNK_NOT_READY; return;
+        }
+        SearchResult result;
+        entry.searchedTick=now;
+        entry.polledTick=now;
+        long begin=System.nanoTime();
+        searchCount++;
+        try { result=Objects.requireNonNull(backend.search(entry.request,entry.region)); }
+        finally {
+            lastSearchNanos=System.nanoTime()-begin; maxSearchNanos=Math.max(maxSearchNanos,lastSearchNanos);
+            registry.metrics().record(Timer.NAVIGATION_EXTERNAL,lastSearchNanos);
+        }
+        boolean stale=!current(entry) || !authoritative(entry.request) || !chunks.admitted(entry.request.workId())
+                || !chunks.ready(entry.request.workId()) || !valid(entry);
+        if (stale) {
+            staleResults++;
+            if (current(entry)) {
+                stop(entry); entry.retryAt=now;
+                if (!authoritative(entry.request)) cancel(entry.request.workId());
+            }
+            return;
+        }
+        if (result==SearchOutcome.PENDING || result==SearchOutcome.CAPACITY_WAIT) {
+            entry.capacityWaiting=result==SearchOutcome.CAPACITY_WAIT; enqueue(entry); return;
+        }
+        entry.capacityWaiting=false;
+        if (result instanceof SearchOutcome outcome) {
+            failedSearches++;
+            Reason reason=switch (outcome) {
+                case UNREACHABLE -> Reason.UNREACHABLE;
+                case EXHAUSTED -> Reason.SEARCH_EXHAUSTED;
+                case UNAVAILABLE -> Reason.RECONCILING;
+                case WORKING_SET_LIMIT -> Reason.WORKING_SET_LIMIT;
+                default -> throw new IllegalStateException("Nonterminal search outcome");
+            };
+            retry(entry,reason); return;
+        }
+        Route route=(Route)result;
+        if (route.nodeCount()<1 || route.nodeCount()+1+entry.region.size()*2>registry.admission().limits().resource(Resource.CACHE_ENTRIES_PER_OWNER)) {
+            stop(entry); entry.reason=Reason.WORKING_SET_LIMIT; entry.retryAt=Long.MAX_VALUE; return;
+        }
+        try { entry.routeLease=registry.admission().reserve(entry.request.workId(),entry.request.lane(),Map.of(Resource.CACHE_ENTRIES,route.nodeCount(),Resource.CACHE_ENTRIES_PER_OWNER,route.nodeCount())); }
+        catch (AdmissionLedger.AdmissionException denied) { stop(entry); entry.reason=Reason.STATE_LIMIT; return; }
+        if (!backend.apply(entry.request,route,entry.validity)) { retry(entry,Reason.RECONCILING); return; }
+        entry.state=State.MOVING; entry.reason=Reason.NONE;
+        chunks.setProtection(entry.request.workId(),true,false,entry.request.lane()==Lane.CRITICAL);
+        chunks.useful(entry.request.workId());
     }
     private boolean pollable(int lane) { return laneCursors[lane]!=null && laneCursors[lane].polledTick!=now; }
     private boolean current(Entry entry) { return requests.get(entry.request.workId())==entry; }
@@ -297,8 +354,11 @@ public final class NavigationService implements AutoCloseable {
         entry.state=State.WAITING;
         chunks.setProtection(entry.request.workId(),false,false,entry.request.lane()==Lane.CRITICAL);
     }
-    private void retry(Entry entry) {
-        stop(entry); entry.reason=Reason.UNREACHABLE;
+    private void retry(Entry entry,Reason reason) {
+        stop(entry); entry.reason=reason;
+        // An unsuccessful search owns no movement. Exhaustion is not a negative route proof;
+        // retain its distinct reason while releasing the idle domain for bounded backoff.
+        chunks.release(entry.request.workId());entry.domainReleased=true;
         entry.retryAt=now+RETRY[Math.min(entry.failures,RETRY.length-1)];
         if (entry.failures<RETRY.length-1) entry.failures++;
     }
@@ -308,6 +368,10 @@ public final class NavigationService implements AutoCloseable {
         for (int i=0;i<entry.region.size();i++) if (--entry.buckets[i].references==0) index.remove(entry.region.get(i));
         if (entry.next==entry) head=null;
         else { entry.previous.next=entry.next; entry.next.previous=entry.previous; if (head==entry) head=entry.next; }
+        removePollEntry(entry);
+    }
+    private void removePollEntry(Entry entry) {
+        if (entry.laneNext==null) return;
         int lane=entry.request.lane().ordinal();
         if (entry.laneNext==entry) { laneHeads[lane]=null; laneCursors[lane]=null; }
         else {
@@ -315,6 +379,7 @@ public final class NavigationService implements AutoCloseable {
             if (laneHeads[lane]==entry) laneHeads[lane]=entry.laneNext;
             if (laneCursors[lane]==entry) laneCursors[lane]=entry.laneNext;
         }
+        entry.lanePrevious=null; entry.laneNext=null;
     }
     /** O(1) revision invalidation; each affected request observes it in its bounded polling portion. */
     public void invalidate(ChunkKey key) { registry.requireOwner(); Bucket bucket=index.get(key); if (bucket!=null) bucket.revision=Math.incrementExact(bucket.revision); }

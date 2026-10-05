@@ -16,7 +16,9 @@ public final class GlobalWorkBudgets {
     private SimulationLimits limits;
     private final int[] used = new int[BUDGETS.length];
     private final int[][] usedByLane = new int[BUDGETS.length][LANES.length];
-    private final long[][] deficit = new long[BUDGETS.length][LANES.length];
+    // A service-only cursor is a different contest, not evidence that another
+    // consumer's critical/normal candidates became idle. Each mask has bounded debt.
+    private final long[][][] deficit = new long[BUDGETS.length][1 << LANES.length][LANES.length];
     private final int[] demandMasks = new int[BUDGETS.length];
     private final int[] selections = new int[BUDGETS.length];
     private final long[] totalConsumed = new long[BUDGETS.length];
@@ -67,7 +69,7 @@ public final class GlobalWorkBudgets {
         for (Lane lane : LANES) {
             int laneIndex = lane.ordinal();
             if ((mask & (1 << laneIndex)) == 0) continue;
-            long credit = deficit[index][laneIndex] + WEIGHTS[laneIndex];
+            long credit = deficit[index][mask][laneIndex] + WEIGHTS[laneIndex];
             if (credit > bestCredit) {
                 bestCredit = credit;
                 best = laneIndex;
@@ -91,14 +93,11 @@ public final class GlobalWorkBudgets {
         for (Lane activeLane : LANES) {
             int active = activeLane.ordinal();
             if ((mask & (1 << active)) != 0) {
-                deficit[index][active] += WEIGHTS[active];
+                deficit[index][mask][active] += WEIGHTS[active];
                 activeWeight += WEIGHTS[active];
-            } else {
-                // Idle classes do not bank arbitrary debt while another class borrows.
-                deficit[index][active] = 0;
             }
         }
-        deficit[index][laneIndex] -= activeWeight;
+        deficit[index][mask][laneIndex] -= activeWeight;
         used[index]++;
         usedByLane[index][laneIndex]++;
         totalConsumed[index]++;

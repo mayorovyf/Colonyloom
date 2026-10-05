@@ -30,6 +30,7 @@ public final class EffectRegistry {
             throw new IllegalArgumentException("Effect must start prepared and unchanged");
         var citizen=registry.citizen(effect.citizenId());
         if (!citizen.colonyId().equals(effect.colonyId()) || citizen.bindingEpoch()!=effect.bindingEpoch()) throw new IllegalArgumentException("Effect binding mismatch");
+        if(effect.death()!=null && !citizen.entityId().equals(effect.death().sourceEntityId()))throw new IllegalArgumentException("Death evidence source UUID mismatch");
         if (effect.workId()!=null && !registry.workBoard().work(effect.workId()).colonyId().equals(effect.colonyId())) throw new IllegalArgumentException("Effect work owner mismatch");
         var lease=registry.admission().reserve(effect.colonyId(),lane,Map.of(Resource.EVIDENCE,1));
         try { registry.beforeMutation(); } catch(RuntimeException failure) { lease.close(); throw failure; }
@@ -45,16 +46,17 @@ public final class EffectRegistry {
                 || (old.craft()==null ? effect.craft()!=null : !old.craft().sameAttempt(effect.craft())
                         || old.craft().phase().ordinal()>effect.craft().phase().ordinal())
                 || (old.food()==null ? effect.food()!=null : !old.food().sameAttempt(effect.food()))
+                || (old.death()==null ? effect.death()!=null : !old.death().sameAttempt(effect.death()))
                 || !validTransition(old,effect))
             throw new IllegalArgumentException("Effect evidence changed identity or revision");
         registry.beforeMutation(); records.put(effect.operationId(),effect);
     }
     private static boolean validTransition(EffectRecord old,EffectRecord next) {
-        if (old.state()!=EffectRecord.State.PREPARED && (!Objects.equals(old.transfer(),next.transfer()) || !Objects.equals(old.craft(),next.craft()) || !Objects.equals(old.food(),next.food()))) return false;
+        if (old.state()!=EffectRecord.State.PREPARED && (!Objects.equals(old.transfer(),next.transfer()) || !Objects.equals(old.craft(),next.craft()) || !Objects.equals(old.food(),next.food()) || !Objects.equals(old.death(),next.death()))) return false;
         return switch(old.state()) {
             case PREPARED -> next.state()==EffectRecord.State.OBSERVED || next.state()==EffectRecord.State.AMBIGUOUS
                     || next.state()==EffectRecord.State.ACCEPTED && old.countAfter()==next.countAfter()
-                            && Objects.equals(old.transfer(),next.transfer()) && Objects.equals(old.craft(),next.craft()) && Objects.equals(old.food(),next.food());
+                            && Objects.equals(old.transfer(),next.transfer()) && Objects.equals(old.craft(),next.craft()) && Objects.equals(old.food(),next.food()) && Objects.equals(old.death(),next.death());
             case OBSERVED -> (next.state()==EffectRecord.State.AMBIGUOUS || next.state()==EffectRecord.State.ACCEPTED) && old.countAfter()==next.countAfter();
             case AMBIGUOUS -> next.state()==EffectRecord.State.ACCEPTED && old.countAfter()==next.countAfter();
             case ACCEPTED -> false;

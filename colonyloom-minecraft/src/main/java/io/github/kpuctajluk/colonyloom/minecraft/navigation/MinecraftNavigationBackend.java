@@ -9,6 +9,8 @@ import io.github.kpuctajluk.colonyloom.core.navigation.NavigationService;
 import io.github.kpuctajluk.colonyloom.core.navigation.NavigationService.Motion;
 import io.github.kpuctajluk.colonyloom.core.navigation.NavigationService.Request;
 import io.github.kpuctajluk.colonyloom.core.navigation.NavigationService.Route;
+import io.github.kpuctajluk.colonyloom.core.navigation.NavigationService.SearchResult;
+import io.github.kpuctajluk.colonyloom.core.navigation.NavigationService.SearchOutcome;
 import io.github.kpuctajluk.colonyloom.core.work.WorkOrder;
 import io.github.kpuctajluk.colonyloom.minecraft.entity.CitizenEntity;
 import java.util.ArrayList;
@@ -100,7 +102,7 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         CitizenEntity entity=entity(request);
         return entity==null ? null : new WorldPosition(request.target().dimension(),entity.blockPosition().getX(),entity.blockPosition().getY(),entity.blockPosition().getZ());
     }
-    @Override public Route search(Request request,List<ChunkKey> admittedRegion) {
+    @Override public SearchResult search(Request request,List<ChunkKey> admittedRegion) {
         CitizenEntity entity=entity(request);
         Query query=query(request.workId());
         if (query!=null && (!query.request.equals(request) || query.entity!=entity || !query.guard.region.equals(admittedRegion))) {
@@ -109,39 +111,45 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         if (entity==null || !chunks.admitted(request.workId()) || !chunks.ready(request.workId()) || admittedRegion.isEmpty() || admittedRegion.size()>81
                 || entity.distanceToSqr(request.target().x()+0.5,request.target().y(),request.target().z()+0.5)>4096) {
             if (query!=null) { release(query); cancelledQueries++; }
-            return null;
+            return SearchOutcome.UNAVAILABLE;
         }
         try {
             if (query==null) {
                 query=acquire();
-                if (query==null) { poolRejections++; return NavigationService.CAPACITY_WAIT_ROUTE; }
+                if (query==null) { poolRejections++; return SearchOutcome.CAPACITY_WAIT; }
                 query.start(request,entity,new Guard(request,(ServerLevel)entity.level(),admittedRegion));
-                if (!query.guard.allReady() || !query.standable(query.startX,query.startY,query.startZ)
+                if (!query.guard.allReady()) {
+                    release(query); cancelledQueries++; return SearchOutcome.UNAVAILABLE;
+                }
+                if (!query.standable(query.startX,query.startY,query.startZ)
                         || !query.standable(request.target().x(),request.target().y(),request.target().z())) {
-                    release(query); exhaustedQueries++; return null;
+                    release(query); exhaustedQueries++; return SearchOutcome.UNREACHABLE;
                 }
             } else if (!query.guard.allReady() || !query.atStart()) {
-                release(query); cancelledQueries++; return null;
+                release(query); cancelledQueries++; return SearchOutcome.UNAVAILABLE;
             }
             BoundedGroundSearch.Result result=query.search.advance(query);
             searchPortions++; totalExpansions+=query.search.lastExpansions();
             portionHighWater=Math.max(portionHighWater,query.search.lastExpansions());
             nodeHighWater=Math.max(nodeHighWater,query.search.nodeCount());
             openHighWater=Math.max(openHighWater,query.search.openHighWater());
-            if (result==BoundedGroundSearch.Result.PENDING) return NavigationService.PENDING_ROUTE;
+            if (result==BoundedGroundSearch.Result.PENDING) return SearchOutcome.PENDING;
             if (query.search.nodeLimitHit()) nodeLimitQueries++;
-            if (result==BoundedGroundSearch.Result.EXHAUSTED) { release(query); exhaustedQueries++; return null; }
+            if (result==BoundedGroundSearch.Result.EXHAUSTED || result==BoundedGroundSearch.Result.UNREACHABLE) {
+                release(query); exhaustedQueries++;
+                return result==BoundedGroundSearch.Result.EXHAUSTED ? SearchOutcome.EXHAUSTED : SearchOutcome.UNREACHABLE;
+            }
             Path path=query.path();
-            if (path==null) { release(query); exhaustedQueries++; return null; }
+            if (path==null) { release(query); exhaustedQueries++; return SearchOutcome.WORKING_SET_LIMIT; }
             Guard guard=query.guard;
             boolean valid=validPath(path,guard,entity);
             release(query);
-            if (!valid) { exhaustedQueries++; return null; }
+            if (!valid) { exhaustedQueries++; return SearchOutcome.UNAVAILABLE; }
             completedQueries++;
             return new GroundRoute(request.id(),entity.getUUID(),request.epoch(),request.goalRevision(),path,guard);
         } catch (UnsafeSearch unavailable) {
             if (query!=null && query.request!=null) { release(query); cancelledQueries++; }
-            return null;
+            return SearchOutcome.UNAVAILABLE;
         } catch (RuntimeException | Error failure) {
             if (query!=null && query.request!=null) release(query);
             throw failure;
@@ -203,6 +211,7 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
                 || !validPath(ground.path(),ground.guard(),entity)) return false;
         Node start=ground.path().getNode(0);
         if (entity.blockPosition().getX()!=start.x || entity.blockPosition().getY()!=start.y || entity.blockPosition().getZ()!=start.z) return false;
+        pathValidation.departStart(ground.path(),entity,ground.guard());
         stop(request);
         GroundPathNavigation navigation=new ControlledNavigation(entity,entity.level());
         if (!navigation.moveTo(ground.path(),1.0)) return false;
@@ -386,6 +395,9 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         @Override public int getMinBuildHeight() { return level.getMinBuildHeight(); }
     }
     private final class Query implements BoundedGroundSearch.Terrain {
+        // A clear two-step detour is cheaper than pushing through an idle resident, but a crowd
+        // cannot disconnect otherwise walkable terrain. Native movement/collision remains authoritative.
+        private static final int OCCUPANCY_COST=4;
         final BoundedGroundSearch search;
         final BlockPos.MutableBlockPos position=new BlockPos.MutableBlockPos();
         final Shapes.DoubleLineConsumer collisions=this::collisionBox;
@@ -422,18 +434,16 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
                     || !support.isFaceSturdy(guard,position,Direction.UP)) return false;
             VoxelShape shape=support.getCollisionShape(guard,position,context);
             if (shape.isEmpty() || Math.abs(shape.max(Direction.Axis.Y)-1.0)>1.0E-7 || !Block.isFaceFull(shape,Direction.UP)) return false;
+            return clear(x+0.5-half,y,z+0.5-half,x+0.5+half,y+entity.getBbHeight(),z+0.5+half);
+        }
+        @Override public int additionalCost(int x,int y,int z) {
+            if(request==null || x==request.target().x() && y==request.target().y() && z==request.target().z()) return 0;
+            double half=entity.getBbWidth()*0.5;
             AABB body=new AABB(x+0.5-half,y,z+0.5-half,x+0.5+half,y+entity.getBbHeight(),z+0.5+half);
-            BlockPos occupiedStart=entity.blockPosition();
-            // Occupants are detour obstacles, not a permanent veto on reaching a shared goal.
-            // Native collision/push handling remains authoritative during the final approach.
-            boolean goal=request!=null && x==request.target().x() && y==request.target().y() && z==request.target().z();
-            if(request!=null && !goal && (x!=occupiedStart.getX() || y!=occupiedStart.getY() || z!=occupiedStart.getZ())) {
-                occupants.clear();
-                guard.level.getEntities(net.minecraft.world.level.entity.EntityTypeTest.forClass(Entity.class),body,occupied,occupants,1);
-                boolean blocked=!occupants.isEmpty();occupants.clear();
-                if(blocked) return false;
-            }
-            return clear(body.minX,body.minY,body.minZ,body.maxX,body.maxY,body.maxZ);
+            occupants.clear();
+            guard.level.getEntities(net.minecraft.world.level.entity.EntityTypeTest.forClass(Entity.class),body,occupied,occupants,1);
+            boolean blocked=!occupants.isEmpty(); occupants.clear();
+            return blocked ? OCCUPANCY_COST : 0;
         }
         @Override public boolean transition(int fromX,int fromY,int fromZ,int x,int y,int z) {
             double half=entity.getBbWidth()*0.5, height=entity.getBbHeight();
@@ -471,6 +481,26 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
                 return standable(next.x,next.y,next.z);
             } catch (UnsafeSearch unavailable) { return false; }
             finally { this.entity=null; this.guard=null; context=null; }
+        }
+        void departStart(Path path,CitizenEntity entity,Guard guard) {
+            if(path.getNodeCount()<2) return;
+            Node start=path.getNode(0),next=path.getNode(1);
+            if(next.y!=start.y || Math.abs(entity.getY()-start.y)>0.01) return;
+            this.entity=entity; this.guard=guard; context=CollisionContext.of(entity);
+            try {
+                double half=entity.getBbWidth()*0.5;
+                AABB center=new AABB(start.x+0.5-half,start.y,start.z+0.5-half,start.x+0.5+half,start.y+entity.getBbHeight(),start.z+0.5+half);
+                occupants.clear();
+                guard.level.getEntities(net.minecraft.world.level.entity.EntityTypeTest.forClass(Entity.class),center,occupied,occupants,1);
+                boolean blocked=!occupants.isEmpty(); occupants.clear();
+                if(!blocked) return;
+                AABB actual=entity.getBoundingBox();
+                // The start is already physically occupied. Do not require recentering through a neighbour;
+                // depart only when the complete actual-to-next envelope has safe native terrain.
+                if(clear(Math.min(actual.minX,next.x+0.5-half),actual.minY,Math.min(actual.minZ,next.z+0.5-half),
+                        Math.max(actual.maxX,next.x+0.5+half),actual.maxY,Math.max(actual.maxZ,next.z+0.5+half))) path.advance();
+            } catch(UnsafeSearch unavailable) { /* Retain the original guarded path when departure cannot be proved. */ }
+            finally { occupants.clear(); this.entity=null; this.guard=null; context=null; }
         }
         private void collisionBox(double fromX,double fromY,double fromZ,double toX,double toY,double toZ) {
             if (blockX+toX>minX+1.0E-7 && blockX+fromX<maxX-1.0E-7 && blockY+toY>minY+1.0E-7

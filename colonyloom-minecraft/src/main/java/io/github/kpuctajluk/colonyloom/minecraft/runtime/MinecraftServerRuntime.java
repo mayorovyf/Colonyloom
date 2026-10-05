@@ -32,6 +32,7 @@ public final class MinecraftServerRuntime {
     private io.github.kpuctajluk.colonyloom.minecraft.needs.MinecraftNeedsService needsService;
     private java.util.Map<String,io.github.kpuctajluk.colonyloom.gameplay.production.ProcessDefinition> processes=java.util.Map.of();
     private long metricsTickStart;
+    private int productionRetirementCursor;
     public void metricsTickStarted() { runtime.requireOwnerThread(); metricsTickStart=System.nanoTime(); }
     public void metricsTickFinished() { runtime.requireOwnerThread(); if(metricsTickStart!=0) { metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.MSPT,System.nanoTime()-metricsTickStart); metricsTickStart=0; } }
     public io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics metrics() { return runtime.metrics(); }
@@ -92,6 +93,7 @@ public final class MinecraftServerRuntime {
     }
     public io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService storage() { runtime.requireOwnerThread(); return storage; }
     public io.github.kpuctajluk.colonyloom.gameplay.needs.NeedsController needs() {runtime.requireOwnerThread();return needs;}
+    public io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftDeliveryService deliveryService() { runtime.requireOwnerThread(); return deliveryService; }
     private void configureSupply() {
         if(storage==null)return;
         if(supplyPlanner==null)supplyPlanner=new io.github.kpuctajluk.colonyloom.core.supply.SupplyPlanner(runtime.registry(),runtime.registry().supply(),runtime.budgets());
@@ -133,20 +135,26 @@ public final class MinecraftServerRuntime {
         runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.CONSTRUCTION,constructionService);
         runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.FOOD,needsService);
         citizens = new CitizenAdmissionService(server, runtime, chunks);
+        citizens.onFoodNeed(needs::observe);
         runtime.scheduler().beforeWork(tick -> {
-            // Rotate every physical consumer, including stock, under the same guard.
-            switch ((int)(tick % 4)) {
-                case 0 -> { chunks.tick(tick); citizens.tick(); navigation.tick(tick); if (storage != null) storage.tick(tick); }
-                case 1 -> { citizens.tick(); navigation.tick(tick); if (storage != null) storage.tick(tick); chunks.tick(tick); }
-                case 2 -> { navigation.tick(tick); if (storage != null) storage.tick(tick); chunks.tick(tick); citizens.tick(); }
-                default -> { if (storage != null) storage.tick(tick); chunks.tick(tick); citizens.tick(); navigation.tick(tick); }
+            // The stock sweep reserves its proven freshness share before downstream native reads.
+            if(storage!=null)storage.tick(tick);
+            // Rotate dirty consumers across scheduler-first and platform-first ticks; quota one
+            // must still admit delivery/production work rather than only poll resident domains.
+            int first=(int)((tick/2)%9);
+            for(int offset=0;offset<9;offset++) {
+                switch((first+offset)%9) {
+                    case 0 -> chunks.tick(tick);
+                    case 1 -> citizens.tick();
+                    case 2 -> navigation.tick(tick);
+                    case 3 -> runtime.registry().targetClaims().tick();
+                    case 4 -> runtime.registry().supply().reconcile(tick,runtime.budgets());
+                    case 5 -> needs.tick(tick);
+                    case 6 -> { if(supplyPlanner!=null)supplyPlanner.tick(tick); }
+                    case 7 -> { if(deliveryService!=null)deliveryService.tick(tick); }
+                    case 8 -> { if(productionService!=null)productionService.tick(); }
+                }
             }
-            runtime.registry().targetClaims().tick();
-            runtime.registry().supply().reconcile(tick,runtime.budgets());
-            needs.tick(tick);
-            if(supplyPlanner!=null)supplyPlanner.tick(tick);
-            if(deliveryService!=null)deliveryService.tick(tick);
-            if(productionService!=null)productionService.tick();
         });
         runtime.scheduler().physicalExecutor(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.MOVE, new io.github.kpuctajluk.colonyloom.core.scheduler.SimulationScheduler.PhysicalExecutor() {
             public void step(io.github.kpuctajluk.colonyloom.core.work.WorkOrder work, long tick) {
@@ -173,6 +181,7 @@ public final class MinecraftServerRuntime {
         });
     }
     public io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager chunks() { runtime.requireOwnerThread(); return chunks; }
+    public CitizenAdmissionService citizenAdmission() { runtime.requireOwnerThread(); return citizens; }
     public io.github.kpuctajluk.colonyloom.core.navigation.NavigationService navigation() { runtime.requireOwnerThread(); return navigation; }
     public java.util.Map<String,Object> navigationBackendMetrics() { runtime.requireOwnerThread(); return navigationBackend == null ? java.util.Map.of() : navigationBackend.diagnostics(); }
     public void citizenObserved(UUID id) { runtime.requireOwnerThread(); if (citizens != null) citizens.observe(id); }
@@ -187,28 +196,71 @@ public final class MinecraftServerRuntime {
         }
         if (!persistence.isAvailable()) runtime.setSimulationEnabled(false);
         runtime.tick(runtime.serverTick() + 1);
-        if(persistence.isAvailable() && runtime.serverTick()-lastCompactionAttempt>=1200
-                && (runtime.registry().effects().size()>=2048 || runtime.registry().construction().size()>=384
-                    || runtime.registry().supply().deliveries().stream().filter(io.github.kpuctajluk.colonyloom.core.logistics.DeliveryOrder::terminal).count()>=32)
-                && runtime.registry().colonies().stream().noneMatch(colony -> colony.recoveryBlocked() || colony.contentBlocked())) {
-            lastCompactionAttempt=runtime.serverTick();
-            if(persistence.checkpointForCompaction()) {
-                runtime.registry().effects().compactAfterVerifiedCheckpoint();
-                runtime.registry().construction().compactAfterVerifiedCheckpoint();
-                var retained=new java.util.HashSet<UUID>();
-                for(var effect:runtime.registry().effects().snapshots())if(effect.workId()!=null)retained.add(effect.workId());
-                for(var dependency:runtime.registry().workBoard().works())retained.addAll(dependency.dependencies());
-                for(var citizen:runtime.registry().citizensView())if(citizen.assignedWorkId()!=null)retained.add(citizen.assignedWorkId());
-                for(var claim:runtime.registry().targetClaims().snapshots())retained.add(claim.ownerId());
-                for(var order:runtime.registry().supply().deliveries())if(order.terminal()) {
-                    var work=order.workId()==null?null:runtime.registry().workBoard().work(order.workId());
-                    if(work!=null&&(!work.terminal()||retained.contains(work.id())))continue;
-                    runtime.registry().supply().retireDelivery(order.id());if(work!=null)runtime.registry().workBoard().retire(work.id());
-                }
-                persistence.persistSnapshot();
-            }
+        if (persistence.isAvailable() && runtime.serverTick() - lastCompactionAttempt >= 1200) {
+            lastCompactionAttempt = runtime.serverTick();
+            compactIfNeeded();
         }
         lastMinecraftTick = minecraftTick;
+    }
+
+    private void compactIfNeeded() {
+        var registry = runtime.registry();
+        if (registry.colonies().stream().anyMatch(colony -> colony.recoveryBlocked() || colony.contentBlocked())) return;
+        int productionCount = registry.supply().productionCount();
+        boolean needed = registry.effects().size() >= 2048 || registry.construction().size() >= 384
+                || registry.supply().deliveries().stream().filter(io.github.kpuctajluk.colonyloom.core.logistics.DeliveryOrder::terminal).limit(32).count() >= 32
+                || registry.supply().terminalProductionCount() >= 32
+                || runtime.workBoard().works().stream().filter(work -> work.terminal() && io.github.kpuctajluk.colonyloom.core.work.WorkOrder.FOOD.equals(work.typeId())).limit(32).count() >= 32;
+        if (!needed) return;
+        long started = System.nanoTime();
+        try {
+            if (!persistence.checkpointForCompaction()) return;
+            registry.effects().compactAfterVerifiedCheckpoint();
+            registry.construction().compactAfterVerifiedCheckpoint();
+            var retained = new java.util.HashSet<UUID>();
+            for (var effect : registry.effects().snapshots()) if (effect.workId() != null) retained.add(effect.workId());
+            for (var dependency : registry.workBoard().works()) retained.addAll(dependency.dependencies());
+            for (var citizen : registry.citizensView()) if (citizen.assignedWorkId() != null) retained.add(citizen.assignedWorkId());
+            for (var claim : registry.targetClaims().snapshots()) retained.add(claim.ownerId());
+            for (var order : registry.supply().deliveries()) if (order.terminal()) {
+                var work = order.workId() == null ? null : registry.workBoard().work(order.workId());
+                if (work != null && (!work.terminal() || retained.contains(work.id()))) continue;
+                registry.supply().retireDelivery(order.id());
+                if (work != null) registry.workBoard().retire(work.id());
+            }
+            boolean retiredProduction = false;
+            int productionChecks = Math.min(32, productionCount);
+            for (int i = 0; i < productionChecks && registry.supply().productionCount() > 0; i++) {
+                productionRetirementCursor = registry.supply().productionRetirementStart(productionRetirementCursor);
+                var order = registry.supply().productionAt(productionRetirementCursor);
+                if (!registry.supply().canRetireProduction(order.id())) {
+                    productionRetirementCursor++;
+                    continue;
+                }
+                registry.supply().retireProduction(order.id());
+                if (order.workId() != null) runtime.workBoard().retire(order.workId());
+                retiredProduction = true;
+                // Removal swaps the last indexed order into this offset; inspect it next.
+            }
+            if (retiredProduction && supplyPlanner != null) supplyPlanner.rebuild();
+            var deliveryConsumers = new java.util.HashSet<UUID>();
+            for (var order : registry.supply().deliveries()) if (order.ownerDemandId() != null) {
+                deliveryConsumers.add(registry.supply().demand(order.ownerDemandId()).snapshot().ownerId());
+            }
+            boolean retiredFood = false;
+            for (var work : java.util.List.copyOf(runtime.workBoard().works())) {
+                if (work.terminal() && io.github.kpuctajluk.colonyloom.core.work.WorkOrder.FOOD.equals(work.typeId())
+                        && !retained.contains(work.id()) && !deliveryConsumers.contains(work.id())) {
+                    registry.supply().retireFood(work.id());
+                    runtime.workBoard().retire(work.id());
+                    retiredFood = true;
+                }
+            }
+            if (retiredFood && supplyPlanner != null) supplyPlanner.rebuild();
+            persistence.persistSnapshot();
+        } finally {
+            metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.COMPACTION, System.nanoTime() - started);
+        }
     }
 
     public void beginStopping(MinecraftServer eventServer) {

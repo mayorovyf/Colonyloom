@@ -8,7 +8,6 @@ import net.neoforged.neoforge.event.AddReloadListenerEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import net.neoforged.neoforge.event.entity.EntityJoinLevelEvent;
 import net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent;
-import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
 import java.util.IdentityHashMap;
 import java.util.Map;
@@ -51,7 +50,6 @@ public final class ColonyloomMod {
         NeoForge.EVENT_BUS.addListener(this::onCommands);
         NeoForge.EVENT_BUS.addListener(this::onEntityJoin);
         NeoForge.EVENT_BUS.addListener(this::onEntityLeave);
-        NeoForge.EVENT_BUS.addListener(net.neoforged.bus.api.EventPriority.LOWEST,false,this::onDeath);
         NeoForge.EVENT_BUS.addListener(this::onInteract);
         NeoForge.EVENT_BUS.addListener(this::onServerStarting);
         NeoForge.EVENT_BUS.addListener(net.neoforged.bus.api.EventPriority.HIGHEST,false,this::onMetricsPreTick);
@@ -189,12 +187,6 @@ public final class ColonyloomMod {
         }
     }
 
-    private synchronized void onDeath(LivingDeathEvent event) {
-        if (event.getEntity().level() instanceof net.minecraft.server.level.ServerLevel level) {
-            IdentityPlatform identity = identities.get(level.getServer());
-            if (identity != null) identity.death(event);
-        }
-    }
 
     private synchronized void onInteract(PlayerInteractEvent.EntityInteract event) {
         if (event.getEntity().level() instanceof net.minecraft.server.level.ServerLevel level) {

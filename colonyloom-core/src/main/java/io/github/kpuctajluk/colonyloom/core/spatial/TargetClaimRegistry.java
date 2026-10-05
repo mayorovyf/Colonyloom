@@ -57,7 +57,6 @@ public final class TargetClaimRegistry implements AutoCloseable {
         int accountedLinks;
         State state = State.PENDING;
         long comparedIndex = -1;
-        boolean dirty = true;
         boolean buildingPhase = true;
         Entry buildingNext;
         Entry buildingPrevious;
@@ -78,13 +77,10 @@ public final class TargetClaimRegistry implements AutoCloseable {
             }
         }
     }
-    private static final class Index {
-        final LinkedHashMap<UUID, Entry> entries = new LinkedHashMap<>();
-        final Map<Chunk, Link> chunks = new HashMap<>();
-        final Map<UUID, Entry> buildings = new HashMap<>();
+    /** Intrusive round-robin debt; completed conflicts can be reactivated in constant time. */
+    private static final class ServiceQueue {
         Entry head;
         void add(Entry entry) {
-            entries.put(entry.snapshot.ownerId(), entry);
             if (head == null) {
                 head = entry;
                 entry.next = entry.previous = entry;
@@ -94,6 +90,39 @@ public final class TargetClaimRegistry implements AutoCloseable {
                 head.previous.next = entry;
                 head.previous = entry;
             }
+        }
+        void remove(Entry entry) {
+            if (entry.next == entry) head = null;
+            else {
+                entry.previous.next = entry.next;
+                entry.next.previous = entry.previous;
+                if (head == entry) head = entry.next;
+            }
+            entry.next = entry.previous = null;
+        }
+        void append(ServiceQueue other) {
+            if (other.head == null) return;
+            if (head == null) head = other.head;
+            else {
+                Entry tail = head.previous;
+                Entry otherTail = other.head.previous;
+                tail.next = other.head;
+                other.head.previous = tail;
+                otherTail.next = head;
+                head.previous = otherTail;
+            }
+            other.head = null;
+        }
+    }
+    private static final class Index {
+        final LinkedHashMap<UUID, Entry> entries = new LinkedHashMap<>();
+        final Map<Chunk, Link> chunks = new HashMap<>();
+        final Map<UUID, Entry> buildings = new HashMap<>();
+        final ServiceQueue pending = new ServiceQueue();
+        final ServiceQueue conflicts = new ServiceQueue();
+        void add(Entry entry) {
+            entries.put(entry.snapshot.ownerId(), entry);
+            pending.add(entry);
             for (Link link : entry.links) {
                 link.next = chunks.put(link.chunk, link);
                 if (link.next != null) link.next.previous = link;
@@ -104,13 +133,13 @@ public final class TargetClaimRegistry implements AutoCloseable {
                 if (entry.buildingNext != null) entry.buildingNext.buildingPrevious = entry;
             }
         }
-        void remove(Entry entry) {
+        void remove(Entry entry, long revision) {
             entries.remove(entry.snapshot.ownerId());
-            if (entry.next == entry) head = null;
-            else {
-                entry.previous.next = entry.next;
-                entry.next.previous = entry.previous;
-                if (head == entry) head = entry.next;
+            if (entry.state != State.GRANTED) {
+                // Only conflicts completed at this revision remain in the dormant ring.
+                ServiceQueue queue = entry.state == State.CONFLICT && entry.comparedIndex == revision
+                        ? conflicts : pending;
+                queue.remove(entry);
             }
             for (Link link : entry.links) {
                 if (link.previous != null) link.previous.next = link.next;
@@ -131,7 +160,6 @@ public final class TargetClaimRegistry implements AutoCloseable {
     private final ColonyRegistry registry;
     private final GlobalWorkBudgets budgets;
     private Index index = new Index();
-    private Entry serviceCursor;
     private long indexRevision;
 
     public TargetClaimRegistry(ColonyRegistry registry, GlobalWorkBudgets budgets) {
@@ -157,10 +185,10 @@ public final class TargetClaimRegistry implements AutoCloseable {
             if (addition != null) addition.close();
             throw failure;
         }
-        if (old != null) index.remove(old);
+        if (old != null) index.remove(old, indexRevision);
         index.add(proposed);
         indexRevision++;
-        if (serviceCursor == old || serviceCursor == null) serviceCursor = proposed;
+        index.pending.append(index.conflicts);
     }
 
     private void validateReferences(Snapshot snapshot) {
@@ -192,34 +220,25 @@ public final class TargetClaimRegistry implements AutoCloseable {
         return added;
     }
 
-    /** Every visited owner or candidate is charged; unfinished cursors retain dirty debt. */
+    /** Only pending debt is visited; every cursor step is charged before round-robin service. */
     public void tick() {
         registry.requireOwner();
-        if (serviceCursor == null) serviceCursor = index.head;
-        int idleVisits = 0;
-        while (serviceCursor != null && budgets.timeAvailable()
+        while (index.pending.head != null && budgets.timeAvailable()
                 && budgets.tryConsume(Budget.BLUEPRINT_COMPARISONS, Lane.NORMAL)) {
-            Entry entry = serviceCursor;
-            serviceCursor = entry.next;
-            if (entry.state == State.GRANTED) {
-                if (++idleVisits >= index.entries.size()) return;
-                continue;
-            }
+            Entry entry = index.pending.head;
+            index.pending.remove(entry);
             if (entry.comparedIndex != indexRevision) restart(entry);
-            if (!entry.dirty) {
-                if (++idleVisits >= index.entries.size()) return;
-                continue;
-            }
-            idleVisits = 0;
             long comparisonStart=System.nanoTime();
             try { compareOne(entry); }
-            finally { registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.BLUEPRINT_UNIT,System.nanoTime()-comparisonStart); }
+            finally {
+                if (entry.state == State.PENDING) index.pending.add(entry);
+                registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.BLUEPRINT_UNIT,System.nanoTime()-comparisonStart);
+            }
         }
     }
 
     private void restart(Entry entry) {
         entry.state = State.PENDING;
-        entry.dirty = true;
         entry.comparedIndex = indexRevision;
         entry.buildingPhase = true;
         entry.buildingCursor = entry.snapshot.buildingId() == null ? null : index.buildings.get(entry.snapshot.buildingId());
@@ -271,7 +290,7 @@ public final class TargetClaimRegistry implements AutoCloseable {
             return;
         }
         entry.state = result;
-        entry.dirty = false;
+        if (result == State.CONFLICT) index.conflicts.add(entry);
         entry.candidateCursor = null;
         entry.buildingCursor = null;
     }
@@ -302,9 +321,9 @@ public final class TargetClaimRegistry implements AutoCloseable {
         Entry entry = index.entries.get(Objects.requireNonNull(ownerId));
         if (entry == null) return;
         registry.beforeMutation();
-        if (serviceCursor == entry) serviceCursor = entry.next == entry ? null : entry.next;
-        index.remove(entry);
+        index.remove(entry, indexRevision);
         indexRevision++;
+        index.pending.append(index.conflicts);
         closeLeases(entry);
     }
 
@@ -344,26 +363,24 @@ public final class TargetClaimRegistry implements AutoCloseable {
                 if (addition != null) prepared.additions.add(addition);
                 prepared.staged.add(staged);
             }
-            // Startup is quiescent: establish conflicts for the entire staged batch before publication.
-            for (Entry entry : prepared.staged.entries.values()) {
+            // Startup is quiescent. Walk the insertion-ordered pending ring, comparing each unordered
+            // pair exactly once, including pairs whose participants already conflict. Bucket scans
+            // repeat visits in every shared chunk; this costs N * (N - 1) / 2 checks and no scratch
+            // index or candidate set. Admission bounds N and total links before this pass begins.
+            Entry first = prepared.staged.pending.head;
+            for (Entry entry = first; entry != null; entry = entry.next == first ? null : entry.next) {
                 Snapshot a = entry.snapshot;
-                for (Link own : entry.links) {
-                    for (Link candidate = prepared.staged.chunks.get(own.chunk); candidate != null; candidate = candidate.next) {
-                        Entry other = candidate.entry;
-                        if (other != entry && intersects(a, other.snapshot)) {
-                            entry.state = other.state = State.CONFLICT;
-                        }
-                    }
-                }
-                if (a.buildingId() != null) {
-                    for (Entry other = prepared.staged.buildings.get(a.buildingId()); other != null; other = other.buildingNext) {
-                        if (other != entry) entry.state = other.state = State.CONFLICT;
+                for (Entry other = entry.next; other != first; other = other.next) {
+                    Snapshot b = other.snapshot;
+                    if ((a.buildingId() != null && a.buildingId().equals(b.buildingId())) || intersects(a, b)) {
+                        entry.state = other.state = State.CONFLICT;
                     }
                 }
             }
             for (Entry entry : prepared.staged.entries.values()) {
+                prepared.staged.pending.remove(entry);
                 if (entry.state != State.CONFLICT) entry.state = State.GRANTED;
-                entry.dirty = false;
+                else prepared.staged.conflicts.add(entry);
                 entry.comparedIndex = indexRevision + 1;
             }
             return prepared;
@@ -388,7 +405,6 @@ public final class TargetClaimRegistry implements AutoCloseable {
             Index previous = index;
             index = staged;
             indexRevision++;
-            serviceCursor = index.head;
             finished = true;
             for (Entry entry : previous.entries.values()) if (!reused.contains(entry)) closeLeases(entry);
         }
@@ -409,7 +425,6 @@ public final class TargetClaimRegistry implements AutoCloseable {
         registry.requireOwner();
         for (Entry entry : index.entries.values()) closeLeases(entry);
         index = new Index();
-        serviceCursor = null;
         indexRevision++;
     }
 }

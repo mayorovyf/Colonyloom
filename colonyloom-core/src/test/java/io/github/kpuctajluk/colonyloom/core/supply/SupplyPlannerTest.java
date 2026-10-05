@@ -193,12 +193,53 @@ final class SupplyPlannerTest {
         assertEquals(2, f.supply.deliveries().size()); assertEquals(2, f.registry.storage().reservations().entries().size());
         assertEquals(0, blocked.snapshot().fulfilled()); assertEquals(0, ready.snapshot().fulfilled());
     }
+    @Test void nativeSweepSharesFourChecksWithMissingStockPlanningAndCompleteKitFinalization() {
+        Fixture f = new Fixture(8, 8);
+        f.budgets.updateLimits(f.budgets.limits().withBudget(Budget.STORAGE_SLOT_CHECKS, 4));
+        Demand missing = f.goal(10, "missing"), ready = f.goal(11, "b");
+        var complete = RecipeDefinition.create("colonyloom:b", 1, "colonyloom:carpenter", "minecraft:crafting_table",
+                List.of(new RecipeDefinition.Ingredient(matcher("x"), 1), new RecipeDefinition.Ingredient(matcher("z"), 1)), item("b"), 1, 20);
+        var order = f.supply.promiseProduction(ready.id(), complete, 1);
+        f.stock(100, "x"); f.stock(101, "z");
+        for (int identity = 110; identity < 120; identity++) if (identity != 114) f.stock(identity, "filler");
+        int[] nativeReads = {0};
+        for (int step = 0; step < 80; step++) {
+            f.budgets.beginTick(++f.tick);
+            f.registry.storage().index().tick(f.tick, f.budgets, slot -> {
+                nativeReads[0]++;
+                var read = f.physical.get(slot);
+                return read == null ? new io.github.kpuctajluk.colonyloom.core.storage.StockIndex.Observation(null, 0, false)
+                        : new io.github.kpuctajluk.colonyloom.core.storage.StockIndex.Observation(read.item(), read.count(), read.known());
+            });
+            f.planner.tick(f.tick);
+            assertTrue(f.budgets.used(Budget.STORAGE_SLOT_CHECKS) <= 4);
+        }
+        assertTrue(nativeReads[0] > 0);
+        assertEquals(Demand.Status.NO_RECIPE, missing.snapshot().status());
+        assertTrue(f.supply.demands().stream().filter(d -> d.snapshot().ownerId().equals(order.id())).allMatch(d -> d.deficit() == 0));
+        assertEquals(2, f.supply.deliveries().size());
+        assertEquals(2, f.registry.storage().reservations().entries().size());
+    }
+
     @Test void ordinaryRootProgressesWhileCriticalMissingRecipeGoalsStayEligible() {
         Fixture f=new Fixture(8,1);Demand ordinary=f.goal(10,"a");f.stock(100,"a");
         for(int i=0;i<12;i++)f.supply.request(id(300+i),COLONY,OWNER,matcher("missing"),1,Demand.GoalKind.CONSUMPTION,DESTINATION,Lane.CRITICAL,100,f.tick);
         for(int tick=0;tick<100&&ordinary.deficit()>0;tick++)f.step();
         assertEquals(0,ordinary.deficit());assertEquals(1,f.supply.deliveries().size());
         assertTrue(f.supply.demands().stream().filter(value -> value.snapshot().lane()==Lane.CRITICAL).allMatch(value -> value.snapshot().fulfilled()==0));
+    }
+
+    @Test void indexedFrontierRetainsDeniedTurnAndReopensExactGoalAfterRequiredIncrease() {
+        Fixture f=new Fixture(8,1);f.stock(100,"a");
+        Demand first=f.supply.requestDelivery(id(10),COLONY,OWNER,item("a"),1,DESTINATION,List.of(new StorageId("minecraft:overworld",id(100),0)),0);
+        Demand second=f.supply.requestDelivery(id(11),COLONY,OWNER,item("a"),1,DESTINATION,List.of(new StorageId("minecraft:overworld",id(100),0)),0);
+        f.budgets.beginTick(++f.tick);f.budgets.tryConsume(Budget.GRAPH_EXPANSIONS,Lane.NORMAL);f.planner.tick(f.tick);
+        assertSame(first,f.supply.planningCandidate(Lane.NORMAL));assertTrue(f.supply.shares().isEmpty());
+        f.step();assertEquals(0,first.deficit());assertSame(second,f.supply.planningCandidate(Lane.NORMAL));
+        f.step();assertEquals(0,second.deficit());assertNull(f.supply.planningCandidate(Lane.NORMAL));
+        f.supply.updateRequired(first.id(),2);assertSame(first,f.supply.planningCandidate(Lane.NORMAL));
+        f.step();assertEquals(0,first.deficit());assertEquals(2,first.snapshot().covered());
+        f.supply.cancel(first.id());assertNull(f.supply.planningCandidate(Lane.NORMAL));
     }
 
     @Test void pinnedRecipeDigestRejectsAlterationAndUsesImmutableIngredients() {

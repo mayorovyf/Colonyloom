@@ -14,6 +14,48 @@ final class AdmissionLedgerTest {
     private static final UUID THIRD = new UUID(0, 3);
     private static AdmissionLedger ledger(SimulationLimits limits) { return new AdmissionLedger(limits, () -> {}); }
 
+    @Test void directCapacityGatePreservesTypedDenialWithoutReservingOrDoubleCounting() {
+        var ledger=ledger(SimulationLimits.development().withResource(Resource.COLONIES,1));
+        var cost=Map.of(Resource.COLONIES,1);
+        ledger.requireCapacity(FIRST,Lane.NORMAL,cost);
+        assertEquals(0,ledger.used(Resource.COLONIES));assertEquals(0,ledger.highWater(Resource.COLONIES));
+        try(var occupied=ledger.reserve(FIRST,Lane.NORMAL,cost)) {
+            var failure=assertThrows(AdmissionLedger.AdmissionException.class,() -> ledger.requireCapacity(SECOND,Lane.NORMAL,cost));
+            assertEquals(Resource.COLONIES,failure.resource());assertEquals(AdmissionLedger.Reason.STATE_LIMIT,failure.reason());
+            assertEquals(1,ledger.rejected(Resource.COLONIES));assertEquals(1,ledger.used(Resource.COLONIES));
+            assertEquals(0,ledger.used(SECOND,Resource.COLONIES));
+        }
+        ledger.requireCapacity(SECOND,Lane.NORMAL,cost);
+        assertEquals(0,ledger.used(Resource.COLONIES));
+    }
+
+    @Test void directCapacityGateRetainsCriticalBlockadeReason() {
+        var ledger=ledger(SimulationLimits.development().withResource(Resource.CHUNK_DEMANDS,8));
+        try(var occupied=ledger.reserve(FIRST,Lane.CRITICAL,Map.of(Resource.CHUNK_DEMANDS,8))) {
+            assertFalse(ledger.canReserve(SECOND,Lane.CRITICAL,Map.of(Resource.CHUNK_DEMANDS,1)));
+            var failure=assertThrows(AdmissionLedger.AdmissionException.class,
+                    () -> ledger.requireCapacity(SECOND,Lane.NORMAL,Map.of(Resource.COLONIES,1)));
+            assertEquals(Resource.CHUNK_DEMANDS,failure.resource());assertEquals(AdmissionLedger.Reason.CRITICAL_CAPACITY,failure.reason());
+            assertEquals(2,ledger.rejected(Resource.CHUNK_DEMANDS));assertEquals(0,ledger.used(Resource.COLONIES));
+        }
+    }
+
+    @Test void criticalBlockadeDeniesNativeFootprintPreflightWithoutPartialMutation() {
+        var ledger=ledger(SimulationLimits.development().withResource(Resource.CHUNK_DEMANDS,8));
+        var footprint=Map.of(Resource.LOADED_FOOTPRINT,1);
+        try(var critical=ledger.reserve(FIRST,Lane.CRITICAL,Map.of(Resource.CHUNK_DEMANDS,8))) {
+            assertFalse(ledger.canReserve(SECOND,Lane.CRITICAL,Map.of(Resource.CHUNK_DEMANDS,1)));
+            assertFalse(ledger.canReserve(SECOND,Lane.NORMAL,footprint));
+            assertEquals(Resource.CHUNK_DEMANDS,assertThrows(AdmissionLedger.AdmissionException.class,
+                    () -> ledger.reserve(SECOND,Lane.NORMAL,footprint)).resource());
+            assertEquals(0,ledger.used(Resource.LOADED_FOOTPRINT));
+        }
+        assertTrue(ledger.canReserve(SECOND,Lane.NORMAL,footprint));
+        try(var admitted=ledger.reserve(SECOND,Lane.NORMAL,footprint)) {
+            assertEquals(1,ledger.used(Resource.LOADED_FOOTPRINT));
+        }
+    }
+
     @Test
     void rootCleanupFailureDoesNotPartiallyAdmitRequestedWork() {
         AdmissionLedger ledger = ledger(SimulationLimits.development().withResource(Resource.WORKS, 8));
@@ -153,6 +195,69 @@ final class AdmissionLedgerTest {
                 assertEquals(16, ledger.used(Resource.LOADED_FOOTPRINT));
             }
         }
+    }
+
+    @Test void sharedFootprintsKeepIndependentPhysicalLaneAndColonyUnions() {
+        for (Lane first : Lane.values()) for (Lane second : Lane.values()) {
+            var ledger = ledger(SimulationLimits.development().withResource(Resource.LOADED_FOOTPRINT, 8));
+            var cell = ledger.footprint(Resource.LOADED_FOOTPRINT);
+            cell.retain(FIRST, first); cell.retain(FIRST, first); cell.retain(SECOND, second);
+            assertEquals(1, ledger.used(Resource.LOADED_FOOTPRINT));
+            assertEquals(1, ledger.highWater(Resource.LOADED_FOOTPRINT));
+            assertEquals(1, ledger.used(FIRST, Resource.LOADED_FOOTPRINT));
+            assertEquals(1, ledger.used(SECOND, Resource.LOADED_FOOTPRINT));
+            assertEquals(1, ledger.used(FIRST, Resource.LOADED_FOOTPRINT, first));
+            assertEquals(1, ledger.used(SECOND, Resource.LOADED_FOOTPRINT, second));
+            cell.release(FIRST, first); assertEquals(1, ledger.used(FIRST, Resource.LOADED_FOOTPRINT));
+            cell.release(FIRST, first);
+            assertEquals(0, ledger.used(FIRST, Resource.LOADED_FOOTPRINT));
+            assertEquals(1, ledger.used(Resource.LOADED_FOOTPRINT, second));
+            assertEquals(second == Lane.SERVICE ? 0 : 1, ledger.ordinaryFootprint());
+            cell.release(SECOND, second);
+            assertEquals(0, ledger.used(Resource.LOADED_FOOTPRINT));
+            assertEquals(0, ledger.ordinaryFootprint());
+            for (Lane lane : Lane.values()) assertEquals(0, ledger.used(Resource.LOADED_FOOTPRINT, lane));
+        }
+    }
+
+    @Test void sameColonyCrossLaneShareIsAUnionAndReserveCannotBeBypassedBySharing() {
+        var ledger = ledger(SimulationLimits.development().withResource(Resource.LOADED_FOOTPRINT, 8));
+        var shared = ledger.footprint(Resource.LOADED_FOOTPRINT);
+        shared.retain(FIRST, Lane.NORMAL); shared.retain(FIRST, Lane.CRITICAL); shared.retain(FIRST, Lane.SERVICE);
+        assertEquals(1, ledger.used(FIRST, Resource.LOADED_FOOTPRINT));
+        assertEquals(1, ledger.ordinaryFootprint());
+        assertEquals(1, ledger.used(Resource.LOADED_FOOTPRINT, Lane.NORMAL));
+        assertEquals(1, ledger.used(Resource.LOADED_FOOTPRINT, Lane.CRITICAL));
+        var other = ledger.footprint(Resource.LOADED_FOOTPRINT);
+        other.retain(SECOND, Lane.NORMAL);
+        assertFalse(ledger.canReserveFootprint(Lane.SERVICE, 0, 0, 0, 0, 1));
+        assertThrows(AdmissionLedger.AdmissionException.class, () -> other.retain(SECOND, Lane.SERVICE));
+        assertEquals(2, ledger.used(Resource.LOADED_FOOTPRINT));
+        assertEquals(1, ledger.used(SECOND, Resource.LOADED_FOOTPRINT));
+        ledger.updateLimits(ledger.limits().withResource(Resource.LOADED_FOOTPRINT, 1));
+        assertEquals(1, ledger.overLimit(Resource.LOADED_FOOTPRINT));
+        assertFalse(ledger.canReserveFootprint(Lane.NORMAL, 0, 0, 0, 0, 0));
+        shared.release(FIRST, Lane.NORMAL); shared.release(FIRST, Lane.CRITICAL); shared.release(FIRST, Lane.SERVICE);
+        other.release(SECOND, Lane.NORMAL);
+        assertEquals(0, ledger.used(FIRST, Resource.LOADED_FOOTPRINT));
+        assertEquals(0, ledger.used(SECOND, Resource.LOADED_FOOTPRINT));
+        assertEquals(0, ledger.ordinaryFootprint());
+        assertEquals(2, ledger.highWater(Resource.LOADED_FOOTPRINT));
+    }
+
+    @Test void sharedFootprintPreflightIsAtomicAndRetainsCriticalBlockade() {
+        var ledger = ledger(SimulationLimits.development().withResource(Resource.CHUNK_DEMANDS, 8));
+        try (var occupied = ledger.reserve(FIRST, Lane.CRITICAL, Map.of(Resource.CHUNK_DEMANDS, 8))) {
+            assertFalse(ledger.canReserve(SECOND, Lane.CRITICAL, Map.of(Resource.CHUNK_DEMANDS, 1)));
+            assertFalse(ledger.canReserveFootprint(Lane.NORMAL, 25, 9, 1, 25, 0));
+            assertFalse(ledger.footprintBlockadeClears(Lane.NORMAL, new int[3], new int[3]));
+            assertEquals(0, ledger.used(Resource.LOADED_FOOTPRINT));
+        }
+        assertTrue(ledger.canReserveFootprint(Lane.NORMAL, 25, 9, 1, 25, 0));
+        assertFalse(ledger.canReserveFootprint(Lane.NORMAL, 25, 9, 100, 25, 0));
+        assertEquals(0, ledger.used(Resource.LOADED_FOOTPRINT));
+        assertEquals(0, ledger.used(Resource.BLOCK_TICKING));
+        assertEquals(0, ledger.highWater(Resource.LOADED_FOOTPRINT));
     }
 
     @Test

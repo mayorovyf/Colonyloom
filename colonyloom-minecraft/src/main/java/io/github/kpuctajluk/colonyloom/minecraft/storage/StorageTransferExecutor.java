@@ -78,7 +78,7 @@ public final class StorageTransferExecutor {
         WorkOrder work=citizen.assignedWorkId()==null?null:registry.workBoard().work(citizen.assignedWorkId());
         var fact=new EffectRecord.Transfer(source,destination,item,sourceBefore,sourceBefore,destinationBefore,destinationBefore,current.amount(),0,0,0);
         var effect=new EffectRecord(UUID.randomUUID(),context.colonyId(),work==null?null:work.id(),context.citizenId(),epoch,
-                ActionContext.Kind.STORAGE_TRANSFER,context.target(),"native_inventory",item.itemId(),sourceBefore,sourceBefore,EffectRecord.State.PREPARED,0,fact,null,null);
+                ActionContext.Kind.STORAGE_TRANSFER,context.target(),"native_inventory",item.itemId(),sourceBefore,sourceBefore,EffectRecord.State.PREPARED,0,fact,null,null,null);
         try { registry.effects().prepare(effect,work==null?Lane.NORMAL:work.lane()); }
         catch (AdmissionLedger.AdmissionException full) { return denied(full.reason()==AdmissionLedger.Reason.CRITICAL_CAPACITY?WorkOrder.Reason.CRITICAL_CAPACITY:WorkOrder.Reason.STATE_LIMIT); }
         catch (IllegalArgumentException denied) { return denied(WorkOrder.Reason.STATE_LIMIT); }

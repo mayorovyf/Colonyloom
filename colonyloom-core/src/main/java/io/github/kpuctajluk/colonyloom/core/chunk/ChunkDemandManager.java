@@ -10,7 +10,6 @@ import io.github.kpuctajluk.colonyloom.core.scheduler.GlobalWorkBudgets;
 import io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -29,8 +28,6 @@ public final class ChunkDemandManager implements AutoCloseable {
         boolean ready(ChunkKey key, Readiness required);
     }
     private static final Resource[] CHARGES = {Resource.LOADED_FOOTPRINT, Resource.BLOCK_TICKING, Resource.ENTITY_TICKING};
-    private static final List<Map<Resource, Integer>> CELL_COSTS = List.of(
-            Map.of(Resource.LOADED_FOOTPRINT, 1), Map.of(Resource.BLOCK_TICKING, 1), Map.of(Resource.ENTITY_TICKING, 1));
     private static final Comparator<Demand> EVICTION = Comparator.comparingInt((Demand d) -> d.priority)
             .thenComparingLong(d -> d.lastUseful).thenComparing(d -> d.owner);
     private final ColonyRegistry registry;
@@ -41,7 +38,7 @@ public final class ChunkDemandManager implements AutoCloseable {
     private final Map<TicketKey, Ticket> tickets = new HashMap<>();
     private final TreeSet<Demand> evictable = new TreeSet<>(EVICTION);
     private final List<TreeSet<Ticket>> starts = List.of(new TreeSet<>(), new TreeSet<>(), new TreeSet<>());
-    private final EnumMap<Resource, Integer> costs = new EnumMap<>(Resource.class);
+    private final int[] footprintAdditions = new int[3];
     private Demand head, cursor;
     private final java.util.ArrayDeque<Demand> pendingAdmissions=new java.util.ArrayDeque<>();
     private boolean pendingTurn;
@@ -49,9 +46,7 @@ public final class ChunkDemandManager implements AutoCloseable {
     private long tick, revision, ticketSequence, ticketNanosHighWater;
 
     private static final class Cell {
-        final int[] references = new int[3];
-        final AdmissionLedger.Lease[] leases = new AdmissionLedger.Lease[3];
-        final Lane[] lanes = new Lane[3];
+        final AdmissionLedger.Footprint[] shares = new AdmissionLedger.Footprint[3];
     }
     private record TicketKey(UUID colony, ChunkKey center, boolean ticking) {}
     private static final class Ticket implements Comparable<Ticket> {
@@ -99,8 +94,11 @@ public final class ChunkDemandManager implements AutoCloseable {
         final Demand target;
         final long revision;
         final List<Demand> victims = new ArrayList<>();
-        final Map<ChunkKey, int[]> removed = new HashMap<>();
+        // Per-ring, per-lane removed references; plan advances only one victim per visit.
+        final Map<ChunkKey, int[][]> removed = new HashMap<>();
         final int[] reclaimed = new int[3];
+        final int[] reclaimedCritical = new int[3];
+        final int[] totals = new int[3];
         int reclaimedService, reclaimedOrdinary;
         Demand last;
         Plan(Demand target, long revision) { this.target = target; this.revision = revision; }
@@ -178,7 +176,7 @@ public final class ChunkDemandManager implements AutoCloseable {
             else { d=cursor;cursor=cursor.next; }
             if (d.state == State.ADMITTED) {
                 sampleClock(d);
-                if (overLimit() && !d.protectedNow()) withdraw(d);
+                if (overLimit(d) && !d.protectedNow()) withdraw(d);
             } else if (minimumFits(d)) {
                 d.state = State.WAITING;
                 if (!overLimit() && canAdmit(d)) admit(d);
@@ -190,25 +188,26 @@ public final class ChunkDemandManager implements AutoCloseable {
     }
 
     private boolean canAdmit(Demand d) {
-        costs.clear();
-        for (int r = 0; r < 3; r++) {
-            int count = 0;
-            for (ChunkKey key : d.rings[r]) {
-                Cell cell = cells.get(key);
-                if (cell == null || cell.references[r] == 0) count++;
+        int[] additions = footprintAdditions;
+        java.util.Arrays.fill(additions, 0);
+        int ordinary = 0, service = 0;
+        for (int r = 0; r < 3; r++) for (ChunkKey key : d.rings[r]) {
+            Cell cell = cells.get(key);
+            AdmissionLedger.Footprint share = cell == null ? null : cell.shares[r];
+            if (share == null || share.references() == 0) additions[r]++;
+            if (r == 0) {
+                if (d.lane == Lane.SERVICE) { if (share == null || share.references(Lane.SERVICE) == 0) service++; }
+                else if (share == null || share.ordinaryReferences() == 0) ordinary++;
             }
-            if (count != 0) costs.put(CHARGES[r], count);
         }
-        return costs.isEmpty() || registry.admission().canReserve(d.colony, d.lane, costs);
+        return registry.admission().canReserveFootprint(d.lane, additions[0], additions[1], additions[2], ordinary, service);
     }
 
     private void admit(Demand d) {
         for (int r = 0; r < 3; r++) for (ChunkKey key : d.rings[r]) {
             Cell cell = cells.computeIfAbsent(key, ignored -> new Cell());
-            if (cell.references[r]++ == 0) {
-                cell.leases[r] = registry.admission().reserve(d.colony, d.lane, CELL_COSTS.get(r));
-                cell.lanes[r] = d.lane;
-            }
+            if (cell.shares[r] == null) cell.shares[r] = registry.admission().footprint(CHARGES[r]);
+            cell.shares[r].retain(d.colony, d.lane);
         }
         for (ChunkKey center : d.centers) {
             TicketKey key = new TicketKey(d.colony, center, d.readiness != Readiness.LOADED);
@@ -241,14 +240,15 @@ public final class ChunkDemandManager implements AutoCloseable {
                 || victim.lastUseful >= tick) return;
         p.victims.add(victim);
         for (int r = 0; r < 3; r++) for (ChunkKey key : victim.rings[r]) {
-            int removed = ++p.removed.computeIfAbsent(key, ignored -> new int[3])[r];
-            Cell cell = cells.get(key);
-            if (removed == cell.references[r]) {
-                p.reclaimed[r]++;
-                if (r == 0) {
-                    if (cell.lanes[r] == Lane.SERVICE) p.reclaimedService++;
-                    else p.reclaimedOrdinary++;
-                }
+            int[][] removed = p.removed.computeIfAbsent(key, ignored -> new int[3][3]);
+            removed[r][victim.lane.ordinal()]++;
+            AdmissionLedger.Footprint share = cells.get(key).shares[r];
+            int count = removed[r][0] + removed[r][1] + removed[r][2];
+            if (count == share.references()) p.reclaimed[r]++;
+            if (victim.lane == Lane.CRITICAL && removed[r][Lane.CRITICAL.ordinal()] == share.references(Lane.CRITICAL)) p.reclaimedCritical[r]++;
+            if (r == 0) {
+                if (victim.lane == Lane.SERVICE && removed[r][Lane.SERVICE.ordinal()] == share.references(Lane.SERVICE)) p.reclaimedService++;
+                else if (victim.lane != Lane.SERVICE && removed[r][Lane.NORMAL.ordinal()] + removed[r][Lane.CRITICAL.ordinal()] == share.ordinaryReferences()) p.reclaimedOrdinary++;
             }
         }
         if (!fitsAfter(p)) return;
@@ -261,24 +261,29 @@ public final class ChunkDemandManager implements AutoCloseable {
     }
 
     private boolean fitsAfter(Plan p) {
-        int[] totals = {footprint(), blockTicking(), entityTicking()};
+        int[] totals = p.totals;
+        totals[0] = footprint(); totals[1] = blockTicking(); totals[2] = entityTicking();
         int service = registry.admission().used(Resource.LOADED_FOOTPRINT, Lane.SERVICE);
-        int ordinary = totals[0] - service;
+        int ordinary = registry.admission().ordinaryFootprint();
         service -= p.reclaimedService;
         ordinary -= p.reclaimedOrdinary;
         for (int r = 0; r < 3; r++) totals[r] -= p.reclaimed[r];
         for (int r = 0; r < 3; r++) for (ChunkKey key : p.target.rings[r]) {
             Cell cell = cells.get(key);
-            int[] removal = p.removed.get(key);
-            if (cell == null || cell.references[r] == (removal == null ? 0 : removal[r])) {
-                totals[r]++;
-                if (r == 0) { if (p.target.lane == Lane.SERVICE) service++; else ordinary++; }
+            int[][] removal = p.removed.get(key);
+            AdmissionLedger.Footprint share = cell == null ? null : cell.shares[r];
+            int removed = removal == null ? 0 : removal[r][0] + removal[r][1] + removal[r][2];
+            if (share == null || share.references() == removed) totals[r]++;
+            if (r == 0) {
+                if (p.target.lane == Lane.SERVICE) {
+                    if (share == null || share.references(Lane.SERVICE) == (removal == null ? 0 : removal[r][Lane.SERVICE.ordinal()])) service++;
+                } else if (share == null || share.ordinaryReferences() == (removal == null ? 0 : removal[r][Lane.NORMAL.ordinal()] + removal[r][Lane.CRITICAL.ordinal()])) ordinary++;
             }
         }
         int loadedCap = registry.admission().limits().resource(Resource.LOADED_FOOTPRINT);
         if (service > loadedCap / 8 || ordinary > loadedCap - loadedCap / 8) return false;
         for (int r = 0; r < 3; r++) if (totals[r] > registry.admission().limits().resource(CHARGES[r])) return false;
-        return true;
+        return registry.admission().footprintBlockadeClears(p.target.lane, p.reclaimed, p.reclaimedCritical);
     }
 
     private void withdraw(Demand d) {
@@ -296,8 +301,9 @@ public final class ChunkDemandManager implements AutoCloseable {
         d.tickets.clear();
         for (int r = 0; r < 3; r++) for (ChunkKey key : d.rings[r]) {
             Cell cell = cells.get(key);
-            if (--cell.references[r] == 0) { cell.leases[r].close(); cell.leases[r] = null; cell.lanes[r] = null; }
-            if (cell.references[0] == 0 && cell.references[1] == 0 && cell.references[2] == 0) cells.remove(key);
+            cell.shares[r].release(d.colony, d.lane);
+            if (cell.shares[0].references() == 0 && (cell.shares[1] == null || cell.shares[1].references() == 0)
+                    && (cell.shares[2] == null || cell.shares[2].references() == 0)) cells.remove(key);
         }
         d.state = State.WAITING; d.reason = Reason.WORKING_SET_LIMIT; d.waitingSince = tick;
         if(!d.pendingQueued && demands.containsKey(d.owner)) { pendingAdmissions.addLast(d);d.pendingQueued=true; }
@@ -349,7 +355,7 @@ public final class ChunkDemandManager implements AutoCloseable {
     public boolean admitted(ChunkKey key) {
         registry.requireOwner();
         Cell cell = cells.get(key);
-        return cell != null && cell.references[2] != 0;
+        return cell != null && cell.shares[2] != null && cell.shares[2].references() != 0;
     }
     public long admittedTicks(UUID owner) {
         registry.requireOwner(); Demand d = demands.get(owner);
@@ -408,9 +414,16 @@ public final class ChunkDemandManager implements AutoCloseable {
         AdmissionLedger ledger = registry.admission();
         int total = ledger.limits().resource(Resource.LOADED_FOOTPRINT);
         if (ledger.used(Resource.LOADED_FOOTPRINT, Lane.SERVICE) > total / 8
-                || ledger.used(Resource.LOADED_FOOTPRINT, Lane.NORMAL) + ledger.used(Resource.LOADED_FOOTPRINT, Lane.CRITICAL) > total - total / 8) return true;
+                || ledger.ordinaryFootprint() > total - total / 8) return true;
         for (Resource charge : CHARGES) if (ledger.overLimit(charge) != 0) return true;
         return false;
+    }
+    private boolean overLimit(Demand d) {
+        AdmissionLedger ledger = registry.admission();
+        for (int r = 0; r < 3; r++) if (d.rings[r].length != 0 && ledger.overLimit(CHARGES[r]) != 0) return true;
+        int total = ledger.limits().resource(Resource.LOADED_FOOTPRINT);
+        return d.lane == Lane.SERVICE ? ledger.used(Resource.LOADED_FOOTPRINT, Lane.SERVICE) > total / 8
+                : ledger.ordinaryFootprint() > total - total / 8;
     }
     public int footprint() { return registry.admission().used(Resource.LOADED_FOOTPRINT); }
     public int blockTicking() { return registry.admission().used(Resource.BLOCK_TICKING); }
@@ -429,7 +442,17 @@ public final class ChunkDemandManager implements AutoCloseable {
             }
             levels.put(level.name(),Map.of("demands",count,"ready",levelReady));
         }
-        return Map.of("admitted",admitted,"waiting",waiting,"ready",ready,"readiness",levels);
+        AdmissionLedger ledger = registry.admission();
+        Map<String,Object> footprint = new java.util.LinkedHashMap<>();
+        for (Resource resource : CHARGES) {
+            Map<String,Integer> scoped = new java.util.LinkedHashMap<>();
+            scoped.put("unique", onlyColony == null ? ledger.used(resource) : ledger.used(onlyColony, resource));
+            for (Lane lane : Lane.values()) scoped.put(lane.name(), onlyColony == null
+                    ? ledger.used(resource, lane) : ledger.used(onlyColony, resource, lane));
+            footprint.put(resource.name(), scoped);
+        }
+        if (onlyColony == null) footprint.put("ordinaryLoaded", ledger.ordinaryFootprint());
+        return Map.of("admitted",admitted,"waiting",waiting,"ready",ready,"readiness",levels,"footprint",footprint);
     }
     @Override public void close() { registry.requireOwner(); while (head != null) release(head.owner); plan = null; }
 }

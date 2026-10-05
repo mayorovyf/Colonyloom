@@ -88,7 +88,7 @@ final class ManagementBackend implements ManagementSession.Backend {
                     || budgets.used(io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Budget.VIEW_ROWS)
                     >= budgets.limits().budget(io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Budget.VIEW_ROWS)) return false;
             prepared.pending = new ManagementViews.Preparation(runtime.core().registry(), actor.get().getUUID(), subscription,
-                    runtime.core().commands().professions().stream().map(p -> p.id()).sorted().toList(), blueprints.get(), runtime.serverTick());
+                    runtime.core().commands().professions().stream().map(p -> p.id()).sorted().toList(), blueprints.get(), runtime.serverTick(), runtime.deliveryService()::waitingBuffer);
         }
         return prepared.pending.advance(budgets);
     }

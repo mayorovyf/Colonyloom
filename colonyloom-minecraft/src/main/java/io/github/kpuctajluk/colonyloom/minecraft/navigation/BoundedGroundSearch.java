@@ -15,8 +15,9 @@ final class BoundedGroundSearch {
     interface Terrain {
         boolean standable(int x, int y, int z);
         boolean transition(int fromX, int fromY, int fromZ, int x, int y, int z);
+        int additionalCost(int x, int y, int z);
     }
-    enum Result { PENDING, FOUND, EXHAUSTED }
+    enum Result { PENDING, FOUND, UNREACHABLE, EXHAUSTED }
 
     private final int[] xs = new int[MAX_NODES];
     private final int[] ys = new int[MAX_NODES];
@@ -55,7 +56,7 @@ final class BoundedGroundSearch {
                     int slot = slot(x, y, z), known = table[slot] - 1;
                     if (known >= 0 && heapPositions[known] < 0) break;
                     if (!terrain.standable(x, y, z) || !terrain.transition(fromX, fromY, fromZ, x, y, z)) continue;
-                    int cost = costs[current] + 1;
+                    int cost = costs[current] + 1 + terrain.additionalCost(x, y, z);
                     if (known < 0) {
                         if (size == MAX_NODES) nodeLimitHit = true;
                         else add(x, y, z, current, cost, slot);
@@ -68,7 +69,7 @@ final class BoundedGroundSearch {
                 }
             }
         }
-        return openSize == 0 ? Result.EXHAUSTED : Result.PENDING;
+        return openSize == 0 ? (nodeLimitHit ? Result.EXHAUSTED : Result.UNREACHABLE) : Result.PENDING;
     }
 
     private int slot(int x, int y, int z) {

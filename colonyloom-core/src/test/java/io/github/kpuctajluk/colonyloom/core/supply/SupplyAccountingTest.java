@@ -55,6 +55,53 @@ final class SupplyAccountingTest {
         }
         RecipeDefinition recipe(long count) { return RecipeDefinition.create("colonyloom:test", 1, "colonyloom:carpenter", "minecraft:crafting_table", List.of(new RecipeDefinition.Ingredient(new ItemMatcher(Y.itemId(), null), 1)), X, count, 20); }
     }
+    @Test void cancelledFoodRetainsDeliveryReferenceUntilSafeOrderRetirement() {
+        Fixture f = new Fixture(); f.stock(0, X, 3);
+        var work = f.registry.workBoard().createFood(id(1000), id(401));
+        var demand = f.supply.request(id(1100), COLONY, work.id(), new ItemMatcher(X.itemId(), X), 1,
+                Demand.GoalKind.CONSUMPTION, pos(5), Lane.CRITICAL, 10, 1);
+        var order = f.supply.coverStock(demand.id(), slot(0), X, 1, 1);
+        f.supply.cancel(demand.id()); f.registry.workBoard().cancel(work.id());
+        assertThrows(IllegalStateException.class, () -> f.supply.retireFood(work.id()));
+        assertEquals(Demand.Status.CANCELLED, f.supply.demand(demand.id()).snapshot().status());
+        f.supply.retireDelivery(order.id()); f.supply.retireFood(work.id()); f.registry.workBoard().retire(work.id());
+        assertEquals(3, f.registry.storage().index().free(slot(0), 1));
+        assertEquals(0, f.registry.admission().used(Resource.WORKS));
+        assertEquals(0, f.registry.admission().used(Resource.DEMANDS));
+        assertEquals(0, f.registry.admission().used(Resource.DELIVERIES_AND_PRODUCTION_ORDERS));
+    }
+
+    @Test void terminalFoodRetirementPreservesLiveAllocationsAndWitnessesThenReclaimsItsLane() {
+        Fixture f = new Fixture(); f.stock(0, X, 3);
+        int initialWorks = f.registry.admission().used(Resource.WORKS);
+        for (int wave = 0; wave < 3; wave++) {
+            var work = f.registry.workBoard().createFood(id(1000 + wave), id(401));
+            var demand = f.supply.request(id(1100 + wave), COLONY, work.id(), new ItemMatcher(X.itemId(), X), 1,
+                    Demand.GoalKind.CONSUMPTION, pos(5), Lane.CRITICAL, 10, 1);
+            var share = f.supply.allocateStock(demand.id(), slot(0), X, 1, 1);
+            assertThrows(IllegalStateException.class, () -> f.supply.retireFood(work.id()));
+            f.registry.workBoard().transition(work.id(), io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.COMPLETED,
+                    io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.NONE, "consumed");
+            assertThrows(IllegalStateException.class, () -> f.supply.retireFood(work.id()));
+            f.supply.fulfillConsumption(share.id(), 1);
+            f.stock(0, wave == 2 ? null : X, 2 - wave);
+            var witness = new io.github.kpuctajluk.colonyloom.core.action.EffectRecord(id(1200 + wave), COLONY, work.id(), id(401), 1,
+                    io.github.kpuctajluk.colonyloom.core.action.ActionContext.Kind.DEATH, pos(5), "inventory", X.itemId(), 1, 1,
+                    io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.PREPARED, 0, null, null, null, null);
+            f.registry.effects().prepare(witness, Lane.CRITICAL);
+            assertThrows(IllegalStateException.class, () -> f.supply.retireFood(work.id()));
+            assertEquals(Demand.Status.COMPLETED, f.supply.demand(demand.id()).snapshot().status());
+            f.registry.effects().discardUnchanged(witness.operationId());
+            f.supply.retireFood(work.id()); f.registry.workBoard().retire(work.id());
+            assertThrows(IllegalArgumentException.class, () -> f.supply.demand(demand.id()));
+            assertEquals(initialWorks, f.registry.admission().used(Resource.WORKS));
+            assertEquals(0, f.registry.admission().used(Resource.DEMANDS));
+            assertEquals(0, f.registry.admission().used(Resource.COVERAGE_SHARES));
+            assertEquals(0, f.registry.admission().used(Resource.RESERVATIONS_AND_ALLOCATIONS));
+        }
+        assertEquals(0, f.registry.storage().index().free(slot(0), 1));
+    }
+
     @Test void formulaMatrixIncludesEachStageOnce() {
         for (CoverageShare.Stage stage : CoverageShare.Stage.values()) {
             long fulfilled = stage == CoverageShare.Stage.FULFILLED ? 20 : 0, allocated = stage == CoverageShare.Stage.ALLOCATED ? 20 : 0;
@@ -453,6 +500,110 @@ final class SupplyAccountingTest {
         assertEquals(2, transit.supply.demand(id(10)).snapshot().covered()); assertEquals(2, transit.registry.storage().obligated(slot(2)));
         assertEquals(2, transit.supply.demand(goal.id()).snapshot().fulfilled()); assertNull(transit.supply.demandShares(id(10)).getFirst().sourceOrderId()); restoreAccounting(transit);
     }
+
+    @Test void workIndexesFollowAssignmentAndRestoreWithoutLinearLookupStaleEntries() {
+        Fixture f=new Fixture();var demand=f.request(10,4,Demand.GoalKind.CONSUMPTION,Lane.NORMAL);var production=f.supply.promiseProduction(demand.id(),f.recipe(4),1);
+        var work=f.registry.workBoard().createProduction(id(900),COLONY,pos(5),"colonyloom:carpenter",0,Lane.NORMAL);f.registry.workBoard().transition(work.id(),io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.READY,io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.NONE,"production");
+        f.registry.storage().index().observe(workshopSlot(0),Y,1,1);
+        var child=f.supply.ingredientDemand(production,0,1,1);f.supply.allocateStock(child.id(),workshopSlot(0),Y,1,1);
+        f.supply.assignProductionWork(production.id(),work.id());assertSame(f.supply.production(production.id()),f.supply.productionForWork(work.id()));
+        var saved=f.supply.snapshot();var storage=f.registry.storage().snapshot();var replacement=new AdmissionLedger(SimulationLimits.development(),()->{});
+        try(var restored=f.supply.prepareRestore(saved,storage,replacement,f.registry.colonies())){restored.commit();}
+        assertSame(f.supply.production(production.id()),f.supply.productionForWork(work.id()));
+        f.stock(0,X,8);var deliveryGoal=f.request(11,8,Demand.GoalKind.DELIVERY,Lane.NORMAL);var delivery=f.supply.coverStock(deliveryGoal.id(),slot(0),X,8,1);
+        var route=f.registry.workBoard().createDelivery(id(901),COLONY,pos(0),0,Lane.NORMAL);
+        f.supply.assignDelivery(delivery.id(),null,route.id());assertSame(f.supply.delivery(delivery.id()),f.supply.deliveryForWork(route.id()));
+        f.supply.assignDelivery(delivery.id(),null,null);assertNull(f.supply.deliveryForWork(route.id()));
+        f.supply.assignDelivery(delivery.id(),null,route.id());restoreAccounting(f);
+        assertSame(f.supply.delivery(delivery.id()),f.supply.deliveryForWork(route.id()));
+        f.supply.cancel(deliveryGoal.id());f.registry.workBoard().cancel(route.id());f.supply.retireDelivery(delivery.id());assertNull(f.supply.deliveryForWork(route.id()));
+    }
+    private static void consumeProducedOutput(Fixture f, io.github.kpuctajluk.colonyloom.core.production.ProductionOrder producer) {
+        var promised = f.supply.demandShares(producer.ownerDemandId()).stream()
+                .filter(share -> producer.id().equals(share.productionOrderId()) && share.stage() == CoverageShare.Stage.RESERVED_STOCK).findFirst().orElseThrow();
+        var delivery = f.supply.routeReservedStock(promised.id()); int quantity = Math.toIntExact(promised.quantity());
+        f.pickup(delivery, quantity); f.deliver(delivery, quantity);
+        var allocation = f.supply.demandShares(producer.ownerDemandId()).stream()
+                .filter(share -> producer.id().equals(share.productionOrderId()) && share.stage() == CoverageShare.Stage.ALLOCATED).findFirst().orElseThrow();
+        f.supply.fulfillConsumption(allocation.id(), quantity); f.stock(2, null, 0); f.supply.retireDelivery(delivery.id());
+    }
+
+    @Test void terminalProductionRetirementWaitsForNativeWitnessAndLiveOutput() {
+        Fixture f = producedFixture(4, 0);
+        var order = f.supply.productionOrders().getFirst(); var work = f.registry.workBoard().work(order.workId());
+        f.registry.workBoard().transition(work.id(), io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.COMPLETED,
+                io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.NONE, "finished");
+        assertFalse(f.supply.canRetireProduction(order.id()));
+        assertThrows(IllegalStateException.class, () -> f.supply.retireProduction(order.id()));
+        consumeProducedOutput(f, order);
+        assertTrue(f.supply.canRetireProduction(order.id()));
+        assertEquals(1, f.supply.terminalProductionCount());
+        restoreAccounting(f);
+        assertEquals(1, f.supply.terminalProductionCount());
+        assertTrue(f.supply.canRetireProduction(order.id()));
+        var workshop = f.registry.storage().workshops().stream().filter(value -> value.id().equals(order.workshopId())).findFirst().orElseThrow();
+        var registration = f.registry.storage().registrations().stream().filter(value -> value.id().equals(workshop.registrationId())).findFirst().orElseThrow();
+        var craft = new io.github.kpuctajluk.colonyloom.core.action.EffectRecord.Craft(order.id(), 0, workshop.id(),
+                registration.id(), workshop.revision(), workshop.position(), registration.address(), order.recipe().id(), order.recipe().version(),
+                order.recipe().digest(), List.of(new io.github.kpuctajluk.colonyloom.core.action.EffectRecord.CraftSlot(
+                workshopSlot(0), Y, 1, Y, 1, 1)), X, 4, List.of(new io.github.kpuctajluk.colonyloom.core.action.EffectRecord.CraftSlot(
+                workshopSlot(1), null, 0, null, 0, 4)), io.github.kpuctajluk.colonyloom.core.action.EffectRecord.CraftPhase.PREPARED);
+        var evidence = new io.github.kpuctajluk.colonyloom.core.action.EffectRecord(id(1200), COLONY, work.id(), id(401), 1,
+                io.github.kpuctajluk.colonyloom.core.action.ActionContext.Kind.RECIPE_CRAFT, workshop.position(), "minecraft:crafting_table",
+                X.itemId(), 0, 0, io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.PREPARED, 0, null, craft, null, null);
+        f.registry.effects().prepare(evidence, Lane.NORMAL);
+        assertFalse(f.supply.canRetireProduction(order.id()));
+        assertThrows(IllegalStateException.class, () -> f.supply.retireProduction(order.id()));
+        f.registry.effects().discardUnchanged(evidence.operationId());
+        assertTrue(f.supply.canRetireProduction(order.id()));
+    }
+
+    @Test void detachedTerminalProductionReclaimsExactLanesAndRestoresWithoutDanglingIndexes() {
+        Fixture f = producedFixture(4, 0);
+        var order = f.supply.productionOrders().getFirst(); var work = f.registry.workBoard().work(order.workId());
+        f.registry.workBoard().transition(work.id(), io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.COMPLETED,
+                io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.NONE, "finished");
+        consumeProducedOutput(f, order);
+        f.supply.retireProduction(order.id()); f.registry.workBoard().retire(work.id());
+        assertNull(f.supply.findProduction(order.id()));
+        assertNull(f.supply.productionForWork(work.id()));
+        assertEquals(0, f.supply.productionCount());
+        assertEquals(0, f.registry.admission().used(Resource.DELIVERIES_AND_PRODUCTION_ORDERS));
+        assertEquals(1, f.registry.admission().used(Resource.DEMANDS));
+        assertEquals(1, f.registry.admission().used(Resource.COVERAGE_SHARES));
+        assertEquals(0, f.registry.admission().used(Resource.RESERVATIONS_AND_ALLOCATIONS));
+        var saved = f.supply.snapshot(); var storage = f.registry.storage().snapshot();
+        try (var restored = f.supply.prepareRestore(saved, storage, new AdmissionLedger(SimulationLimits.development(), () -> {}), f.registry.colonies())) {
+            restored.commit();
+        }
+        assertEquals(saved, f.supply.snapshot()); assertEquals(storage, f.registry.storage().snapshot());
+        assertEquals(0, f.supply.productionCount()); assertNull(f.supply.productionForWork(work.id()));
+        assertEquals(0, f.supply.terminalProductionCount());
+    }
+
+    @Test void cancelledNestedProducerRetiresBeforeItsParentIngredientDemand() {
+        Fixture f = new Fixture();
+        var root = f.request(10, 1, Demand.GoalKind.CONSUMPTION, Lane.NORMAL);
+        var outer = f.supply.promiseProduction(root.id(), f.recipe(1), 1);
+        var intermediate = RecipeDefinition.create("colonyloom:intermediate", 1, "colonyloom:carpenter", "minecraft:crafting_table",
+                List.of(new RecipeDefinition.Ingredient(new ItemMatcher("minecraft:gravel", null), 1)), Y, 1, 20);
+        var inner = f.supply.promiseProduction(f.supply.ingredientDemand(outer, 0, 1, 1).id(), intermediate, 1);
+        f.supply.cancel(root.id());
+        assertEquals(2, f.supply.terminalProductionCount());
+        assertFalse(f.supply.canRetireProduction(outer.id()));
+        assertThrows(IllegalStateException.class, () -> f.supply.retireProduction(outer.id()));
+        f.supply.retireProduction(inner.id());
+        assertTrue(f.supply.canRetireProduction(outer.id()));
+        f.supply.retireProduction(outer.id());
+        assertEquals(0, f.supply.productionCount());
+        assertEquals(0, f.supply.terminalProductionCount());
+        assertEquals(1, f.registry.admission().used(Resource.DEMANDS));
+        assertEquals(Demand.Status.CANCELLED, f.supply.demand(root.id()).snapshot().status());
+        restoreAccounting(f);
+        assertNull(f.supply.findProduction(inner.id()));
+        assertNull(f.supply.findProduction(outer.id()));
+    }
+
 
 
     @Test void queuedCancellationShrinksSharedOrderWithoutDeletingSibling() {

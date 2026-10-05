@@ -71,6 +71,8 @@ public final class ColonyCommands {
         ColonyRuntime created = new ColonyRuntime(colonyId, name, territory, context.actorId(), Map.of(), 1, 1, false, null, false);
         if (registry.usedId(colonyId)) throw new IllegalStateException("Colony identity unavailable");
         if (registry.colonies().stream().anyMatch(value -> territory.overlaps(value.territory()))) throw new IllegalArgumentException("Colony territories overlap");
+        registry.admission().requireCapacity(colonyId, io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL,
+                Map.of(io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.COLONIES, 1));
         context.checks().validateTerritory(territory);
         registry.beforeMutation();
         registry.addColony(created);
@@ -81,6 +83,9 @@ public final class ColonyCommands {
         Objects.requireNonNull(playerId, "playerId");
         if (playerId.equals(colony.ownerId()) || rank == MemberRank.OWNER) throw new IllegalArgumentException("Use owner transfer for ownership");
         if (Objects.equals(colony.members().get(playerId), rank)) return colony;
+        if (rank != null && !colony.members().containsKey(playerId) && colony.members().size() >= ColonyRuntime.MAX_MEMBERS) {
+            throw new IllegalStateException("MEMBER_LIMIT");
+        }
         Map<UUID, MemberRank> members = new HashMap<>(colony.members());
         if (rank == null) members.remove(playerId); else members.put(playerId, rank);
         ColonyRuntime changed = revised(colony, colony.ownerId(), members, true, colony.recoveryBlocked(), colony.recoveryCheckpointId());
@@ -91,6 +96,9 @@ public final class ColonyCommands {
         ColonyRuntime colony = requireRank(context, colonyId, MemberRank.OWNER);
         Objects.requireNonNull(playerId, "playerId");
         if (playerId.equals(colony.ownerId())) return colony;
+        if (!colony.members().containsKey(playerId) && colony.members().size() >= ColonyRuntime.MAX_MEMBERS) {
+            throw new IllegalStateException("MEMBER_LIMIT");
+        }
         Map<UUID, MemberRank> members = new HashMap<>(colony.members());
         members.remove(playerId);
         members.put(colony.ownerId(), MemberRank.MANAGER);
@@ -108,7 +116,7 @@ public final class ColonyCommands {
         Objects.requireNonNull(citizenId, "citizenId"); Objects.requireNonNull(entityId, "entityId");
         if (!colony.territory().contains(position)) throw new IllegalArgumentException("Citizen position outside colony");
         if (registry.usedId(citizenId) || registry.entityIdUsed(entityId)) throw new IllegalStateException("Citizen identity unavailable");
-        if (registry.bindings().observations().size() >= BindingRegistry.MAX_OBSERVATIONS) throw new IllegalStateException("Binding observation capacity unavailable");
+        registry.bindings().requireObservationCapacity(colonyId);
         CitizenRecord created = new CitizenRecord(citizenId, colonyId, entityId, 1, null, null, null, null, Map.of(), Map.of("food", 20), CitizenRecord.Lifecycle.ALIVE, CitizenRecord.Admission.ACTIVE, CitizenRecord.Readiness.UNKNOWN, 0, Map.of("food", 1200L), position, 1);
         ColonyRuntime changed = revised(colony, colony.ownerId(), colony.members(), false, false, null);
         context.checks().validateCitizenPosition(colony, position);

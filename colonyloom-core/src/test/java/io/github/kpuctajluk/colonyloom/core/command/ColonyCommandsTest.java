@@ -40,6 +40,30 @@ final class ColonyCommandsTest {
         runtime.bindings().observe(citizen.citizenId(), citizen.entityId(), citizen.bindingEpoch());
         return citizen;
     }
+    @Test void historyOverflowIsScopedAndRetiredIdentitiesStayDurable() {
+        var runtime=runtime();var first=colony(runtime,0);var second=colony(runtime,64);
+        var resident=citizen(runtime,first);var independent=citizen(runtime,second);
+        for(int i=1;i<BindingRegistry.MAX_OBSERVATIONS_PER_COLONY;i++) {
+            runtime.bindings().observe(resident.citizenId(),UUID.randomUUID(),resident.bindingEpoch());
+            runtime.commands().bind(context(owner,true),resident.citizenId(),resident.entityId());
+            resident=runtime.registry().citizen(resident.citizenId());
+        }
+        var citizenId=resident.citizenId();var before=runtime.registry().snapshot();
+        var overflow=assertThrows(BindingRegistry.HistoryOverflow.class,() -> runtime.bindings().observe(citizenId,UUID.randomUUID(),1));
+        assertEquals(first.colonyId(),overflow.colonyId());assertEquals(before,runtime.registry().snapshot());
+        runtime.registry().markRecoveryBlocked(first.colonyId(),UUID.randomUUID());
+        assertEquals(independent.entityId(),runtime.bindings().activeEntity(independent.citizenId()).orElseThrow());
+        assertTrue(runtime.registry().colony(second.colonyId()).available());
+        var restored=runtime();restored.registry().restore(runtime.registry().snapshot());
+        var retired=restored.bindings().observations(citizenId).stream().filter(BindingRegistry.Observation::retired).findFirst().orElseThrow();
+        restored.bindings().observe(citizenId,retired.entityId(),retired.bindingEpoch());
+        assertTrue(restored.bindings().observations(citizenId).stream().filter(value -> value.entityId().equals(retired.entityId())).findFirst().orElseThrow().retired());
+        restored.bindings().observe(independent.citizenId(),independent.entityId(),independent.bindingEpoch());
+        assertEquals(independent.entityId(),restored.bindings().activeEntity(independent.citizenId()).orElseThrow());
+        var invalid=new java.util.ArrayList<>(restored.bindings().observations());invalid.add(new BindingRegistry.Observation(citizenId,UUID.randomUUID(),1,false,true,true));
+        var current=restored.registry().snapshot();var oversized=new RegistrySnapshot(current.colonies(),current.citizens(),current.buildings(),current.tombstones(),invalid,current.works(),current.targetClaims(),current.effects(),current.constructionSites(),current.pinnedBlueprints(),current.storage(),current.supply());
+        assertThrows(IllegalArgumentException.class,() -> restored.registry().restore(oversized));assertEquals(current,restored.registry().snapshot());
+    }
     @Test void clockAndPositionDoNotStaleAssignmentButControlChangesDo() {
         var runtime=runtime();var colony=colony(runtime,0);var initial=citizen(runtime,colony);
         var current=new CitizenRecord[]{initial};
@@ -204,6 +228,85 @@ final class ColonyCommandsTest {
         runtime.commands().setOwner(context(owner, false), colony.colonyId(), manager);
         assertEquals(MemberRank.OWNER, runtime.registry().colony(colony.colonyId()).rank(manager));
         assertThrows(SecurityException.class, () -> runtime.commands().setMember(context(owner, false), colony.colonyId(), viewer, null));
+    }
+
+    @Test void memberLimitRejectsGrowthAndOutsiderOwnershipBeforeMutationButAllowsReplacement() {
+        ServerRuntime runtime = runtime(); ColonyRuntime colony = colony(runtime, 0);
+        List<UUID> members = new ArrayList<>();
+        for (int index = 0; index < ColonyRuntime.MAX_MEMBERS; index++) {
+            UUID member = UUID.randomUUID(); members.add(member);
+            runtime.commands().setMember(context(owner, false), colony.colonyId(), member, MemberRank.VIEWER);
+        }
+        int[] gates = {0}; runtime.configureCommands(() -> gates[0]++, List.of());
+        RegistrySnapshot before = runtime.registry().snapshot(); UUID outsider = UUID.randomUUID();
+        assertThrows(IllegalStateException.class, () -> runtime.commands().setMember(context(owner, false), colony.colonyId(), outsider, MemberRank.MANAGER));
+        assertThrows(IllegalStateException.class, () -> runtime.commands().setOwner(context(owner, false), colony.colonyId(), outsider));
+        assertEquals(before, runtime.registry().snapshot()); assertEquals(0, gates[0]);
+        assertSame(runtime.registry().colony(colony.colonyId()), runtime.commands().setOwner(context(owner, false), colony.colonyId(), owner));
+        runtime.commands().setMember(context(owner, false), colony.colonyId(), members.getFirst(), MemberRank.MANAGER);
+        ColonyRuntime transferred = runtime.commands().setOwner(context(owner, false), colony.colonyId(), members.getFirst());
+        assertEquals(ColonyRuntime.MAX_MEMBERS, transferred.members().size());
+        assertEquals(MemberRank.OWNER, transferred.rank(members.getFirst()));
+        assertEquals(MemberRank.MANAGER, transferred.rank(owner));
+        runtime.commands().setMember(context(members.getFirst(), false), colony.colonyId(), members.getLast(), null);
+        runtime.commands().setMember(context(members.getFirst(), false), colony.colonyId(), outsider, MemberRank.VIEWER);
+        assertEquals(ColonyRuntime.MAX_MEMBERS, runtime.registry().colony(colony.colonyId()).members().size());
+        ServerRuntime restored = runtime(); restored.registry().restore(runtime.registry().snapshot());
+        assertEquals(runtime.registry().colony(colony.colonyId()), restored.registry().colony(colony.colonyId()));
+    }
+
+    @Test void outsiderOwnerTransferChargesExactlyOneMemberSlotForPreviousOwner() {
+        ServerRuntime runtime = runtime(); ColonyRuntime colony = colony(runtime, 0);
+        for (int index = 0; index < ColonyRuntime.MAX_MEMBERS - 1; index++)
+            runtime.commands().setMember(context(owner, false), colony.colonyId(), UUID.randomUUID(), MemberRank.VIEWER);
+        UUID outsider = UUID.randomUUID(); long revision = runtime.registry().colony(colony.colonyId()).authorityRevision();
+        ColonyRuntime changed = runtime.commands().setOwner(context(owner, false), colony.colonyId(), outsider);
+        assertEquals(ColonyRuntime.MAX_MEMBERS, changed.members().size());
+        assertEquals(MemberRank.MANAGER, changed.rank(owner)); assertEquals(MemberRank.OWNER, changed.rank(outsider));
+        assertEquals(revision + 1, changed.authorityRevision());
+    }
+
+    @Test void aggregateRejectsOversizedMembersBeforeCopyingTheirEntries() {
+        var tooLarge = new java.util.AbstractMap<UUID, MemberRank>() {
+            @Override public int size() { return ColonyRuntime.MAX_MEMBERS + 1; }
+            @Override public Set<java.util.Map.Entry<UUID, MemberRank>> entrySet() {
+                throw new AssertionError("Oversized membership was copied before admission");
+            }
+        };
+        var error = assertThrows(IllegalArgumentException.class, () -> new ColonyRuntime(UUID.randomUUID(), "Bounded",
+                new Territory("minecraft:overworld", 0, 0, 15, 15), owner, tooLarge, 1, 1, false, null, false));
+        assertEquals("MEMBER_LIMIT", error.getMessage());
+    }
+
+    @Test void foundingCapacityIsCheckedBeforePhysicalValidationAndSessionMutation() {
+        ServerRuntime runtime = runtime(); colony(runtime, 0); colony(runtime, 32); colony(runtime, 64);
+        int[] scans = {0}, gates = {0}; runtime.configureCommands(() -> gates[0]++, List.of());
+        var checks = new ColonyCommands.PhysicalChecks() {
+            public void validateTerritory(Territory territory) { scans[0]++; }
+            public void validateCitizenPosition(ColonyRuntime colony, WorldPosition position) {}
+            public void validateRecovery(ColonyRuntime colony, List<CitizenRecord> citizens, List<BindingRegistry.Observation> observations) {}
+        };
+        RegistrySnapshot before = runtime.registry().snapshot();
+        long rejected = runtime.admission().rejected(io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.COLONIES);
+        assertThrows(IllegalStateException.class, () -> runtime.commands().createColony(new ColonyCommands.CommandContext(owner, false, checks),
+                UUID.randomUUID(), "No capacity", new Territory("minecraft:overworld", 96, 0, 223, 127)));
+        assertEquals(0, scans[0]); assertEquals(0, gates[0]); assertEquals(before, runtime.registry().snapshot());
+        assertEquals(rejected + 1, runtime.admission().rejected(io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.COLONIES));
+    }
+
+    @Test void physicalFoundingFailureDoesNotPublishIdentityOrConsumeColonyCapacity() {
+        ServerRuntime runtime = runtime(); int[] gates = {0}; runtime.configureCommands(() -> gates[0]++, List.of());
+        var checks = new ColonyCommands.PhysicalChecks() {
+            public void validateTerritory(Territory territory) { throw new SecurityException("Interior protected"); }
+            public void validateCitizenPosition(ColonyRuntime colony, WorldPosition position) {}
+            public void validateRecovery(ColonyRuntime colony, List<CitizenRecord> citizens, List<BindingRegistry.Observation> observations) {}
+        };
+        RegistrySnapshot before = runtime.registry().snapshot(); UUID rejected = UUID.randomUUID();
+        assertThrows(SecurityException.class, () -> runtime.commands().createColony(new ColonyCommands.CommandContext(owner, false, checks),
+                rejected, "Protected", new Territory("minecraft:overworld", 0, 0, 127, 127)));
+        assertEquals(before, runtime.registry().snapshot()); assertFalse(runtime.registry().usedId(rejected)); assertEquals(0, gates[0]);
+        assertEquals(0, runtime.admission().used(io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.COLONIES));
+        assertNotNull(colony(runtime, 0));
     }
 
     @Test

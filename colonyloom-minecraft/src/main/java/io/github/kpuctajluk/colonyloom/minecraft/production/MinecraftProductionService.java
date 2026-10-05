@@ -116,6 +116,17 @@ public final class MinecraftProductionService implements SimulationScheduler.Phy
         state.processing=false;state.lastActive=-1;
         registry.workBoard().waitAssigned(work.id(),reason==WorkOrder.Reason.NONE?WorkOrder.Reason.RECONCILING:reason,"production");
     }
-    public void cancel(UUID workId) {if(navigation!=null)navigation.cancel(workId);var state=active.remove(workId);if(state!=null)chunks.release(state.chunkOwner);}
-    public void close() {for(var id:List.copyOf(active.keySet()))cancel(id);}
+    public void cancel(UUID workId) {
+        registry.requireOwner();if(navigation!=null)navigation.cancel(workId);
+        var state=active.get(workId);if(state==null)return;
+        chunks.release(state.chunkOwner);
+        var order=registry.supply().productionForWork(workId);
+        if(order==null||order.terminal()||registry.workBoard().work(workId).terminal())active.remove(workId);
+        else {
+            // Pauses end the producer embodiment and its clock, not paid output-slot inspection.
+            // Retained portions are hints only; RecipeExecutor still validates every native slot.
+            state.waypoint=null;state.generation++;state.processing=false;state.lastActive=-1;
+        }
+    }
+    public void close() {for(var id:List.copyOf(active.keySet()))cancel(id);active.clear();}
 }

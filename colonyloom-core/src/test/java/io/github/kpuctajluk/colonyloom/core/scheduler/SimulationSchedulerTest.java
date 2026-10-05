@@ -62,6 +62,8 @@ final class SimulationSchedulerTest {
         full[0]=false;attempts[0]=0;f.ticks(1);
         assertEquals(1,attempts[0]);assertEquals(WorkOrder.State.COMPLETED,blocked.state());
     }
+
+
     @Test void platformMaintenanceCannotStarveDirtyWorkAtOneGlobalUnit() {
         Fixture f=new Fixture();UUID colony=f.colony(1,0);f.citizen(11,colony);
         f.budgets.updateLimits(LIMITS.withBudget(Budget.DIRTY_RESCAN_OBJECTS,1));
@@ -138,6 +140,24 @@ final class SimulationSchedulerTest {
         @SuppressWarnings("unchecked") var resumed = (Map<String,Object>) ((Map<?,?>)f.scheduler.diagnostics(colony).get("colonies")).get(colony.toString());
         assertEquals(maximum,((Number)resumed.get("maxNormalColonyReadyServiceDelayTicks")).longValue());
     }
+
+    @Test void telemetryPreservesCandidateRotationPastAnIneligibleWorker() {
+        Fixture f=new Fixture();UUID colony=f.colony(1,0);UUID starving=f.citizen(11,colony);UUID healthy=f.citizen(12,colony);
+        f.registry.updateCitizen(f.registry.citizen(starving).withFood(0));
+        var limits=LIMITS.withBudget(Budget.ASSIGNMENT_CANDIDATES,1);
+        f.budgets.updateLimits(limits);f.registry.admission().updateLimits(limits);
+        var work=f.timer(21,colony,10);
+        for(int tick=0;tick<50;tick++) {
+            var current=f.registry.citizen(starving);
+            f.registry.updateCitizen(current.withPosition(new WorldPosition("minecraft:overworld",tick%16,64,0)));
+            current=f.registry.citizen(healthy);f.registry.updateCitizen(current.withActiveTime(current.activeTimeTicks()+1));
+            f.ticks(1);
+        }
+        assertEquals(WorkOrder.State.COMPLETED,work.state());
+        assertEquals(0,f.registry.citizen(starving).food());
+        assertNull(f.registry.citizen(healthy).assignedWorkId());
+    }
+
     @Test void invalidationDuringProcessingIsHandledWithoutAnotherNotification() {
         Fixture f = new Fixture(); UUID colony = f.colony(1,0); f.citizen(11,colony); WorkOrder work = f.timer(21,colony,3);
         boolean[] invalidated = {false};

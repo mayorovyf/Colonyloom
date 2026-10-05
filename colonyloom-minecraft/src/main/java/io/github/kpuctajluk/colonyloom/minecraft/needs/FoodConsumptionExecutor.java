@@ -56,7 +56,7 @@ public final class FoodConsumptionExecutor {
         if(before<registry.storage().obligated(share.slot()))return denied(WorkOrder.Reason.RECONCILING);
         var fact=new EffectRecord.Food(share.slot(),share.item(),share.id(),share.demandId(),citizen.needs().get("food"),citizen.needs().get("food"),citizen.foodDecayTicks(),citizen.foodDecayTicks());
         EffectRecord effect=new EffectRecord(UUID.randomUUID(),work.colonyId(),work.id(),citizen.citizenId(),citizen.bindingEpoch(),ActionContext.Kind.FOOD_CONSUME,
-                target,"native_inventory",share.item().itemId(),before,before,EffectRecord.State.PREPARED,0,null,null,fact);
+                target,"native_inventory",share.item().itemId(),before,before,EffectRecord.State.PREPARED,0,null,null,fact,null);
         try(var prepared=registry.supply().prepareConsumption(share.id(),1)) {
             try {registry.effects().prepare(effect,work.lane());}
             catch(AdmissionLedger.AdmissionException full) {return denied(admissionReason(full));}

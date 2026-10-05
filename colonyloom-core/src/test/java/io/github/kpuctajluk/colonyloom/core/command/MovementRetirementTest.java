@@ -12,6 +12,20 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 final class MovementRetirementTest {
+    @Test void exactDeathWitnessCannotClaimCancelledDropsOrRewriteCargo() {
+        var item=new io.github.kpuctajluk.colonyloom.core.storage.ItemDescriptor("minecraft:bread",new byte[]{1,2});
+        var source=UUID.randomUUID();var cargo=List.of(new EffectRecord.DeathCargo(0,item,3));
+        var prepared=new EffectRecord.Death(source,cargo,List.of(),false);
+        var witness=new EffectRecord(UUID.randomUUID(),UUID.randomUUID(),null,UUID.randomUUID(),1,ActionContext.Kind.DEATH,new WorldPosition("minecraft:overworld",0,64,0),"native_final_death","colonyloom:inventory",3,3,EffectRecord.State.PREPARED,0,null,null,null,prepared);
+        var cancelled=new EffectRecord.Death(source,cargo,List.of(),true);
+        assertThrows(IllegalArgumentException.class,() -> witness.observedDeath(cancelled,0,false));
+        var ambiguous=witness.observedDeath(cancelled,0,true);assertEquals(EffectRecord.State.AMBIGUOUS,ambiguous.state());assertEquals(cancelled,ambiguous.accepted().death());
+        var complete=new EffectRecord.Death(source,cargo,List.of(new EffectRecord.DeathDrop(UUID.randomUUID(),item,3)),true);
+        assertTrue(complete.conserved());assertEquals(EffectRecord.State.OBSERVED,witness.observedDeath(complete,0,false).state());
+        var changed=new EffectRecord.Death(source,List.of(new EffectRecord.DeathCargo(0,item,2)),List.of(),false);
+        assertThrows(IllegalArgumentException.class,() -> witness.observedDeath(changed,0,true));
+        assertThrows(IllegalArgumentException.class,() -> new EffectRecord.Death(source,List.of(cargo.getFirst(),cargo.getFirst()),List.of(),false));
+    }
     @Test
     void liveMovementAndRetainedWitnessPreventRetirementButReleasedTerminalMovementFreesCapacity() {
         var runtime = ServerRuntime.start(Thread.currentThread());
@@ -31,7 +45,7 @@ final class MovementRetirementTest {
         var work = runtime.commands().createMoveWork(context, UUID.randomUUID(), colony.colonyId(), target);
         assertThrows(IllegalStateException.class, () -> runtime.workBoard().retire(work.id()));
         runtime.workBoard().cancel(work.id());
-        var witness = new EffectRecord(UUID.randomUUID(),colony.colonyId(),work.id(),citizen.citizenId(),citizen.bindingEpoch(),ActionContext.Kind.DEATH,target,"inventory","minecraft:oak_stairs",4,4,EffectRecord.State.PREPARED,0,null,null,null);
+        var witness = new EffectRecord(UUID.randomUUID(),colony.colonyId(),work.id(),citizen.citizenId(),citizen.bindingEpoch(),ActionContext.Kind.DEATH,target,"inventory","minecraft:oak_stairs",4,4,EffectRecord.State.PREPARED,0,null,null,null,null);
         runtime.registry().effects().prepare(witness, io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);
         assertThrows(IllegalStateException.class, () -> runtime.workBoard().retire(work.id()));
         runtime.registry().effects().discardUnchanged(witness.operationId());

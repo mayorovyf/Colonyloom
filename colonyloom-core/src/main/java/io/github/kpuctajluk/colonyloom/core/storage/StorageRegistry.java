@@ -92,6 +92,7 @@ public final class StorageRegistry {
     private final Map<UUID, Claim> claims = new LinkedHashMap<>();
     private final Map<StockRegion, List<Claim>> slotClaims = new HashMap<>();
     private final Map<UUID, Set<StockRegion>> views = new HashMap<>();
+    private final Map<UUID, Map<StockRegion, List<Registration>>> slotRegistrations = new HashMap<>();
     private java.util.function.Consumer<UUID> lossListener = ignored -> {};
     public void setLossListener(java.util.function.Consumer<UUID> listener) { requireOwner(); lossListener = Objects.requireNonNull(listener); }
 
@@ -105,6 +106,11 @@ public final class StorageRegistry {
     public AllocationLedger allocations() { requireOwner(); return allocations; }
     public List<Registration> registrations() { requireOwner(); return List.copyOf(registrations.values()); }
     public List<Registration> registrations(UUID colonyId) { registry.colony(colonyId); return registrations.values().stream().filter(r -> r.colonyId().equals(colonyId)).toList(); }
+    public List<Registration> registrations(UUID colonyId, StockRegion slot) {
+        registry.colony(colonyId); Objects.requireNonNull(slot);
+        var entries = slotRegistrations.get(colonyId);
+        return entries == null ? List.of() : entries.getOrDefault(slot, List.of());
+    }
     public List<Workshop> workshops() { requireOwner(); return List.copyOf(workshops.values()); }
     public long registrationViewCutoff() { requireOwner(); return registrationViewSequence; }
     public Long nextRegistrationViewKey(Long after) { requireOwner(); return after == null ? registrationViewKeys.isEmpty() ? null : registrationViewKeys.firstKey() : registrationViewKeys.higherKey(after); }
@@ -513,8 +519,13 @@ public final class StorageRegistry {
     public boolean authorized(UUID colony, StockRegion slot) { requireOwner(); Set<StockRegion> view = views.get(colony); return view != null && view.contains(slot); }
     boolean registered(StockRegion slot) { for (Set<StockRegion> view : views.values()) if (view.contains(slot)) return true; return false; }
     private void rebuildViews() {
-        views.clear();
-        for (Registration registration : registrations.values()) views.computeIfAbsent(registration.colonyId(), ignored -> new HashSet<>()).addAll(registration.slots());
+        views.clear(); slotRegistrations.clear();
+        for (Registration registration : registrations.values()) {
+            views.computeIfAbsent(registration.colonyId(), ignored -> new HashSet<>()).addAll(registration.slots());
+            var entries = slotRegistrations.computeIfAbsent(registration.colonyId(), ignored -> new HashMap<>());
+            for (StockRegion slot : registration.slots()) entries.computeIfAbsent(slot, ignored -> new ArrayList<>()).add(registration);
+        }
+        for (var entries : slotRegistrations.values()) entries.replaceAll((slot, values) -> List.copyOf(values));
     }
     private void prune(StockRegion slot) {
         if (!registered(slot) && !slotClaims.containsKey(slot)) {

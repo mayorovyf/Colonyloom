@@ -87,6 +87,162 @@ final class ChunkDemandManagerTest {
         f.manager.release(B); assertTrue(f.access.held.isEmpty());
     }
 
+    @Test void everyCrossColonyLaneOrderChargesCurrentSharesAndDeduplicatesSameScope() {
+        UUID other = new UUID(0, 2000);
+        for (Lane first : Lane.values()) for (Lane second : Lane.values()) {
+            Fixture f = new Fixture(200, 9, 1);
+            f.manager.request(A, COLONY, List.of(key(0)), Readiness.ENTITY_TICKING, first, 0, false);
+            f.ticks(3);
+            f.manager.request(B, other, List.of(key(0)), Readiness.ENTITY_TICKING, second, 0, false);
+            f.manager.request(C, other, List.of(key(0)), Readiness.ENTITY_TICKING, second, 0, false);
+            f.ticks(20);
+            assertTrue(f.manager.ready(A)); assertTrue(f.manager.ready(B)); assertTrue(f.manager.ready(C));
+            var ledger = f.registry.admission();
+            assertEquals(25, f.manager.footprint()); assertEquals(9, f.manager.blockTicking()); assertEquals(1, f.manager.entityTicking());
+            assertEquals(2, f.access.held.size());
+            Resource[] rings = {Resource.LOADED_FOOTPRINT, Resource.BLOCK_TICKING, Resource.ENTITY_TICKING};
+            int[] sizes = {25, 9, 1};
+            for (int r = 0; r < rings.length; r++) {
+                assertEquals(sizes[r], ledger.used(COLONY, rings[r]));
+                assertEquals(sizes[r], ledger.used(other, rings[r]));
+                assertEquals(sizes[r], ledger.used(COLONY, rings[r], first));
+                assertEquals(sizes[r], ledger.used(other, rings[r], second));
+            }
+            f.manager.release(A);
+            assertTrue(f.manager.ready(B)); assertTrue(f.manager.ready(C));
+            assertEquals(Set.of(new Held(other, key(0), true)), f.access.held);
+            for (int r = 0; r < rings.length; r++) {
+                assertEquals(0, ledger.used(COLONY, rings[r]));
+                assertEquals(sizes[r], ledger.used(other, rings[r]));
+                for (Lane lane : Lane.values()) assertEquals(lane == second ? sizes[r] : 0, ledger.used(rings[r], lane));
+            }
+            f.manager.release(B);
+            assertTrue(f.manager.ready(C)); assertEquals(25, ledger.used(other, Resource.LOADED_FOOTPRINT));
+            var diagnostic = (java.util.Map<?, ?>) f.manager.diagnostics(other).get("footprint");
+            var loaded = (java.util.Map<?, ?>) diagnostic.get("LOADED_FOOTPRINT");
+            assertEquals(25, loaded.get("unique")); assertEquals(25, loaded.get(second.name()));
+            f.manager.release(C); f.ticks(200);
+            assertTrue(f.access.held.isEmpty()); assertEquals(0, ledger.used(Resource.CHUNK_DEMANDS));
+            for (Resource ring : rings) {
+                assertEquals(0, ledger.used(ring)); assertEquals(0, ledger.used(other, ring));
+                for (Lane lane : Lane.values()) assertEquals(0, ledger.used(ring, lane));
+            }
+        }
+    }
+
+    @Test void sharingCannotBypassServiceReserveInEitherAcquireOrder() {
+        UUID other = new UUID(0, 2000);
+        for (boolean serviceFirst : new boolean[] {false, true}) {
+            Fixture f = new Fixture(200, 18, 2);
+            UUID serviceOwner = serviceFirst ? A : B, normalOwner = serviceFirst ? B : A;
+            UUID serviceColony = serviceFirst ? COLONY : other, normalColony = serviceFirst ? other : COLONY;
+            f.manager.request(A, COLONY, List.of(key(0)), Readiness.ENTITY_TICKING, serviceFirst ? Lane.SERVICE : Lane.NORMAL, 0, false);
+            f.ticks(20);
+            f.manager.request(B, other, List.of(key(0)), Readiness.ENTITY_TICKING, serviceFirst ? Lane.NORMAL : Lane.SERVICE, 0, false);
+            f.ticks(20);
+            f.manager.setProtection(serviceOwner, false, true, false);
+            f.manager.setProtection(normalOwner, false, true, false);
+            f.manager.request(C, other, List.of(key(10)), Readiness.ENTITY_TICKING, Lane.SERVICE, 10, true);
+            f.ticks(30);
+            assertTrue(f.manager.ready(serviceOwner)); assertTrue(f.manager.ready(normalOwner)); assertFalse(f.manager.admitted(C));
+            assertEquals(25, f.registry.admission().used(Resource.LOADED_FOOTPRINT, Lane.SERVICE));
+            assertEquals(25, f.manager.footprint());
+            f.limits(29); f.ticks(30);
+            assertTrue(f.manager.ready(serviceOwner)); assertTrue(f.manager.ready(normalOwner));
+            assertEquals(25, f.registry.admission().used(serviceColony, Resource.LOADED_FOOTPRINT));
+            f.manager.setProtection(serviceOwner, false, false, false); f.ticks(30);
+            assertFalse(f.manager.admitted(serviceOwner)); assertTrue(f.manager.ready(normalOwner));
+            assertEquals(0, f.registry.admission().used(serviceColony, Resource.LOADED_FOOTPRINT));
+            assertEquals(25, f.registry.admission().used(normalColony, Resource.LOADED_FOOTPRINT));
+            assertEquals(25, f.manager.footprint()); assertEquals(0, f.registry.admission().used(Resource.LOADED_FOOTPRINT, Lane.SERVICE));
+            f.manager.close(); f.ticks(200);
+            assertTrue(f.access.held.isEmpty()); assertEquals(0, f.manager.footprint());
+            assertEquals(0, f.registry.admission().used(Resource.CHUNK_DEMANDS));
+        }
+    }
+
+    @Test void evictionReclaimsServiceShareEvenWhenProtectedOrdinaryTicketKeepsPhysicalRing() {
+        Fixture f = new Fixture(400, 27, 3);
+        UUID ordinarySecond = new UUID(0, 4), target = new UUID(0, 5);
+        f.request(A, 0, Lane.NORMAL, false); f.request(B, 0, Lane.SERVICE, false);
+        f.request(ordinarySecond, 10, Lane.NORMAL, false); f.request(C, 10, Lane.SERVICE, false); f.ticks(30);
+        f.manager.setProtection(A, false, true, false); f.manager.setProtection(B, false, true, false);
+        f.manager.setProtection(ordinarySecond, false, true, false);
+        f.request(target, 20, Lane.SERVICE, true); f.ticks(30);
+        assertTrue(f.manager.ready(target)); assertFalse(f.manager.admitted(C));
+        assertTrue(f.manager.ready(A)); assertTrue(f.manager.ready(B)); assertTrue(f.manager.ready(ordinarySecond));
+        assertEquals(75, f.manager.footprint()); assertEquals(50, f.registry.admission().ordinaryFootprint());
+        assertEquals(50, f.registry.admission().used(Resource.LOADED_FOOTPRINT, Lane.SERVICE));
+        assertEquals(0, f.access.releases); // Same-colony ordinary ticking ticket still owns C's old center.
+        f.manager.close(); assertEquals(0, f.manager.footprint()); assertTrue(f.access.held.isEmpty());
+    }
+
+    @Test void protectedCriticalOverlapCannotBeReclaimedByEvictingItsNormalShare() {
+        Fixture f = new Fixture(29, 9, 1);
+        f.request(A, 0, Lane.CRITICAL, false); f.request(B, 0, Lane.NORMAL, false); f.ticks(5);
+        f.request(C, 10, Lane.CRITICAL, true); f.ticks(30);
+        assertTrue(f.manager.ready(A)); assertTrue(f.manager.ready(B)); assertFalse(f.manager.admitted(C));
+        assertEquals(25, f.registry.admission().ordinaryFootprint()); assertEquals(0, f.access.releases);
+        f.manager.close(); assertEquals(0, f.manager.footprint());
+    }
+
+    @Test void protectedCriticalExactRepeatIsIdempotentAndChangedRequestCannotReplaceIt() {
+        Fixture f = new Fixture(58, 18, 2);
+        f.request(A, 0, Lane.CRITICAL, false); f.ticks(3);
+        int links = f.registry.admission().used(Resource.CHUNK_DEMANDS), starts = f.access.starts;
+        f.request(A, 0, Lane.CRITICAL, false);
+        assertThrows(IllegalStateException.class, () -> f.request(A, 10, Lane.CRITICAL, false));
+        assertThrows(IllegalStateException.class, () -> f.request(A, 0, Lane.CRITICAL, true));
+        assertTrue(f.manager.ready(A)); assertTrue(f.manager.admitted(key(0))); assertFalse(f.manager.admitted(key(10)));
+        assertEquals(25, f.manager.footprint()); assertEquals(9, f.manager.blockTicking()); assertEquals(1, f.manager.entityTicking());
+        assertEquals(links, f.registry.admission().used(Resource.CHUNK_DEMANDS)); assertEquals(starts, f.access.starts);
+        assertEquals(0, f.access.releases);
+        f.manager.close();
+    }
+
+    @Test void sharedProtectedBlockOverageRetainsBothColoniesUntilSafeRelease() {
+        UUID other = new UUID(0, 2000);
+        Fixture f = new Fixture(200, 9, 1);
+        f.manager.request(A, COLONY, List.of(key(0)), Readiness.ENTITY_TICKING, Lane.NORMAL, 0, false);
+        f.manager.request(B, other, List.of(key(0)), Readiness.ENTITY_TICKING, Lane.CRITICAL, 0, false);
+        f.ticks(10); f.manager.setProtection(A, false, true, false);
+        var limits = f.budgets.limits().withResource(Resource.BLOCK_TICKING, 1).withResource(Resource.ENTITY_TICKING, 1);
+        f.registry.admission().updateLimits(limits); f.budgets.updateLimits(limits); f.manager.limitsUpdated();
+        f.ticks(20);
+        assertTrue(f.manager.ready(A)); assertTrue(f.manager.ready(B));
+        assertEquals(9, f.manager.blockTicking()); assertEquals(1, f.manager.entityTicking());
+        assertEquals(8, f.registry.admission().overLimit(Resource.BLOCK_TICKING));
+        assertEquals(0, f.registry.admission().overLimit(Resource.ENTITY_TICKING));
+        f.manager.setProtection(A, false, false, false); f.ticks(20);
+        assertFalse(f.manager.admitted(A)); assertTrue(f.manager.ready(B));
+        assertEquals(0, f.registry.admission().used(COLONY, Resource.BLOCK_TICKING));
+        assertEquals(9, f.registry.admission().used(other, Resource.BLOCK_TICKING));
+        assertEquals(1, f.access.releases); assertEquals(9, f.manager.blockTicking());
+        f.manager.release(B); f.ticks(100);
+        assertEquals(0, f.manager.footprint()); assertEquals(0, f.manager.blockTicking()); assertEquals(0, f.manager.entityTicking());
+        assertTrue(f.access.held.isEmpty()); f.manager.close();
+        assertEquals(0, f.registry.admission().used(Resource.CHUNK_DEMANDS));
+    }
+
+    @Test void sharedServiceAdmissionRefusalDoesNotPartiallyAttributeAnOverlappingRing() {
+        UUID other = new UUID(0, 2000);
+        Fixture f = new Fixture(200, 12, 2);
+        f.request(A, 0, Lane.SERVICE, false); f.request(B, 1, Lane.NORMAL, false); f.ticks(20);
+        f.manager.setProtection(A, false, true, false); f.manager.setProtection(B, false, true, false);
+        f.manager.request(C, other, List.of(key(1)), Readiness.ENTITY_TICKING, Lane.SERVICE, 10, true);
+        f.ticks(30);
+        assertTrue(f.manager.ready(A)); assertTrue(f.manager.ready(B)); assertFalse(f.manager.admitted(C));
+        assertEquals(30, f.manager.footprint()); assertEquals(12, f.manager.blockTicking()); assertEquals(2, f.manager.entityTicking());
+        assertEquals(25, f.registry.admission().used(Resource.LOADED_FOOTPRINT, Lane.SERVICE));
+        assertEquals(9, f.registry.admission().used(Resource.BLOCK_TICKING, Lane.SERVICE));
+        assertEquals(1, f.registry.admission().used(Resource.ENTITY_TICKING, Lane.SERVICE));
+        assertEquals(0, f.registry.admission().used(other, Resource.LOADED_FOOTPRINT));
+        assertEquals(0, f.registry.admission().used(other, Resource.BLOCK_TICKING));
+        assertEquals(0, f.registry.admission().used(other, Resource.ENTITY_TICKING));
+        assertEquals(2, f.access.starts); assertEquals(0, f.access.releases);
+        f.manager.close(); assertEquals(0, f.manager.footprint());
+    }
+
     @Test void protectedRecipientAndIdleWorkshopYieldToSavedCourierDependencyWithoutLosingWorkshopDesire() {
         Fixture f = new Fixture(58, 18, 2);
         f.request(A, 0, Lane.NORMAL, false); f.request(C, 10, Lane.NORMAL, false);

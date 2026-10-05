@@ -75,28 +75,32 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         // A saved cursor is only a hint: recheck already accepted targets in bounded portions.
         while(state.reconcileCursor<site.cursor()) {
             if(!registry.budgets().tryConsume(Budget.BLUEPRINT_COMPARISONS,work.lane())) {waitFor(work,WorkOrder.Reason.BUDGET);return;}
-            var oldTarget=state.layout.targets()[state.reconcileCursor];
+            var oldTarget=state.layout.targets().get(state.reconcileCursor);
             if(!placement.matches(oldTarget.position(),oldTarget.expected())) {controller.revisit(work.id(),state.reconcileCursor);return;}
             state.reconcileCursor++;
         }
-        if(site.cursor()>=state.layout.targets().length) {
+        if(site.cursor()>=state.layout.targets().size()) {
             registry.workBoard().transition(work.id(),WorkOrder.State.COMPLETED,WorkOrder.Reason.NONE,"completed"); return;
         }
         try {if(!supply.analyze(work,site,state.layout,state.materials)) {waitFor(work,WorkOrder.Reason.BUDGET);return;}}
         catch(AdmissionLedger.AdmissionException full) {waitFor(work,WorkOrder.Reason.STATE_LIMIT);return;}
-        var target=state.layout.targets()[site.cursor()];
         if(!registry.budgets().tryConsume(Budget.BLUEPRINT_COMPARISONS,work.lane())) { waitFor(work,WorkOrder.Reason.BUDGET); return; }
+        var target=state.layout.targets().get(site.cursor());
         long comparisonStart=System.nanoTime(); boolean matches;
         try { matches=placement.matches(target.position(),target.expected()); }
         finally { registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.BLUEPRINT_UNIT,System.nanoTime()-comparisonStart); }
-        if(matches) { controller.advance(work.id(),false); return; }
+        if(matches) { controller.advance(work.id(),false);supply.confirmedAdvance(state.materials,site,target.expected().itemId());return; }
         var citizen=registry.citizen(work.assignee());
         io.github.kpuctajluk.colonyloom.core.supply.CoverageShare allocation;
-        try {allocation=supply.carried(work,state.materials,target.expected().itemId());}
+        try {
+            supply.requireMaterial(state.materials,site.cursor(),target.expected().itemId());
+            allocation=supply.carried(work,state.materials,target.expected().itemId());
+            if(state.materials.carriedReason==WorkOrder.Reason.BUDGET) {waitFor(work,WorkOrder.Reason.BUDGET);return;}
+        }
         catch(AdmissionLedger.AdmissionException full) {waitFor(work,WorkOrder.Reason.STATE_LIMIT);return;}
         if(allocation==null) {
             var buffered=supply.buffered(work,state.materials,target.expected().itemId());
-            if(buffered==null) {waitFor(work,WorkOrder.Reason.MATERIALS);return;}
+            if(buffered==null) {supply.retryCarried(state.materials);waitFor(work,WorkOrder.Reason.MATERIALS);return;}
             var buffer=storage.locate(buffered.slot().storage());
             if(buffer==null) {waitFor(work,WorkOrder.Reason.RECONCILING);return;}
             var pickup=new WorldPosition(buffer.dimension(),buffer.x(),buffer.y(),buffer.z()+1);
@@ -105,14 +109,14 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
             catch(AdmissionLedger.AdmissionException full) {waitFor(work,WorkOrder.Reason.STATE_LIMIT);return;}
             if(!navigation.atTarget(work.id())) {if(navigation.state(work.id())==NavigationService.State.WAITING)waitFor(work,navigation.reason(work.id()));return;}
             navigation.cancel(work.id());
-            try {var reason=supply.pickup(work,buffered);if(reason!=WorkOrder.Reason.NONE)waitFor(work,reason);}
+            try {var reason=supply.pickup(work,state.materials,buffered);if(reason!=WorkOrder.Reason.NONE)waitFor(work,reason);}
             catch(AdmissionLedger.AdmissionException full) {waitFor(work,WorkOrder.Reason.STATE_LIMIT);}
             return;
         }
         if(state.lastCursor!=site.cursor()) {
             navigation.cancel(work.id()); state.lastCursor=site.cursor(); state.generation=site.cursor(); state.arrived=false;
             // Work origin travels parallel to the template's target axis, keeping the body off the blocks it places.
-            var first=state.layout.targets()[0].position(); var marker=state.layout.workOrigin();
+            var first=state.layout.targets().getFirst().position(); var marker=state.layout.workOrigin();
             state.waypoint=new WorldPosition(marker.dimension(),marker.x()+target.position().x()-first.x(),marker.y()+target.position().y()-first.y(),marker.z()+target.position().z()-first.z());
         }
         if(!state.arrived) {
@@ -131,7 +135,7 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         try(consumption) {
         var colony=registry.colony(work.colonyId());
         var context=new ActionContext(work.colonyId(),citizen.citizenId(),ActionContext.Kind.BLOCK_PLACE,target.position(),ActionContext.AuthorityMode.COLONY,site.initiatorId(),colony.authorityRevision());
-        var effect=new EffectRecord(UUID.randomUUID(),work.colonyId(),work.id(),citizen.citizenId(),citizen.bindingEpoch(),ActionContext.Kind.BLOCK_PLACE,target.position(),MinecraftConstructionGeometry.state(target.expected()).toString(),target.expected().itemId(),before,before,EffectRecord.State.PREPARED,0,null,null,null);
+        var effect=new EffectRecord(UUID.randomUUID(),work.colonyId(),work.id(),citizen.citizenId(),citizen.bindingEpoch(),ActionContext.Kind.BLOCK_PLACE,target.position(),MinecraftConstructionGeometry.state(target.expected()).toString(),target.expected().itemId(),before,before,EffectRecord.State.PREPARED,0,null,null,null,null);
         try { registry.effects().prepare(effect,work.lane()); } catch(AdmissionLedger.AdmissionException denied) { waitFor(work,WorkOrder.Reason.STATE_LIMIT); return; }
         // The verified session-dirty marker is durable already; this evidence joins ordinary SavedData checkpoints.
         // No observer saves implicitly, so fault fixtures can deliberately persist only one physical side.
@@ -152,10 +156,11 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
             try {consumption.commit(1);}
             catch(RuntimeException changed) {registry.effects().update(effect.observed(after,false).observed(after,true));registry.effects().blockAmbiguous(work.colonyId(),checkpoint.get());navigation.cancel(work.id());throw changed;}
             controller.advance(work.id(),true);
+            supply.confirmedAdvance(state.materials,site,target.expected().itemId());
             state.reconcileCursor=site.cursor()+1;
         } else {
             registry.effects().discardUnchanged(effect.operationId());
-            if(result==WorldAccess.Placement.ALREADY_PRESENT) controller.advance(work.id(),false);
+            if(result==WorldAccess.Placement.ALREADY_PRESENT) {controller.advance(work.id(),false);supply.confirmedAdvance(state.materials,site,target.expected().itemId());}
             else waitFor(work,switch(result) { case MATERIALS -> WorkOrder.Reason.MATERIALS; case PERMISSION_DENIED -> WorkOrder.Reason.PERMISSION_DENIED; case OBSTRUCTED -> WorkOrder.Reason.TARGET_CONFLICT; default -> WorkOrder.Reason.CHUNK_NOT_READY; });
         }
         }
@@ -172,10 +177,19 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         registry.workBoard().waitAssigned(work.id(),reason==WorkOrder.Reason.NONE?WorkOrder.Reason.RECONCILING:reason,"construction");
     }
     public void cancel(UUID workId) {
-        registry.requireOwner(); if(navigation!=null) navigation.cancel(workId); var state=active.remove(workId); if(state!=null) chunks.release(state.chunkOwner);
-        if(registry.construction().site(workId)==null) return;
-        var work=registry.workBoard().work(workId);if(work.terminal())supply.close(workId);
-        if(registry.construction().site(workId)!=null&&work.terminal())controller.close(workId);
+        registry.requireOwner(); if(navigation!=null) navigation.cancel(workId);
+        var state=active.get(workId);if(state!=null)chunks.release(state.chunkOwner);
+        var site=registry.construction().site(workId);
+        if(site==null) {active.remove(workId);return;}
+        var work=registry.workBoard().work(workId);
+        if(work.terminal()) {
+            active.remove(workId);supply.close(workId);controller.close(workId);
+        } else if(state!=null) {
+            // Readiness/assignment pauses end the embodiment, not the site's paid analysis.
+            state.waypoint=null;state.lastCursor=-1;state.arrived=false;state.generation++;
+            state.retryAt=0;state.retryReason=WorkOrder.Reason.NONE;
+            supply.suspend(state.materials);
+        }
     }
     public void close() { registry.requireOwner(); for(var state:active.values()) chunks.release(state.chunkOwner); active.clear(); }
 }

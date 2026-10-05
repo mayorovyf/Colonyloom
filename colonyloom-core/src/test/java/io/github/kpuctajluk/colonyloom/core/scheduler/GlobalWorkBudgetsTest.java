@@ -28,6 +28,49 @@ final class GlobalWorkBudgetsTest {
     }
 
     @Test
+    void serviceOnlyCursorsDoNotEraseSparseCriticalNormalContestDebt() {
+        var budgets = new GlobalWorkBudgets(SimulationLimits.development()
+                .withBudget(Budget.DIRTY_RESCAN_OBJECTS, 1), () -> 0L);
+        int critical = 0, normal = 0;
+        for (int tick = 1; tick <= 1620; tick++) {
+            budgets.beginTick(tick);
+            if (tick % 18 != 0) {
+                assertTrue(budgets.tryConsume(Budget.DIRTY_RESCAN_OBJECTS, Lane.SERVICE));
+                assertNull(budgets.chooseLane(Budget.DIRTY_RESCAN_OBJECTS, true, false, true));
+                continue;
+            }
+            Lane selected = budgets.chooseLane(Budget.DIRTY_RESCAN_OBJECTS, true, false, true);
+            assertTrue(budgets.tryConsume(Budget.DIRTY_RESCAN_OBJECTS, selected));
+            if (selected == Lane.CRITICAL) critical++; else if (selected == Lane.NORMAL) normal++;
+        }
+        assertEquals(50, critical);
+        assertEquals(40, normal);
+        assertEquals(1, budgets.highWater(Budget.DIRTY_RESCAN_OBJECTS));
+    }
+    @Test
+    void exhaustedSharedDirtySelectionCannotReserveIndependentNavigationContinuation() {
+        var budgets=new GlobalWorkBudgets(SimulationLimits.development()
+                .withBudget(Budget.DIRTY_RESCAN_OBJECTS,1).withBudget(Budget.NAVIGATION_STARTS,1)
+                .withMaxManagedNanos(5_000_000),() -> 0L);
+        int[] consumed=new int[3];
+        for(int tick=1;tick<=100;tick++) {
+            budgets.beginTick(tick);
+            assertTrue(budgets.tryConsume(Budget.DIRTY_RESCAN_OBJECTS,Lane.SERVICE));
+            assertNull(budgets.chooseLane(Budget.DIRTY_RESCAN_OBJECTS,true,false,true));
+            Lane continuation=budgets.chooseLane(Budget.NAVIGATION_STARTS,true,true,true);
+            assertNotNull(continuation);
+            assertTrue(budgets.tryConsume(Budget.NAVIGATION_STARTS,continuation));
+            assertFalse(budgets.tryConsume(Budget.NAVIGATION_STARTS,continuation));
+            consumed[continuation.ordinal()]++;
+        }
+        assertEquals(50,consumed[Lane.CRITICAL.ordinal()]);
+        assertEquals(10,consumed[Lane.SERVICE.ordinal()]);
+        assertEquals(40,consumed[Lane.NORMAL.ordinal()]);
+        assertEquals(1,budgets.highWater(Budget.NAVIGATION_STARTS));
+        assertEquals(1,budgets.highWater(Budget.DIRTY_RESCAN_OBJECTS));
+    }
+
+    @Test
     void absentClassesLendUnitsAndReturningNormalClassDoesNotStarve() {
         GlobalWorkBudgets budgets = new GlobalWorkBudgets(SimulationLimits.development(), () -> 0L);
         for (int tick = 1; tick <= 100; tick++) {

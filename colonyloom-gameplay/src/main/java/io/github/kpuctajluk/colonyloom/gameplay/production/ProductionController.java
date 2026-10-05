@@ -8,19 +8,24 @@ import io.github.kpuctajluk.colonyloom.core.work.WorkOrder;
 import java.util.Objects;
 import java.util.UUID;
 
-/** Complete local-kit admission only; scheduler/platform own workers, navigation and native effects. */
 public final class ProductionController {
     private final ColonyRegistry registry;
     private int cursor;
+    private long cursorRevision = -1;
     public ProductionController(ColonyRegistry registry) { this.registry = Objects.requireNonNull(registry); }
     public void tick(GlobalWorkBudgets budgets) {
         registry.requireOwner();
-        int count = registry.supply().productionCount();
+        var supply = registry.supply();
+        int count = supply.productionCount();
+        long revision = supply.productionIndexRevision();
+        if (revision != cursorRevision) { cursor = 0; cursorRevision = revision; }
+        if (count == 0) { cursor = 0; return; }
+        if (cursor >= count) cursor = 0;
         for (int scanned = 0; scanned < count; scanned++) {
             if (cursor >= count) cursor = 0;
-            var production = registry.supply().productionAt(cursor);
+            var production = supply.productionAt(cursor);
             if (!budgets.tryConsume(Budget.DIRTY_RESCAN_OBJECTS, production.lane())) return;
-            cursor++;
+            cursor = (cursor + 1) % count;
             if (!registry.colony(production.colonyId()).available()) continue;
             if (production.terminal()) {
                 if (production.workId() != null) {
@@ -41,7 +46,8 @@ public final class ProductionController {
             } else {
                 var work = registry.workBoard().work(production.workId());
                 if (!ready && !production.batchStarted() && !work.terminal()) registry.workBoard().transition(work.id(), WorkOrder.State.WAITING, WorkOrder.Reason.MATERIALS, "kit");
-                else if (ready && work.state() == WorkOrder.State.WAITING && work.assignee() == null && work.waitingReason() == WorkOrder.Reason.MATERIALS)
+                else if (ready && work.state() == WorkOrder.State.WAITING && work.assignee() == null
+                        && (work.waitingReason() == WorkOrder.Reason.MATERIALS || work.waitingReason() == WorkOrder.Reason.BUDGET))
                     registry.workBoard().transition(work.id(), WorkOrder.State.READY, WorkOrder.Reason.NONE, "production");
             }
         }

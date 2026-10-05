@@ -56,6 +56,23 @@ final class FoodNeedsTest {
         assertEquals(20, due.withActiveTime(0).food()); assertEquals(19, due.withActiveTime(1).food());
         assertEquals(1199, due.withActiveTime(1).foodDecayTicks());
     }
+    @Test void foodClockPreservesOtherTimersAndOnlyFoodBoundaryChangesControlRevision() {
+        CitizenRecord original = citizen(3, 20);
+        CitizenRecord value = new CitizenRecord(original.citizenId(), original.colonyId(), original.entityId(), original.bindingEpoch(),
+                null, null, null, null, Map.of("carpentry", 3), original.needs(), original.lifecycle(), original.admission(), original.readiness(),
+                0, Map.of("food", 1200L, "sleep", 77L), original.lastKnownPosition(), 12);
+        CitizenRecord partial = value.withActiveTime(1199);
+        assertEquals(20, partial.food());
+        assertEquals(Map.of("food", 1L, "sleep", 77L), partial.remainingTimers());
+        assertEquals(Map.of("carpentry", 3), partial.skills());
+        assertEquals(12, partial.revision());
+        CitizenRecord due = partial.withActiveTime(1200);
+        assertEquals(19, due.food());
+        assertEquals(Map.of("food", 1200L, "sleep", 77L), due.remainingTimers());
+        assertEquals(13, due.revision());
+        assertEquals(20, value.food());
+        assertEquals(Map.of("food", 1200L, "sleep", 77L), value.remainingTimers());
+    }
     @Test void prescribedFoodAndPickupCannotChooseAnotherCitizenOrWarehouseAllocation() {
         var registry = registry(); var board = registry.workBoard(); var supply = registry.supply();
         var food = board.createFood(id(10), id(3));
@@ -97,6 +114,35 @@ final class FoodNeedsTest {
         var food = board.createFood(id(11), id(3)); board.transition(food.id(), WorkOrder.State.READY, WorkOrder.Reason.NONE, "food");
         assertTrue(board.assign(food.id(), id(3)));
     }
+    @Test void pendingFoodPriorityIsScopedAndTerminalChangesDoNotClearOtherSubjects() {
+        var registry = registry(); var board = registry.workBoard();
+        var ordinary = board.createMove(id(10), id(1), pos(0), 0, Lane.NORMAL);
+        board.transition(ordinary.id(), WorkOrder.State.READY, WorkOrder.Reason.NONE, "move");
+        var first = board.createFood(id(11), id(3));
+        var second = board.createFood(id(12), id(4));
+        assertFalse(board.assign(ordinary.id(), id(3)));
+        board.cancel(first.id());
+        assertTrue(board.assign(ordinary.id(), id(3)));
+        var other = board.createMove(id(13), id(1), pos(0), 0, Lane.NORMAL);
+        board.transition(other.id(), WorkOrder.State.READY, WorkOrder.Reason.NONE, "move");
+        assertFalse(board.assign(other.id(), id(4)));
+        board.transition(first.id(), WorkOrder.State.CANCELLED, WorkOrder.Reason.NONE, "cancelled-again");
+        assertFalse(board.assign(other.id(), id(4)));
+        board.transition(second.id(), WorkOrder.State.FAILED, WorkOrder.Reason.NONE, "failed");
+        assertTrue(board.assign(other.id(), id(4)));
+    }
+    @Test void restoredPendingFoodPreservesAssignmentPriorityAndRemovedFoodDoesNotBlock() {
+        var registry = registry(); var board = registry.workBoard();
+        var ordinary = board.createMove(id(10), id(1), pos(0), 0, Lane.NORMAL);
+        board.transition(ordinary.id(), WorkOrder.State.READY, WorkOrder.Reason.NONE, "move");
+        var food = board.createFood(id(11), id(3));
+        var pending = board.snapshots();
+        board.transition(food.id(), WorkOrder.State.COMPLETED, WorkOrder.Reason.NONE, "consumed");
+        board.restore(pending);
+        assertFalse(board.assign(ordinary.id(), id(3)));
+        board.restore(List.of(ordinary.snapshot()));
+        assertTrue(board.assign(ordinary.id(), id(3)));
+    }
     @Test void foodPreemptionRetainsAllocatedCargoAndOrdinaryConsumerUntilSafeUnload() {
         var registry = registry(); var board = registry.workBoard(); var supply = registry.supply();
         var ordinary = board.createMove(id(10), id(1), pos(0), 0, Lane.NORMAL);
@@ -113,6 +159,13 @@ final class FoodNeedsTest {
         assertFalse(board.requestFoodPreemption(id(3))); assertTrue(ordinary.criticalService());
         assertEquals(Lane.CRITICAL, ordinary.lane()); assertEquals(Lane.NORMAL, ordinary.admissionLane());
         assertEquals(ordinary.id(), registry.citizen(id(3)).assignedWorkId()); assertEquals(0, demand.snapshot().fulfilled());
+        registry.restore(registry.snapshot());
+        ordinary = board.work(ordinary.id());
+        demand = supply.demand(demand.id());
+        registry.storage().index().observe(cargo, stone, 1, 1);
+        registry.storage().index().observe(buffer, null, 0, 1);
+        assertFalse(board.requestFoodPreemption(id(3)));
+        assertEquals(ordinary.id(), registry.citizen(id(3)).assignedWorkId());
         try (var prepared = supply.prepareAllocationMove(share.id(), buffer, 1, 1)) {
             registry.storage().index().observe(buffer, stone, 1, 1); prepared.commit(1); registry.storage().index().observe(cargo, null, 0, 1);
         }

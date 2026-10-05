@@ -28,10 +28,15 @@ public final class CitizenEntity extends PathfinderMob {
     private long bindingEpoch;
     private boolean quarantined = true;
     private Runnable managedMovementGuard;
+    private Runnable managedActiveTick;
+    public void managedActiveTick(Runnable tick) { requireServerThread(); managedActiveTick=tick; }
     private io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics metrics;
     public void runtimeMetrics(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics value) { requireServerThread(); metrics=Objects.requireNonNull(value); }
-    private java.util.function.IntConsumer deathInventoryObserver;
-    public void observeDeathInventory(java.util.function.IntConsumer observer) { requireServerThread(); deathInventoryObserver=Objects.requireNonNull(observer); }
+    private Runnable deathPreparation;
+    private java.util.function.Consumer<java.util.List<net.minecraft.world.entity.item.ItemEntity>> deathInventoryObserver;
+    private java.util.List<net.minecraft.world.entity.item.ItemEntity> deathDrops;
+    public void deathPreparation(Runnable preparation) { requireServerThread(); deathPreparation=Objects.requireNonNull(preparation); }
+    public void observeDeathInventory(java.util.function.Consumer<java.util.List<net.minecraft.world.entity.item.ItemEntity>> observer) { requireServerThread(); deathInventoryObserver=Objects.requireNonNull(observer); }
     public enum DeathFaultPoint { BEFORE_EFFECT, AFTER_SOURCE_CHANGE, AFTER_DESTINATION_CHANGE, AFTER_FACT_BEFORE_NOTIFY }
     @FunctionalInterface
     public interface DeathFaultObserver {
@@ -107,6 +112,7 @@ public final class CitizenEntity extends PathfinderMob {
         try {
             if (!level().isClientSide && managedMovementGuard != null) managedMovementGuard.run();
             super.tick();
+            if (!level().isClientSide && managedActiveTick != null) managedActiveTick.run();
         } finally { if(metrics!=null) metrics.record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.ENTITY_TICK,System.nanoTime()-start); }
     }
     @Override public void move(net.minecraft.world.entity.MoverType type,net.minecraft.world.phys.Vec3 movement) {
@@ -189,6 +195,9 @@ public final class CitizenEntity extends PathfinderMob {
 
     @Override
     protected void dropEquipment() {
+        // Native dead=true and LivingDeathEvent dispatch have completed before this hook.
+        // A later LOWEST listener can cancel that event; it cannot reach this hook when cancelled.
+        if (deathPreparation != null) deathPreparation.run();
         super.dropEquipment();
         // Cargo is existing property, not generated mob loot: it drops even when doMobLoot is false.
         // spawnAtLocation uses the vanilla death-drop path, including the loader's drop event capture.
@@ -196,7 +205,11 @@ public final class CitizenEntity extends PathfinderMob {
             ItemStack stack = inventory.removeItemNoUpdate(slot);
             if (!stack.isEmpty()) {
                 if (deathFaultObserver != null) deathFaultObserver.observe(DeathFaultPoint.AFTER_SOURCE_CHANGE, deathActionContext);
-                spawnAtLocation(stack);
+                var drop=spawnAtLocation(stack);
+                if(drop!=null && deathInventoryObserver!=null) {
+                    if(deathDrops==null)deathDrops=new java.util.ArrayList<>(INVENTORY_SIZE);
+                    deathDrops.add(drop);
+                }
             }
         }
         inventory.setChanged();
@@ -205,16 +218,20 @@ public final class CitizenEntity extends PathfinderMob {
 
     @Override
     public void die(net.minecraft.world.damagesource.DamageSource source) {
+        boolean previouslyDead=dead;
         super.die(source);
-        if (!deathInventoryDropped) return;
+        if (level().isClientSide || previouslyDead || !dead) return;
+        // A killer may suppress native loot entirely. Death remains final, but cargo custody is UNKNOWN.
+        if (!deathInventoryDropped && deathPreparation!=null) deathPreparation.run();
         deathInventoryDropped=false;
         var faultObserver=deathFaultObserver; deathFaultObserver=null;
         var context=deathActionContext; deathActionContext=null;
         var inventoryObserver=deathInventoryObserver; deathInventoryObserver=null;
-        // NeoForge captures spawnAtLocation during dropEquipment and publishes LivingDrops afterward.
-        // Returning from vanilla die proves actual drop publication, not merely a captured ItemEntity.
+        // LivingDropsEvent dispatch AND addFreshEntity have returned. Only world-published UUIDs count.
+        var published=deathDrops==null?java.util.List.<net.minecraft.world.entity.item.ItemEntity>of():deathDrops.stream().filter(item -> ((ServerLevel)level()).getEntity(item.getUUID())==item && !item.isRemoved()).toList();
+        deathDrops=null;
         if(faultObserver!=null) faultObserver.observe(DeathFaultPoint.AFTER_DESTINATION_CHANGE,context);
-        if(inventoryObserver!=null) { int remaining=0; for(int slot=0;slot<INVENTORY_SIZE;slot++) remaining+=inventory.getItem(slot).getCount(); inventoryObserver.accept(remaining); }
+        if(inventoryObserver!=null) inventoryObserver.accept(published);
     }
 
     private void requireServerThread() {

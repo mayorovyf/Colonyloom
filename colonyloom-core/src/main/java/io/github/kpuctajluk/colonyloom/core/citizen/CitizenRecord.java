@@ -30,7 +30,9 @@ public record CitizenRecord(UUID citizenId, UUID colonyId, UUID entityId, long b
         skills = Map.copyOf(skills);
         needs = Map.copyOf(needs);
         remainingTimers = Map.copyOf(remainingTimers);
-        if (skills.values().stream().anyMatch(value -> value < 0) || needs.values().stream().anyMatch(value -> value < 0) || remainingTimers.values().stream().anyMatch(value -> value < 0)) throw new IllegalArgumentException("Negative citizen state");
+        for (int value : skills.values()) if (value < 0) throw new IllegalArgumentException("Negative citizen skill");
+        for (int value : needs.values()) if (value < 0) throw new IllegalArgumentException("Negative citizen need");
+        for (long value : remainingTimers.values()) if (value < 0) throw new IllegalArgumentException("Negative citizen timer");
         if (!needs.containsKey("food") || needs.get("food") > 20) throw new IllegalArgumentException("Citizen food must be 0..20");
     }
     public CitizenRecord withAssignment(UUID workId) {
@@ -39,6 +41,7 @@ public record CitizenRecord(UUID citizenId, UUID colonyId, UUID entityId, long b
     public CitizenRecord withActiveTime(long ticks) {
         if (ticks < activeTimeTicks) throw new IllegalArgumentException("Active time cannot reverse");
         long elapsed = ticks - activeTimeTicks;
+        if (elapsed == 0) return this;
         long remaining = foodDecayTicks();
         long losses = 0;
         if (elapsed > 0 && elapsed >= remaining) {
@@ -46,10 +49,20 @@ public record CitizenRecord(UUID citizenId, UUID colonyId, UUID entityId, long b
             losses = 1 + afterFirst / FOOD_INTERVAL;
             remaining = FOOD_INTERVAL - afterFirst % FOOD_INTERVAL;
         } else remaining -= elapsed;
-        var nextNeeds = new HashMap<>(needs);
-        nextNeeds.put("food", (int)Math.max(0, food() - losses));
-        var timers = new HashMap<>(remainingTimers);
-        timers.put(FOOD_TIMER, remaining);
+        Map<String, Integer> nextNeeds = needs;
+        if (losses != 0) {
+            var changedNeeds = new HashMap<>(needs);
+            changedNeeds.put("food", (int)Math.max(0, food() - losses));
+            nextNeeds = changedNeeds;
+        }
+        Map<String, Long> timers;
+        if (remainingTimers.size() == 1 && remainingTimers.containsKey(FOOD_TIMER) || remainingTimers.isEmpty()) {
+            timers = Map.of(FOOD_TIMER, remaining);
+        } else {
+            var changedTimers = new HashMap<>(remainingTimers);
+            changedTimers.put(FOOD_TIMER, remaining);
+            timers = changedTimers;
+        }
         return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, nextNeeds, lifecycle, admission, readiness, ticks, timers, lastKnownPosition, losses == 0 ? revision : Math.incrementExact(revision));
     }
     public int food() { return needs.get("food"); }
@@ -63,6 +76,7 @@ public record CitizenRecord(UUID citizenId, UUID colonyId, UUID entityId, long b
         return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, needs, lifecycle, value, readiness, activeTimeTicks, remainingTimers, lastKnownPosition, Math.incrementExact(revision));
     }
     public CitizenRecord withPosition(WorldPosition value) {
+        if (lastKnownPosition.equals(value)) return this;
         return new CitizenRecord(citizenId, colonyId, entityId, bindingEpoch, homeId, workplaceId, assignedWorkId, professionId, skills, needs, lifecycle, admission, readiness, activeTimeTicks, remainingTimers, value, revision);
     }
     public CitizenRecord withProfession(String id) {

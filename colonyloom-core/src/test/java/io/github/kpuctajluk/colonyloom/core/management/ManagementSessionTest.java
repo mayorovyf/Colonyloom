@@ -23,17 +23,22 @@ final class ManagementSessionTest {
         Status status = Status.ACCEPTED;
         String reason = "OK";
         boolean reject;
+        RuntimeException executionFailure;
         boolean viewReady = true;
         int pageBudget = Integer.MAX_VALUE;
+        int preparations;
+        int cancellations;
         Function<Subscription, ViewData> builder = this::normal;
         public ManagementSession.Authority authorize(UUID colonyId) { return new ManagementSession.Authority(allowed, authority); }
         public long targetRevision(Command command) { return targetRevision; }
         public Result execute(Command command) {
             executions++;
+            if (executionFailure != null) throw executionFailure;
             if (reject) throw new IllegalArgumentException("Invalid target");
             return new Result(command.sequence(), status, reason, TARGET, targetRevision);
         }
         public boolean viewReady(Subscription subscription) {
+            preparations++;
             if (!viewReady || pageBudget == 0) return false;
             pageBudget--;
             return true;
@@ -42,6 +47,7 @@ final class ManagementSessionTest {
         ViewData normal(Subscription subscription) {
             return data(subscription, authority, stateRevision, "manager", List.of(), 0, List.of());
         }
+        public void cancelView(Subscription subscription) { cancellations++; }
     }
     private record Delivery(UUID subscriptionId, long baseRevision, ViewData data) {}
     private static final class Transport implements ManagementSession.Transport {
@@ -49,11 +55,12 @@ final class ManagementSessionTest {
         final List<Result> results = new ArrayList<>();
         final List<Delivery> pages = new ArrayList<>();
         final Map<UUID, String> closed = new HashMap<>();
+        final List<UUID> closeDeliveries = new ArrayList<>();
         public boolean writable() { return writable; }
         public void sendResult(Result result) { assertTrue(writable); results.add(result); }
         public void sendSnapshot(UUID id, ViewData data) { assertTrue(writable); pages.add(new Delivery(id, -1, data)); }
         public void sendDelta(UUID id, long base, ViewData data) { assertTrue(writable); pages.add(new Delivery(id, base, data)); }
-        public void closeView(UUID id, String reason) { assertTrue(writable); closed.put(id, reason); }
+        public void closeView(UUID id, String reason) { assertTrue(writable); closeDeliveries.add(id); closed.put(id, reason); }
     }
     private record Fixture(Backend backend, Transport transport, ManagementSession session) {}
     private Fixture fixture() {
@@ -116,6 +123,18 @@ final class ManagementSessionTest {
         assertEquals(Status.ACCEPTED, f.session.command(command(f.session, 23, 0)).status());
         assertEquals(21, f.backend.executions);
         assertEquals(24, f.session.nextSequence());
+    }
+    @Test void membershipAndFoundingLimitsRemainConsumerVisibleWithoutLeakingOtherFailures() {
+        Fixture f = fixture();
+        var reasons = List.of("MEMBER_LIMIT", "FOUNDING_VALIDATION_LIMIT", "private implementation detail");
+        for (int index = 0; index < reasons.size(); index++) {
+            String reason = reasons.get(index);
+            f.backend.executionFailure = new IllegalStateException(reason);
+            Result result = f.session.command(command(f.session, index, 0));
+            assertEquals(Status.REJECTED, result.status());
+            assertEquals(index < 2 ? reason : "INVALID_COMMAND", result.reason());
+            assertEquals(result, f.transport.results.getLast());
+        }
     }
     @Test void resultCacheAndUnwritablePendingResultsStayBoundedAndExpire() {
         Fixture f = fixture();
@@ -241,6 +260,92 @@ final class ManagementSessionTest {
         assertEquals(0, f.session.bufferedViewBytes());
         f.session.tick(30);
         assertEquals(2, f.transport.pages.size());
+    }
+    @Test void subscriptionAndResyncBurstIsRollingBoundedAndPurgesRejectedLiveView() {
+        Fixture f = fixture();
+        UUID id = UUID.randomUUID();
+        f.session.tick(19);
+        f.session.subscribe(subscription(f.session, id));
+        for (int index = 1; index < ManagementProtocol.SUBSCRIPTIONS_PER_SECOND; index++)
+            f.session.subscribe(new Subscription(f.session.sessionId(), id, COLONY, ViewType.WORK, 0, true));
+        assertEquals(ManagementProtocol.SUBSCRIPTIONS_PER_SECOND, f.backend.preparations);
+        assertTrue(f.session.bufferedViewBytes() > 0);
+        f.session.subscribe(new Subscription(f.session.sessionId(), id, COLONY, ViewType.WORK, 0, true));
+        assertEquals("RATE_LIMIT", f.transport.closed.get(id));
+        assertEquals(0, f.session.subscriptionCount());
+        assertEquals(0, f.session.bufferedViewBytes());
+        for (int index = 0; index < 1000; index++) f.session.subscribe(subscription(f.session, id));
+        assertEquals(1, f.transport.closeDeliveries.size());
+        assertEquals(ManagementProtocol.SUBSCRIPTIONS_PER_SECOND, f.backend.preparations);
+        f.session.tick(38);
+        f.session.subscribe(subscription(f.session, id));
+        assertEquals(0, f.session.subscriptionCount());
+        f.session.tick(39);
+        f.session.subscribe(subscription(f.session, id));
+        assertEquals(1, f.session.subscriptionCount());
+        assertEquals(ManagementProtocol.SUBSCRIPTIONS_PER_SECOND + 1, f.backend.preparations);
+    }
+    @Test void unrelatedRejectedIdsCannotFloodRepliesOrRetainRevokedViewsAtIngressLimit() {
+        Fixture f = fixture();
+        UUID id = UUID.randomUUID();
+        f.session.subscribe(subscription(f.session, id));
+        f.session.tick(0);
+        f.transport.writable = false;
+        f.backend.stateRevision++;
+        f.session.tick(1);
+        for (int index = 0; index < 1000; index++) f.session.subscribe(subscription(f.session, UUID.randomUUID()));
+        f.backend.allowed = false;
+        f.backend.authority++;
+        f.session.subscribe(subscription(f.session, UUID.randomUUID()));
+        assertEquals(0, f.session.subscriptionCount());
+        assertEquals(0, f.session.bufferedViewBytes());
+        int preparations = f.backend.preparations;
+        f.transport.writable = true;
+        for (int index = 0; index < 1000; index++) f.session.subscribe(subscription(f.session, UUID.randomUUID()));
+        f.session.tick(2);
+        assertTrue(f.transport.closeDeliveries.size() <= ManagementProtocol.VIEW_CLOSES_PER_SECOND);
+        f.session.tick(22);
+        assertEquals("ACCESS_DENIED", f.transport.closed.get(id));
+        assertEquals(1, f.transport.pages.size());
+        assertEquals(preparations, f.backend.preparations);
+    }
+    @Test void revokedLiveViewCloseSurvivesForeignSessionFloodAndBackpressure() {
+        Fixture f = fixture();
+        UUID id = UUID.randomUUID();
+        f.session.subscribe(subscription(f.session, id));
+        f.transport.writable = false;
+        f.backend.allowed = false;
+        for (int index = 0; index < 1000; index++)
+            f.session.subscribe(new Subscription(UUID.randomUUID(), UUID.randomUUID(), COLONY, ViewType.WORK, 0, true));
+        assertEquals(0, f.session.subscriptionCount());
+        assertEquals(0, f.session.bufferedViewBytes());
+        f.backend.allowed = true;
+        UUID pending = UUID.randomUUID();
+        f.session.subscribe(subscription(f.session, pending));
+        assertEquals(0, f.session.subscriptionCount());
+        f.transport.writable = true;
+        f.session.tick(1);
+        assertEquals(List.of(id), f.transport.closeDeliveries);
+        assertEquals("ACCESS_DENIED", f.transport.closed.get(id));
+        f.session.tick(20);
+        f.session.subscribe(subscription(f.session, pending));
+        assertEquals(1, f.session.subscriptionCount());
+    }
+    @Test void rejectedSubscriptionRepliesAreDeduplicatedAndRollOverAtTwentyTicks() {
+        Fixture f = fixture();
+        f.backend.allowed = false;
+        UUID id = UUID.randomUUID();
+        for (int index = 0; index < 1000; index++) f.session.subscribe(subscription(f.session, id));
+        // Authorization refusals and ingress refusals are distinct reasons, each sent at most once.
+        assertEquals(2, f.transport.closeDeliveries.size());
+        assertEquals(0, f.backend.preparations);
+        f.session.tick(19);
+        f.session.subscribe(subscription(f.session, id));
+        assertEquals(2, f.transport.closeDeliveries.size());
+        f.session.tick(20);
+        f.session.subscribe(subscription(f.session, id));
+        assertEquals(3, f.transport.closeDeliveries.size());
+        assertEquals("ACCESS_DENIED", f.transport.closed.get(id));
     }
     @Test void malformedDecodedValuesCannotEnterStateMachine() {
         Fixture f = fixture();

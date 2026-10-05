@@ -10,8 +10,14 @@ import java.util.UUID;
 
 /** Observes identity only; never owns entities or their inventories. */
 public final class BindingRegistry {
-    /** Up to 300 canonical embodiments plus bounded competing/retired observations. */
-    public static final int MAX_OBSERVATIONS = 600;
+    /** Each colony owns its lifetime history; retired UUIDs are never trimmed to make room. */
+    public static final int MAX_OBSERVATIONS_PER_COLONY = 600;
+    public static final int MAX_OBSERVATIONS = 4 * MAX_OBSERVATIONS_PER_COLONY; // Three colonies plus isolated unknown identities.
+    public static final class HistoryOverflow extends IllegalStateException {
+        private final UUID colonyId;
+        public HistoryOverflow(UUID colonyId) { super("Binding history cap reached for colony="+colonyId+" limit="+MAX_OBSERVATIONS_PER_COLONY+"; operator recovery required; retired UUIDs retained");this.colonyId=colonyId; }
+        public UUID colonyId() { return colonyId; }
+    }
     public record Observation(UUID citizenId, UUID entityId, long bindingEpoch, boolean loaded, boolean quarantined, boolean retired) {
         public Observation {
             Objects.requireNonNull(entityId, "entityId");
@@ -36,8 +42,9 @@ public final class BindingRegistry {
         registry.requireOwner();
         Observation previous = observations.get(entityId);
         if (previous != null && !Objects.equals(previous.citizenId(), citizenId)) throw new IllegalArgumentException("Entity identity changed citizen");
-        if (previous == null && observations.size() >= MAX_OBSERVATIONS) throw new IllegalStateException("Binding observation limit reached");
         CitizenRecord citizen = registry.findCitizen(citizenId).orElse(null);
+        UUID scope=citizen==null?new UUID(0,0):citizen.colonyId();
+        if (previous == null) requireObservationCapacity(scope);
         boolean retired = previous != null && previous.retired();
         boolean invalid = citizen == null || citizen.lifecycle() != CitizenRecord.Lifecycle.ALIVE || !entityId.equals(citizen.entityId()) || epoch != citizen.bindingEpoch();
         boolean competing = !retired && observations.values().stream().anyMatch(value -> Objects.equals(citizenId, value.citizenId()) && !value.entityId().equals(entityId) && !value.retired());
@@ -54,6 +61,13 @@ public final class BindingRegistry {
         observations.put(entityId, next);
         if (competing) quarantineAll(citizenId);
         revision = nextRevision;
+    }
+    private long scopedCount(UUID colonyId) {
+        return observations.values().stream().filter(value -> registry.findCitizen(value.citizenId()).map(CitizenRecord::colonyId).orElse(new UUID(0,0)).equals(colonyId)).count();
+    }
+    public void requireObservationCapacity(UUID colonyId) {
+        registry.requireOwner();
+        if(observations.size()>=MAX_OBSERVATIONS || scopedCount(colonyId)>=MAX_OBSERVATIONS_PER_COLONY)throw new HistoryOverflow(colonyId);
     }
 
     public void unload(UUID entityId) {
@@ -124,6 +138,11 @@ public final class BindingRegistry {
         for (Observation value : restored) {
             Observation unloaded = new Observation(value.citizenId(), value.entityId(), value.bindingEpoch(), false, value.quarantined(), value.retired());
             if (checked.putIfAbsent(value.entityId(), unloaded) != null) throw new IllegalArgumentException("Duplicate observed entity UUID");
+        }
+        var counts=new java.util.HashMap<UUID,Integer>();
+        for(var value:checked.values()) {
+            UUID scope=registry.findCitizen(value.citizenId()).map(CitizenRecord::colonyId).orElse(new UUID(0,0));
+            if(counts.merge(scope,1,Integer::sum)>MAX_OBSERVATIONS_PER_COLONY)throw new IllegalArgumentException("Binding colony history envelope exceeded: "+scope);
         }
         observations.clear();
         observations.putAll(checked);

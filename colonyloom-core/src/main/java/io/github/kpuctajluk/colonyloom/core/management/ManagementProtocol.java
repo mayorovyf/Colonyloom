@@ -12,6 +12,7 @@ public final class ManagementProtocol {
     public static final int COMMAND_BYTES=8192, VIEW_BYTES=32768, STRING_BYTES=256, PAGE_ROWS=50;
     public static final int RESULT_COUNT=128, RESULT_BYTES=65536, SUBSCRIPTIONS=4, VIEW_BUFFER_BYTES=262144;
     public static final int COMMANDS_PER_SECOND=20, SEND_INTERVAL=10, ACK_TIMEOUT=100;
+    public static final int SUBSCRIPTIONS_PER_SECOND=20, VIEW_CLOSES_PER_SECOND=20;
     private ManagementProtocol() {}
     public static String text(String value) {
         Objects.requireNonNull(value);

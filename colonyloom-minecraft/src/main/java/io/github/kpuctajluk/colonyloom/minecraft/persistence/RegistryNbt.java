@@ -23,7 +23,7 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.Tag;
 
-/** Explicit version-one DTO codec; unknown records remain original NBT, never fake objects. */
+/** Explicit DTO codec; v1 migrates losslessly, unknown records remain original NBT. */
 final class RegistryNbt {
     static final List<String> ROOT_LISTS = List.of("colonies", "citizens", "buildings", "works", "demands",
             "productionOrders", "deliveries", "reservations", "allocations", "evidence", "tombstones", "pinnedDefinitions");
@@ -37,8 +37,9 @@ final class RegistryNbt {
     private RegistryNbt() {}
 
     static Decoded decode(CompoundTag root) {
-        if (integer(root, "schemaVersion") != 1) {
-            throw invalid("Unsupported Colonyloom schemaVersion; only version 1 is supported");
+        int schema=integer(root,"schemaVersion");
+        if (schema != 1 && schema != ColonySavedData.SCHEMA_VERSION) {
+            throw invalid("Unsupported Colonyloom schemaVersion; supported versions 1 and 2");
         }
         uuid(root, "checkpointId");
         Map<String, List<CompoundTag>> retained = new LinkedHashMap<>();
@@ -53,7 +54,7 @@ final class RegistryNbt {
                 case "colonies" -> 3;
                 case "citizens" -> 300;
                 case "buildings" -> 512;
-                case "bindingObservations" -> BindingRegistry.MAX_OBSERVATIONS;
+                case "bindingObservations" -> schema==1?600:BindingRegistry.MAX_OBSERVATIONS;
                 case "works", "productionOrders", "deliveries" -> 8192;
                 case "demands" -> 16384;
                 case "reservations", "allocations" -> 32768;
@@ -257,11 +258,29 @@ final class RegistryNbt {
         }
         List<BindingRegistry.Observation> observations = new ArrayList<>();
         Set<UUID> observedEntityIds = new HashSet<>();
+        Map<UUID,UUID> citizenScopes=new HashMap<>();
+        for(CitizenRecord citizen:citizens) citizenScopes.put(citizen.citizenId(),citizen.colonyId());
+        for(CompoundTag entry:retained.get("citizens")) if(entry.hasUUID("citizenId")&&entry.hasUUID("colonyId")) {
+            UUID colonyId=uuid(entry,"colonyId");
+            if(!colonyIds.contains(colonyId)&&!unknownColonies.contains(colonyId)) throw invalid("Opaque citizen references missing colony");
+            citizenScopes.put(uuid(entry,"citizenId"),colonyId);
+        }
+        Map<UUID,Integer> observationScopes=new HashMap<>();
+        UUID unknownScope=new UUID(0,0);
+        for(CompoundTag entry:retained.get("bindingObservations")) {
+            if(entry.hasUUID("entityId")&&!observedEntityIds.add(uuid(entry,"entityId"))) throw invalid("Duplicate retained binding observation");
+            UUID scope=entry.hasUUID("citizenId")?citizenScopes.getOrDefault(uuid(entry,"citizenId"),unknownScope):unknownScope;
+            if(observationScopes.merge(scope,1,Integer::sum)>BindingRegistry.MAX_OBSERVATIONS_PER_COLONY) throw invalid("Binding colony history envelope exceeded: "+scope);
+        }
         for (CompoundTag entry : known.get("bindingObservations")) {
             bool(entry, "loaded");
             if (!observedEntityIds.add(uuid(entry, "entityId"))) throw invalid("Duplicate binding observation");
-            observations.add(new BindingRegistry.Observation(optionalUuid(entry, "citizenId"), uuid(entry, "entityId"),
-                    number(entry, "bindingEpoch"), false, bool(entry, "quarantined"), bool(entry, "retired")));
+            var observation=new BindingRegistry.Observation(optionalUuid(entry, "citizenId"), uuid(entry, "entityId"),
+                    number(entry, "bindingEpoch"), false, bool(entry, "quarantined"), bool(entry, "retired"));
+            UUID scope=citizenScopes.getOrDefault(observation.citizenId(),unknownScope);
+            if(observationScopes.merge(scope,1,Integer::sum)>BindingRegistry.MAX_OBSERVATIONS_PER_COLONY) throw invalid("Binding colony history envelope exceeded: "+scope);
+            if(unknownCitizens.contains(observation.citizenId())) retained.get("bindingObservations").add(entry.copy());
+            else observations.add(observation);
         }
         Set<UUID> unknownObservedCitizens = referencedIds(retained.get("bindingObservations"), "citizenId");
         for (CitizenRecord citizen : citizens) {
@@ -377,9 +396,8 @@ final class RegistryNbt {
         return new Decoded(new RegistrySnapshot(colonies, citizens, buildings, tombstones, observations, works, claims, effects, sites, pins, storage,supply), retained, blocked);
     }
 
-    static CompoundTag encode(RegistrySnapshot snapshot, UUID checkpoint, Map<String, List<CompoundTag>> retained) {
-        CompoundTag root = new CompoundTag();
-        root.putInt("schemaVersion", 1);
+    static CompoundTag encode(CompoundTag root, RegistrySnapshot snapshot, UUID checkpoint, Map<String, List<CompoundTag>> retained) {
+        root.putInt("schemaVersion", ColonySavedData.SCHEMA_VERSION);
         root.putUUID("checkpointId", checkpoint);
         for (String key : ROOT_LISTS) root.put(key, new ListTag());
         root.put("bindingObservations", new ListTag());
@@ -479,10 +497,12 @@ final class RegistryNbt {
     private static ColonyRuntime colony(CompoundTag entry) {
         CompoundTag area = compound(entry, "territory");
         Territory territory = new Territory(string(area, "dimension"), integer(area, "minX"), integer(area, "minZ"), integer(area, "maxX"), integer(area, "maxZ"));
+        ListTag memberEntries=list(entry,"members");
+        if(memberEntries.size()>ColonyRuntime.MAX_MEMBERS)throw invalid("Colony member envelope exceeded");
         Map<UUID, MemberRank> members = new LinkedHashMap<>();
-        for (Tag tag : list(entry, "members")) {
+        for (Tag tag : memberEntries) {
             CompoundTag member = (CompoundTag) tag;
-            if (members.put(uuid(member, "playerId"), MemberRank.valueOf(string(member, "rank"))) != null) throw invalid("Duplicate member");
+            if (members.putIfAbsent(uuid(member, "playerId"), MemberRank.valueOf(string(member, "rank"))) != null) throw invalid("Duplicate member");
         }
         return new ColonyRuntime(uuid(entry, "colonyId"), string(entry, "name"), territory, uuid(entry, "ownerId"), members,
                 number(entry, "revision"), number(entry, "authorityRevision"), bool(entry, "recoveryBlocked"), optionalUuid(entry, "recoveryCheckpointId"), bool(entry, "contentBlocked"));

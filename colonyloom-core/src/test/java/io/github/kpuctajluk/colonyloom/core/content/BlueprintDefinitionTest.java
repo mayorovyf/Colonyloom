@@ -59,5 +59,26 @@ final class BlueprintDefinitionTest {
         assertEquals(new BlockOffset(0, 0, 1), pinned.markers().get("work_origin"));
         assertThrows(UnsupportedOperationException.class, () -> pinned.blocks().clear());
         assertThrows(UnsupportedOperationException.class, () -> pinned.blocks().getFirst().block().properties().clear());
+        assertEquals(new BlueprintDefinition.Bounds(0, 0, 0, 0, 0, 0), pinned.bounds());
+        assertEquals(List.of(block), pinned.palette());
+        assertThrows(UnsupportedOperationException.class, () -> pinned.palette().clear());
+    }
+
+    @Test void maximumBlueprintPinsExactBoundsAndSharedPaletteCostOnce() {
+        var blocks = new ArrayList<BlueprintDefinition.BlockSpec>(BlueprintDefinition.MAX_BLOCKS);
+        for (int y = -8; y < 8; y++) for (int z = -32; z < 32; z++) for (int x = -32; x < 32; x++)
+            blocks.add(spec(x, y, z));
+        var definition = BlueprintDefinition.create(ID, 1, blocks,
+                Map.of("work_origin", new BlockOffset(-33, 0, 0), "delivery_buffer", new BlockOffset(32, 0, 0)));
+        assertEquals(BlueprintDefinition.MAX_BLOCKS, definition.blocks().size());
+        assertEquals(new BlueprintDefinition.Bounds(-32, -8, -32, 31, 7, 31), definition.bounds());
+        assertEquals(List.of(PLANKS), definition.palette());
+        long expected = 1024 + ID.length() * 4L + 2 * 512L + BlueprintDefinition.MAX_BLOCKS * 64L
+                + 256 + 4L * (PLANKS.blockId().length() + PLANKS.itemId().length());
+        assertEquals(expected, definition.estimatedBytes());
+        var restored = new BlueprintDefinition(ID, 1, definition.digest(), definition.blocks(), definition.markers());
+        assertEquals(definition, restored);
+        assertEquals(definition.bounds(), restored.bounds());
+        assertEquals(expected, restored.estimatedBytes());
     }
 }

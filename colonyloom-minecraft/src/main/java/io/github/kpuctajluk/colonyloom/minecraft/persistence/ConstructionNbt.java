@@ -45,14 +45,27 @@ final class ConstructionNbt {
             tag.putUUID("buildingId",value.craft().workshopId());
         }
         if(value.food()!=null)tag.put("food",food(value.food()));
+        if(value.death()!=null)tag.put("death",death(value.death()));
         return tag;
     }
     static EffectRecord effect(CompoundTag tag) {
-        return new EffectRecord(uuid(tag,"operationId"),uuid(tag,"colonyId"),tag.contains("workId")?uuid(tag,"workId"):null,uuid(tag,"citizenId"),number(tag,"bindingEpoch"),
-                ActionContext.Kind.valueOf(text(tag,"kind",64)),position(compound(tag,"target")),boundedText(tag,"expectedBlock",1024),boundedText(tag,"itemId",256),
-                integer(tag,"countBefore"),integer(tag,"countAfter"),EffectRecord.State.valueOf(text(tag,"state",64)),number(tag,"revision"),
-                tag.contains("transfer")?transfer(compound(tag,"transfer")):null,tag.contains("craft")?craft(compound(tag,"craft")):null,
-                tag.contains("food")?food(compound(tag,"food")):null);
+        return new EffectRecord(uuid(tag,"operationId"),uuid(tag,"colonyId"),tag.contains("workId")?uuid(tag,"workId"):null,uuid(tag,"citizenId"),number(tag,"bindingEpoch"),ActionContext.Kind.valueOf(text(tag,"kind",64)),position(compound(tag,"target")),boundedText(tag,"expectedBlock",1024),boundedText(tag,"itemId",256),integer(tag,"countBefore"),integer(tag,"countAfter"),EffectRecord.State.valueOf(text(tag,"state",64)),number(tag,"revision"),tag.contains("transfer")?transfer(compound(tag,"transfer")):null,tag.contains("craft")?craft(compound(tag,"craft")):null,tag.contains("food")?food(compound(tag,"food")):null,tag.contains("death")?death(compound(tag,"death")):null);
+    }
+    private static CompoundTag death(EffectRecord.Death value) {
+        var tag=new CompoundTag();tag.putInt("schemaVersion",1);tag.putUUID("sourceEntityId",value.sourceEntityId());tag.putBoolean("publicationObserved",value.publicationObserved());
+        var cargo=new ListTag();var drops=new ListTag();
+        for(var valueSlot:value.cargo()) {var entry=new CompoundTag();entry.putInt("slot",valueSlot.slot());entry.put("item",StorageNbt.item(valueSlot.item()));entry.putInt("count",valueSlot.count());cargo.add(entry);}
+        for(var valueDrop:value.drops()) {var entry=new CompoundTag();entry.putUUID("entityId",valueDrop.entityId());entry.put("item",StorageNbt.item(valueDrop.item()));entry.putInt("count",valueDrop.count());drops.add(entry);}
+        tag.put("cargo",cargo);tag.put("drops",drops);return tag;
+    }
+    private static EffectRecord.Death death(CompoundTag tag) {
+        if(integer(tag,"schemaVersion")!=1)throw new IllegalArgumentException("Unsupported death evidence schema");
+        var cargo=RegistryNbt.list(tag,"cargo");var drops=RegistryNbt.list(tag,"drops");
+        if(cargo.size()>9 || drops.size()>9)throw new IllegalArgumentException("Death evidence envelope exceeded");
+        var source=new ArrayList<EffectRecord.DeathCargo>();var destination=new ArrayList<EffectRecord.DeathDrop>();
+        for(var value:cargo){var entry=(CompoundTag)value;source.add(new EffectRecord.DeathCargo(integer(entry,"slot"),StorageNbt.item(compound(entry,"item")),integer(entry,"count")));}
+        for(var value:drops){var entry=(CompoundTag)value;destination.add(new EffectRecord.DeathDrop(uuid(entry,"entityId"),StorageNbt.item(compound(entry,"item")),integer(entry,"count")));}
+        return new EffectRecord.Death(uuid(tag,"sourceEntityId"),source,destination,RegistryNbt.bool(tag,"publicationObserved"));
     }
     private static CompoundTag transfer(EffectRecord.Transfer value) {
         var tag=new CompoundTag(); tag.putInt("schemaVersion",1);
@@ -144,7 +157,8 @@ final class ConstructionNbt {
             for(var phase:EffectRecord.CraftPhase.values()) knownCraft |= phase.name().equals(text(craft,"phase",64));
         }
         return knownKind && knownState && knownCraft && (!tag.contains("transfer") || integer(compound(tag,"transfer"),"schemaVersion")==1)
-                &&(!tag.contains("food")||integer(compound(tag,"food"),"schemaVersion")==1);
+                &&(!tag.contains("food")||integer(compound(tag,"food"),"schemaVersion")==1)
+                &&(!tag.contains("death")||integer(compound(tag,"death"),"schemaVersion")==1);
     }
     static BlueprintDefinition blueprint(CompoundTag tag) {
         if(!knownBlueprintSchema(tag)) throw new IllegalArgumentException("Unsupported pinned blueprint schema");

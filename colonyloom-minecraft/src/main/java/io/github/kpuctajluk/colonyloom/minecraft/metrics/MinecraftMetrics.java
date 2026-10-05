@@ -1,6 +1,7 @@
 package io.github.kpuctajluk.colonyloom.minecraft.metrics;
 
 import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource;
+import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Budget;
 import io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics;
 import io.github.kpuctajluk.colonyloom.minecraft.runtime.MinecraftServerRuntime;
 import java.util.LinkedHashMap;
@@ -44,8 +45,10 @@ public final class MinecraftMetrics {
             result.put("constructionSites",core.registry().construction().size());
             if(runtime.navigation()!=null) result.put("navigation",runtime.navigation().diagnostics());
             result.put("navigationBackend",runtime.navigationBackendMetrics());
+            int stockQuota=core.admission().limits().budget(Budget.STORAGE_SLOT_CHECKS);
+            result.put("stockSweepCapacity",Map.of("quota",stockQuota,"sharing",core.registry().storage().index().sweepCapacity(stockQuota).name(),"maxIndexAgeTicks",io.github.kpuctajluk.colonyloom.core.storage.StockIndex.MAX_INDEX_AGE_TICKS));
             result.put("timingScopes",timingScopes());
-            result.put("futureMetrics","graph/native storage timings implemented; counts remain experimental pending full profile calibration. Views not implemented. Supported pending-production migration preserves its original checkpoint. No JVM allocation profiler attached. No separable broad vanilla world block-change timer.");
+            result.put("futureMetrics","Graph/native storage/view timings implemented; computational counts remain experimental until their measured profile and full platform barrier pass. Supported pending-production migration preserves its original checkpoint. No JVM allocation profiler attached. No separable broad vanilla world block-change timer.");
         }
         Map<String,Long> citizens=new LinkedHashMap<>();
         for(var citizen:core.registry().citizensView()) {
@@ -80,8 +83,11 @@ public final class MinecraftMetrics {
         scopes.put("DAMAGE","CitizenEntity.hurt actual call including rejected damage, death/event side effects; no autonomous combat simulation");
         scopes.put("BLOCK_CHANGE","permitted construction interaction whole call including permissions/events/item use/neighbour updates and thrown-call aftermath; not all external player world changes");
         scopes.put("BLOCK_CHANGE_EXTERNAL","same inclusive permitted interaction scope; cannot isolate vanilla neighbour update cost");
-        scopes.put("SAVE","explicit durable DTO save/checkpoint incl saveEverything, async IO flush and verified marker; autosave encode separately SAVE_ENCODE");
-        scopes.put("SAVE_ENCODE","SavedData.save DTO capture/encode; does not claim disk durability or full vanilla autosave timing");
+        scopes.put("SAVE","explicit durable DTO save/checkpoint incl saveEverything, synchronous pending IO flush and verified marker; outside MANAGED_TICK; nested SAVE_WORLD/SAVE_FLUSH/SAVE_ENCODE samples are not additive");
+        scopes.put("SAVE_ENCODE","one DTO encode; vanilla SavedData.save also captures current authority, explicit disk envelope uses its single captured DTO; no disk durability or full vanilla autosave timing");
+        scopes.put("SAVE_WORLD","one synchronous Minecraft saveEverything(true,true,true), including vanilla save/flush work and nested DTO encode; explicit checkpoints only, not ordinary autosave");
+        scopes.put("SAVE_FLUSH","one synchronous flushPendingIo callback waiting for pending Minecraft IO; includes unsuccessful/throwing calls, no asynchronous Colonyloom IO");
+        scopes.put("COMPACTION", "explicit verified checkpoint, terminal history retirement and post-compaction durable snapshot; outside MANAGED_TICK, included in production MSPT; nested SAVE samples are not additive");
         scopes.put("LOAD","bounded preflight, registry restore/session reconciliation and SavedData attachment; not complete world startup");
         return Map.copyOf(scopes);
     }

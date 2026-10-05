@@ -45,12 +45,11 @@ public final class ColonyPersistence {
         long loadStart=System.nanoTime();
         try {
             boolean existing = DurableNbt.exists(persistence.statePath);
-            ColonySavedData loaded = existing
-                    ? ColonySavedData.preflight(persistence.statePath, server.registryAccess())
-                    : ColonySavedData.empty(runtime.registry().snapshot());
+            boolean markerExisting = DurableNbt.exists(persistence.markerPath);
+            ColonySavedData loaded = preflightPair(persistence.statePath,persistence.markerPath,server.registryAccess(),runtime.registry().snapshot());
             // Validate every known core identity/reference before exposing data to vanilla autosave.
             runtime.registry().restore(loaded.snapshot());
-            boolean clean = !existing || persistence.previousMarkerClean(loaded.checkpointId());
+            boolean clean = !existing && !markerExisting || persistence.previousMarkerClean(loaded.checkpointId());
             persistence.data = loaded;
             runtime.registry().setBeforeMutation(persistence::ensureSessionDirty);
             if (!loaded.contentBlockedColonies().isEmpty()) {
@@ -79,6 +78,12 @@ public final class ColonyPersistence {
         }
         return persistence;
     }
+    /** Shared by startup and native pair fixtures; never attaches a rejected DTO to vanilla autosave. */
+    public static ColonySavedData preflightPair(Path state,Path marker,net.minecraft.core.HolderLookup.Provider registries,io.github.kpuctajluk.colonyloom.core.persistence.RegistrySnapshot empty) throws IOException {
+        boolean existing=DurableNbt.exists(state),markerExisting=DurableNbt.exists(marker);
+        if(!existing && markerExisting)throw new IOException("Colonyloom DTO missing while session marker exists; restore the original checkpoint, never initialize empty state");
+        return existing?ColonySavedData.preflight(state,registries):ColonySavedData.empty(empty);
+    }
 
     public boolean isAvailable() {
         requireThread();
@@ -98,6 +103,12 @@ public final class ColonyPersistence {
     public int retainedRecordCount() {
         requireAvailable();
         return data.retainedRecordCount();
+    }
+    public ColonySavedData.RetainedReport retainedReport(UUID colonyId) {
+        requireAvailable();return data.retainedReport(colonyId);
+    }
+    public boolean retainsCitizen(UUID citizenId) {
+        requireAvailable();return data.retainsCitizen(citizenId);
     }
 
     /** REQUIRED before the first durable mutation, including identity binding transitions. */
@@ -140,10 +151,10 @@ public final class ColonyPersistence {
         try {
         requireAvailable(); ensureSessionDirty();
         UUID checkpoint=UUID.randomUUID(); data.beginCheckpoint(checkpoint,runtime.registry().snapshot());
-        CompoundTag expected=data.diskEnvelope(server.registryAccess());
+        CompoundTag expected=data.diskEnvelope();
         try {
-            if(!server.saveEverything(true,true,true)) throw new IOException("Minecraft did not save any level");
-            flushPendingIo.run();
+            saveWorld();
+            flushPending();
             DurableNbt.verifyForced(statePath,expected,DurableNbt.STATE_LIMIT);
             DurableNbt.writeVerified(markerPath,marker(false,checkpoint),DurableNbt.MARKER_LIMIT);
             return true;
@@ -159,12 +170,10 @@ public final class ColonyPersistence {
         ensureSessionDirty();
         UUID checkpoint = UUID.randomUUID();
         data.beginCheckpoint(checkpoint, runtime.registry().snapshot());
-        CompoundTag expected = data.diskEnvelope(server.registryAccess());
+        CompoundTag expected = data.diskEnvelope();
         try {
-            if (!server.saveEverything(true, true, true)) {
-                throw new IOException("Minecraft did not save any level");
-            }
-            flushPendingIo.run();
+            saveWorld();
+            flushPending();
             // SavedData.save catches IOException and even clears its dirty flag on failure.
             // saveEverything's boolean only reports that levels were visited, not DTO durability.
             DurableNbt.verifyForced(statePath, expected, DurableNbt.STATE_LIMIT);
@@ -208,9 +217,27 @@ public final class ColonyPersistence {
     }
 
     private void writeSnapshot() throws IOException {
-        flushPendingIo.run();
-        DurableNbt.writeVerified(statePath, data.diskEnvelope(server.registryAccess()), DurableNbt.STATE_LIMIT);
+        flushPending();
+        DurableNbt.writeVerified(statePath, data.diskEnvelope(), DurableNbt.STATE_LIMIT);
         data.setDirty(false);
+    }
+
+    private void saveWorld() throws IOException {
+        long start = System.nanoTime();
+        try {
+            if (!server.saveEverything(true, true, true)) throw new IOException("Minecraft did not save any level");
+        } finally {
+            runtime.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.SAVE_WORLD, System.nanoTime() - start);
+        }
+    }
+
+    private void flushPending() {
+        long start = System.nanoTime();
+        try {
+            flushPendingIo.run();
+        } finally {
+            runtime.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.SAVE_FLUSH, System.nanoTime() - start);
+        }
     }
 
     private void requireThread() {

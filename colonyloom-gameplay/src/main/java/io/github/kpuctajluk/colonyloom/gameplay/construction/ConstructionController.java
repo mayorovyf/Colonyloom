@@ -11,6 +11,7 @@ import io.github.kpuctajluk.colonyloom.core.content.BlueprintDefinition;
 import io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane;
 import io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry;
 import io.github.kpuctajluk.colonyloom.core.work.WorkOrder;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
@@ -20,8 +21,9 @@ public final class ConstructionController implements ConstructionCommands {
     public record Target(WorldPosition position,BlockDescriptor expected) {
         public Target { Objects.requireNonNull(position); Objects.requireNonNull(expected); }
     }
-    public record Layout(Target[] targets,WorldPosition workOrigin,WorldPosition deliveryBuffer,TargetClaimRegistry.Snapshot claim) {
-        public Layout { Objects.requireNonNull(targets); Objects.requireNonNull(workOrigin); Objects.requireNonNull(deliveryBuffer); Objects.requireNonNull(claim); if(targets.length==0) throw new IllegalArgumentException("Empty construction"); targets=targets.clone(); }
+    /** Targets are an immutable indexed view over the pinned definition, never a copied full layout. */
+    public record Layout(List<Target> targets,WorldPosition workOrigin,WorldPosition deliveryBuffer,TargetClaimRegistry.Snapshot claim) {
+        public Layout { Objects.requireNonNull(targets); Objects.requireNonNull(workOrigin); Objects.requireNonNull(deliveryBuffer); Objects.requireNonNull(claim); if(targets.isEmpty()) throw new IllegalArgumentException("Empty construction"); }
     }
     public interface Geometry {
         Layout layout(UUID workId,UUID colonyId,BlueprintDefinition definition,WorldPosition origin,int rotation);
@@ -37,7 +39,7 @@ public final class ConstructionController implements ConstructionCommands {
         geometry.validate(layout); var colony=registry.colony(site.colonyId());
         if(!colony.territory().contains(layout.workOrigin())) throw new IllegalArgumentException("Pinned work origin outside territory");
         if(!colony.territory().contains(layout.deliveryBuffer())) throw new IllegalArgumentException("Pinned delivery buffer outside territory");
-        for(var target:layout.targets()) if(!colony.territory().contains(target.position())) throw new IllegalArgumentException("Pinned target outside territory");
+        validateTerritory(colony.territory(),layout);
         var stored=registry.targetClaims().snapshots().stream().filter(claim -> claim.ownerId().equals(site.workId())).findFirst().orElse(null);
         if(!site.closed() && (stored==null || !stored.equals(layout.claim()))) throw new IllegalArgumentException("Pinned geometry differs from authoritative target claim");
         return layout;
@@ -46,13 +48,16 @@ public final class ConstructionController implements ConstructionCommands {
         registry.requireOwner(); var colony=registry.colony(colonyId); MemberRank rank=colony.rank(context.actorId());
         if(rank!=MemberRank.OWNER && rank!=MemberRank.MANAGER) throw new SecurityException("Construction requires colony manager");
         if(!colony.available()) throw new IllegalStateException("Colony unavailable");
-        var definition=available.get(blueprintId); if(definition==null) throw new IllegalArgumentException("Unknown blueprint");
+        var availableDefinition=available.get(blueprintId); if(availableDefinition==null) throw new IllegalArgumentException("Unknown blueprint");
+        // Reuse the authoritative pin after content reload; avoid comparing all blocks on each build.
+        var definition=registry.construction().definitions().stream().filter(pin -> pin.digest().equals(availableDefinition.digest()))
+                .findFirst().orElse(availableDefinition);
         var site=new ConstructionSnapshot(workId,colonyId,definition.digest(),origin,rotation,context.actorId(),0,0,0,0,false);
         registry.construction().validateNew(site,definition);
         Layout layout=geometry.layout(workId,colonyId,definition,origin,rotation); geometry.validate(layout);
         if(!colony.territory().contains(layout.workOrigin())) throw new IllegalArgumentException("Construction work origin outside territory");
         if(!colony.territory().contains(layout.deliveryBuffer())) throw new IllegalArgumentException("Construction delivery buffer outside territory");
-        for(var target:layout.targets()) if(!colony.territory().contains(target.position())) throw new IllegalArgumentException("Construction blocks outside territory");
+        validateTerritory(colony.territory(),layout);
         if(registry.storage().registrations(colonyId).stream().noneMatch(value -> value.role().equals("construction")
                 && value.address().equals(layout.deliveryBuffer()) && value.storages().stream().allMatch(id -> id.bindingEpoch()==0)))
             throw new IllegalArgumentException("Register the construction barrel at the transformed delivery_buffer marker before building");
@@ -65,6 +70,12 @@ public final class ConstructionController implements ConstructionCommands {
             prepared.commit();
             return work;
         }
+    }
+    private static void validateTerritory(io.github.kpuctajluk.colonyloom.core.colony.Territory territory,Layout layout) {
+        var claim=layout.claim();
+        if(!territory.dimension().equals(claim.dimension()) || claim.minX()<territory.minX() || claim.maxX()>territory.maxX()
+                || claim.minZ()<territory.minZ() || claim.maxZ()>territory.maxZ())
+            throw new IllegalArgumentException("Construction blocks outside territory");
     }
     public void advance(UUID workId,boolean consumed) { var site=registry.construction().site(workId); registry.construction().update(ConstructionSite.advance(site,consumed)); }
     public void revisit(UUID workId,int cursor) {

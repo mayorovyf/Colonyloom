@@ -110,7 +110,7 @@ public final class RecipeExecutor {
         WorkOrder work=citizen.assignedWorkId()==null?null:registry.workBoard().work(citizen.assignedWorkId());
         var effect=new EffectRecord(UUID.randomUUID(),context.colonyId(),work==null?null:work.id(),context.citizenId(),epoch,
                 ActionContext.Kind.RECIPE_CRAFT,context.target(),"minecraft:crafting_table",recipe.output().itemId(),
-                fact.outputBefore(),fact.outputBefore(),EffectRecord.State.PREPARED,0,null,fact,null);
+                fact.outputBefore(),fact.outputBefore(),EffectRecord.State.PREPARED,0,null,fact,null,null);
         try { registry.effects().prepare(effect,work==null?Lane.NORMAL:work.lane()); }
         catch(AdmissionLedger.AdmissionException | IllegalArgumentException unavailable) { return denied(WorkOrder.Reason.STATE_LIMIT); }
         boolean started=false, measured=false; int produced=0;

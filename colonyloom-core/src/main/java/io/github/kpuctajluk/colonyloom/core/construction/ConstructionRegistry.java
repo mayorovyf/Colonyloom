@@ -110,14 +110,7 @@ public final class ConstructionRegistry {
     }
     // Shared palette descriptors are charged once; positions only carry an offset and palette index.
     public static long estimatedBytes(BlueprintDefinition definition) {
-        long bytes=1024+definition.id().length()*4L+definition.markers().size()*512L+definition.blocks().size()*64L;
-        var palette=new HashSet<io.github.kpuctajluk.colonyloom.core.content.BlockDescriptor>();
-        for(var spec:definition.blocks()) if(palette.add(spec.block())) {
-            if(palette.size()>512) throw new IllegalArgumentException("Pinned palette cap");
-            var block=spec.block(); bytes+=256+4L*(block.blockId().length()+block.itemId().length());
-            for(var property:block.properties().entrySet()) bytes+=64+4L*(property.getKey().length()+property.getValue().length());
-        }
-        return bytes;
+        return definition.estimatedBytes();
     }
     public PreparedRestore prepareRestore(List<ConstructionSnapshot> saved,List<BlueprintDefinition> definitions,AdmissionLedger replacement) {
         registry.requireOwner(); if(saved.size()>MAX_SITES || definitions.size()>MAX_VERSIONS) throw new IllegalArgumentException("Construction envelope exceeded");

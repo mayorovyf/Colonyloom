@@ -31,6 +31,8 @@ public final class AdmissionLedger {
     private SimulationLimits limits;
     private final int[] used = new int[RESOURCE_COUNT];
     private final int[][] lanes = new int[LANES.length][RESOURCE_COUNT];
+    // NORMAL and CRITICAL have separate diagnostic unions but share one active-space reserve.
+    private final int[] ordinaryOverlap = new int[RESOURCE_COUNT];
     private final int[] highWater = new int[RESOURCE_COUNT];
     private final long[] rejected = new long[RESOURCE_COUNT];
     private final Map<UUID, ColonyUsage> colonies = new HashMap<>();
@@ -41,6 +43,7 @@ public final class AdmissionLedger {
 
     private static final class ColonyUsage {
         final int[][] lanes = new int[LANES.length][RESOURCE_COUNT];
+        final int[] sharedLaneOverlap = new int[RESOURCE_COUNT];
         int leases;
         boolean active;
         ColonyUsage nextActive;
@@ -129,6 +132,15 @@ public final class AdmissionLedger {
 
     /** Allocation-free preflight for bounded queue retries; counts actual capacity denials. */
     public boolean canReserve(UUID colony, Lane lane, Map<Resource, Integer> costs) {
+        return preflight(colony, lane, costs, false);
+    }
+
+    /** Same non-reserving capacity gate, retaining the typed denial for direct commands. */
+    public void requireCapacity(UUID colony, Lane lane, Map<Resource, Integer> costs) {
+        preflight(colony, lane, costs, true);
+    }
+
+    private boolean preflight(UUID colony, Lane lane, Map<Resource, Integer> costs, boolean throwing) {
         ownerCheck.run();
         Objects.requireNonNull(colony);
         Objects.requireNonNull(lane);
@@ -143,12 +155,19 @@ public final class AdmissionLedger {
         if (costs.getOrDefault(Resource.CACHE_ENTRIES_PER_OWNER, 0) > costs.getOrDefault(Resource.CACHE_ENTRIES, 0)) {
             throw new IllegalArgumentException("Per-owner caches must also account for global cache entries");
         }
+        refreshCriticalBlockade();
+        if(lane==Lane.NORMAL && criticalFailure!=null && !costs.containsKey(Resource.READY_ENTRIES)) {
+            if (throwing) reject(criticalFailure, Lane.CRITICAL);
+            rejected[criticalFailure.ordinal()]++;
+            return false;
+        }
         ColonyUsage colonyUsage = colonies.get(colony);
         for (Resource resource : RESOURCES) {
             int amount = costs.getOrDefault(resource, 0);
             int failure = capacityFailure(colonyUsage, resource, lane == Lane.NORMAL ? amount : 0,
                     lane == Lane.CRITICAL ? amount : 0, lane == Lane.SERVICE ? amount : 0, lane);
             if (failure >= 0) {
+                if (throwing) reject(resource, lane == Lane.CRITICAL ? Lane.CRITICAL : LANES[failure]);
                 rejected[resource.ordinal()]++;
                 if (lane == Lane.CRITICAL) recordCriticalFailure(resource);
                 return false;
@@ -181,8 +200,7 @@ public final class AdmissionLedger {
         }
         if (resource == Resource.LOADED_FOOTPRINT) {
             if ((long) lanes[Lane.SERVICE.ordinal()][index] + service > total / 8) return Lane.SERVICE.ordinal();
-            if ((long) lanes[Lane.NORMAL.ordinal()][index] + lanes[Lane.CRITICAL.ordinal()][index]
-                    + normal + critical > total - total / 8) return requestedLane.ordinal();
+            if ((long) ordinaryFootprint() + normal + critical > total - total / 8) return requestedLane.ordinal();
         }
         return -1;
     }
@@ -225,6 +243,7 @@ public final class AdmissionLedger {
     public int laneCapacity(Resource resource, Lane lane) {
         ownerCheck.run();
         int total = limits.resource(resource);
+        if (resource == Resource.LOADED_FOOTPRINT) return lane == Lane.SERVICE ? total / 8 : total - total / 8;
         if (!resource.partitioned()) return total;
         int normal = (int) ((long) total * 3 / 4);
         int critical = total / 8;
@@ -241,7 +260,122 @@ public final class AdmissionLedger {
         ownerCheck.run();ColonyUsage usage=colonies.get(colonyId);
         if(usage==null)return 0;int result=0;
         for(Lane lane:LANES)result=Math.addExact(result,usage.lanes[lane.ordinal()][resource.ordinal()]);
+        result -= usage.sharedLaneOverlap[resource.ordinal()];
         return result;
+    }
+
+    public int used(UUID colonyId, Resource resource, Lane lane) {
+        ownerCheck.run(); ColonyUsage usage = colonies.get(colonyId);
+        return usage == null ? 0 : usage.lanes[lane.ordinal()][resource.ordinal()];
+    }
+
+    /** Unique loaded cells used by either active lane, not the sum of their overlapping shares. */
+    public int ordinaryFootprint() {
+        ownerCheck.run(); int index = Resource.LOADED_FOOTPRINT.ordinal();
+        return lanes[Lane.NORMAL.ordinal()][index] + lanes[Lane.CRITICAL.ordinal()][index] - ordinaryOverlap[index];
+    }
+
+    /** Atomic all-ring preflight; physical additions and reserve-union additions are independent. */
+    public boolean canReserveFootprint(Lane lane, int loaded, int block, int entity, int ordinary, int service) {
+        ownerCheck.run(); Objects.requireNonNull(lane);
+        if (loaded < 0 || block < 0 || entity < 0 || ordinary < 0 || service < 0)
+            throw new IllegalArgumentException("Negative footprint addition");
+        refreshCriticalBlockade();
+        if (lane == Lane.NORMAL && criticalFailure != null) {
+            rejected[criticalFailure.ordinal()]++;
+            return false;
+        }
+        Resource failure = null;
+        if ((long) used(Resource.LOADED_FOOTPRINT) + loaded > limits.resource(Resource.LOADED_FOOTPRINT)
+                || (long) ordinaryFootprint() + ordinary > limits.resource(Resource.LOADED_FOOTPRINT) - limits.resource(Resource.LOADED_FOOTPRINT) / 8
+                || (long) used(Resource.LOADED_FOOTPRINT, Lane.SERVICE) + service > limits.resource(Resource.LOADED_FOOTPRINT) / 8)
+            failure = Resource.LOADED_FOOTPRINT;
+        else if ((long) used(Resource.BLOCK_TICKING) + block > limits.resource(Resource.BLOCK_TICKING)) failure = Resource.BLOCK_TICKING;
+        else if ((long) used(Resource.ENTITY_TICKING) + entity > limits.resource(Resource.ENTITY_TICKING)) failure = Resource.ENTITY_TICKING;
+        if (failure == null) return true;
+        rejected[failure.ordinal()]++;
+        if (lane == Lane.CRITICAL) recordCriticalFailure(failure);
+        return false;
+    }
+
+    /** One physical cell/resource with reference-counted lane and colony/lane union shares. */
+    public final class Footprint {
+        private final Resource resource;
+        private final int[] references = new int[LANES.length];
+        private final Map<UUID, int[]> scopes = new HashMap<>();
+        private int total;
+
+        private Footprint(Resource resource) { this.resource = resource; }
+        public int references() { ownerCheck.run(); return total; }
+        public int references(Lane lane) { ownerCheck.run(); return references[lane.ordinal()]; }
+        public int ordinaryReferences() { ownerCheck.run(); return references[Lane.NORMAL.ordinal()] + references[Lane.CRITICAL.ordinal()]; }
+
+        public void retain(UUID colony, Lane lane) {
+            ownerCheck.run(); Objects.requireNonNull(colony); Objects.requireNonNull(lane);
+            int index = resource.ordinal(), l = lane.ordinal();
+            int physical = total == 0 ? 1 : 0;
+            int ordinary = lane != Lane.SERVICE && ordinaryReferences() == 0 ? 1 : 0;
+            int service = lane == Lane.SERVICE && references[l] == 0 ? 1 : 0;
+            if (!canReserveFootprint(lane, resource == Resource.LOADED_FOOTPRINT ? physical : 0,
+                    resource == Resource.BLOCK_TICKING ? physical : 0, resource == Resource.ENTITY_TICKING ? physical : 0,
+                    resource == Resource.LOADED_FOOTPRINT ? ordinary : 0, resource == Resource.LOADED_FOOTPRINT ? service : 0))
+                throw new AdmissionException(resource, lane);
+            ColonyUsage usage = colonies.computeIfAbsent(colony, ignored -> new ColonyUsage());
+            int[] scope = scopes.get(colony);
+            if (scope == null) { scope = new int[LANES.length + 1]; scopes.put(colony, scope); usage.leases++; }
+            if (scope[l]++ == 0) {
+                usage.lanes[l][index]++;
+                if (scope[LANES.length] != 0) usage.sharedLaneOverlap[index]++;
+            }
+            scope[LANES.length]++;
+            if (references[l]++ == 0) {
+                lanes[l][index]++;
+                if (lane != Lane.SERVICE && ordinary == 0) ordinaryOverlap[index]++;
+            }
+            total++; used[index] += physical;
+            highWater[index] = Math.max(highWater[index], used[index]);
+        }
+
+        public void release(UUID colony, Lane lane) {
+            ownerCheck.run(); int[] scope = scopes.get(colony); int l = lane.ordinal(), index = resource.ordinal();
+            if (scope == null || scope[l] == 0) throw new IllegalStateException("Missing footprint share");
+            ColonyUsage usage = colonies.get(colony);
+            scope[LANES.length]--;
+            if (--scope[l] == 0) {
+                usage.lanes[l][index]--;
+                if (scope[LANES.length] != 0) usage.sharedLaneOverlap[index]--;
+            }
+            if (scope[LANES.length] == 0) {
+                scopes.remove(colony);
+                if (--usage.leases == 0) colonies.remove(colony);
+            }
+            if (--references[l] == 0) {
+                lanes[l][index]--;
+                if (lane != Lane.SERVICE && ordinaryReferences() != 0) ordinaryOverlap[index]--;
+            }
+            if (--total == 0) used[index]--;
+        }
+    }
+
+    public Footprint footprint(Resource resource) {
+        ownerCheck.run(); Objects.requireNonNull(resource);
+        if (resource != Resource.LOADED_FOOTPRINT && resource != Resource.BLOCK_TICKING && resource != Resource.ENTITY_TICKING)
+            throw new IllegalArgumentException("Not a chunk footprint resource");
+        return new Footprint(resource);
+    }
+
+    /** Read-only eviction feasibility: withdrawal must actually relieve any normal blockade. */
+    public boolean footprintBlockadeClears(Lane lane, int[] reclaimed, int[] reclaimedCritical) {
+        ownerCheck.run(); Objects.requireNonNull(lane); refreshCriticalBlockade();
+        if (lane != Lane.NORMAL || criticalFailure == null) return true;
+        int ring = switch (criticalFailure) {
+            case LOADED_FOOTPRINT -> 0;
+            case BLOCK_TICKING -> 1;
+            case ENTITY_TICKING -> 2;
+            default -> -1;
+        };
+        return ring >= 0 && (used[criticalFailure.ordinal()] - reclaimed[ring] < failureUsed
+                || lanes[Lane.CRITICAL.ordinal()][criticalFailure.ordinal()] - reclaimedCritical[ring] < failureCritical);
     }
     public int highWater(Resource resource) { ownerCheck.run(); return highWater[resource.ordinal()]; }
     public long rejected(Resource resource) { ownerCheck.run(); return rejected[resource.ordinal()]; }

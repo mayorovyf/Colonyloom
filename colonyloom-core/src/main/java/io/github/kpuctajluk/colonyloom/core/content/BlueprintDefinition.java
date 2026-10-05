@@ -16,8 +16,18 @@ import java.util.Objects;
 import java.util.TreeMap;
 
 /** Self-contained pinned logical definition; loading the originating datapack is not required. */
-public record BlueprintDefinition(String id, int version, String digest,
-        List<BlockSpec> blocks, Map<String, BlockOffset> markers) {
+public final class BlueprintDefinition {
+    private final String id;
+    private final int version;
+    private final String digest;
+    private final List<BlockSpec> blocks;
+    private final Map<String, BlockOffset> markers;
+    private final Bounds bounds;
+    private final List<BlockDescriptor> palette;
+    private final long estimatedBytes;
+
+    /** Exact occupied-block extrema, computed once while accepting the immutable definition. */
+    public record Bounds(int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {}
     public static final int SCHEMA_VERSION = 1;
     public static final int MAX_BLOCKS = 65_536;
     public static final int MAX_MARKERS = 16;
@@ -25,7 +35,8 @@ public record BlueprintDefinition(String id, int version, String digest,
             .comparingInt((BlockSpec spec) -> spec.offset().y())
             .thenComparingInt(spec -> spec.offset().z()).thenComparingInt(spec -> spec.offset().x());
 
-    public BlueprintDefinition {
+    public BlueprintDefinition(String id, int version, String digest,
+            List<BlockSpec> blocks, Map<String, BlockOffset> markers) {
         BlockDescriptor.validateIdentifier(id);
         if (version < 1) throw new IllegalArgumentException("Blueprint version must be positive");
         Objects.requireNonNull(blocks, "blocks");
@@ -33,11 +44,14 @@ public record BlueprintDefinition(String id, int version, String digest,
         if (blocks.isEmpty() || blocks.size() > MAX_BLOCKS) throw new IllegalArgumentException("Invalid blueprint block count");
         if (markers.size() > MAX_MARKERS) throw new IllegalArgumentException("Too many blueprint markers");
         var positions = new HashSet<BlockOffset>();
+        var descriptors = new java.util.LinkedHashSet<BlockDescriptor>();
         int minX = 64, minY = 64, minZ = 64, maxX = -64, maxY = -64, maxZ = -64;
         for (BlockSpec spec : blocks) {
             Objects.requireNonNull(spec, "block spec");
             BlockOffset pos = spec.offset();
             if (!positions.add(pos)) throw new IllegalArgumentException("Duplicate blueprint position " + pos);
+            descriptors.add(spec.block());
+            if (descriptors.size() > 512) throw new IllegalArgumentException("Pinned palette cap");
             minX = Math.min(minX, pos.x()); minY = Math.min(minY, pos.y()); minZ = Math.min(minZ, pos.z());
             maxX = Math.max(maxX, pos.x()); maxY = Math.max(maxY, pos.y()); maxZ = Math.max(maxZ, pos.z());
         }
@@ -55,7 +69,38 @@ public record BlueprintDefinition(String id, int version, String digest,
         String actualDigest = canonicalDigest(id, version, blocks, markers);
         if (digest != null && !actualDigest.equals(digest)) throw new IllegalArgumentException("Blueprint digest mismatch");
         digest = actualDigest;
+        this.id = id;
+        this.version = version;
+        this.digest = digest;
+        this.blocks = blocks;
+        this.markers = markers;
+        this.bounds = new Bounds(minX, minY, minZ, maxX, maxY, maxZ);
+        this.palette = List.copyOf(descriptors);
+        long bytes = 1024 + id.length() * 4L + markers.size() * 512L + blocks.size() * 64L;
+        for (var block : palette) {
+            bytes += 256 + 4L * (block.blockId().length() + block.itemId().length());
+            for (var property : block.properties().entrySet())
+                bytes += 64 + 4L * (property.getKey().length() + property.getValue().length());
+        }
+        this.estimatedBytes = bytes;
     }
+
+    public String id() { return id; }
+    public int version() { return version; }
+    public String digest() { return digest; }
+    public List<BlockSpec> blocks() { return blocks; }
+    public Map<String, BlockOffset> markers() { return markers; }
+    public Bounds bounds() { return bounds; }
+    public List<BlockDescriptor> palette() { return palette; }
+    public long estimatedBytes() { return estimatedBytes; }
+
+    @Override public boolean equals(Object other) {
+        if (this == other) return true;
+        return other instanceof BlueprintDefinition definition && version == definition.version
+                && id.equals(definition.id) && digest.equals(definition.digest)
+                && blocks.equals(definition.blocks) && markers.equals(definition.markers);
+    }
+    @Override public int hashCode() { return digest.hashCode(); }
 
     /** Creates a new definition; a persisted definition supplies its digest to the constructor. */
     public static BlueprintDefinition create(String id, int version, List<BlockSpec> blocks, Map<String, BlockOffset> markers) {

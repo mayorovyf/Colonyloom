@@ -11,8 +11,39 @@ import java.util.UUID;
 /** Evidence, not a transaction across Minecraft chunks, entities and colony SavedData. */
 public record EffectRecord(UUID operationId, UUID colonyId, UUID workId, UUID citizenId,
         long bindingEpoch, ActionContext.Kind kind, WorldPosition target, String expectedBlock,
-        String itemId, int countBefore, int countAfter, State state, long revision, Transfer transfer, Craft craft, Food food) {
+        String itemId, int countBefore, int countAfter, State state, long revision, Transfer transfer, Craft craft, Food food, Death death) {
     public enum State { PREPARED, OBSERVED, AMBIGUOUS, ACCEPTED }
+    /** Existing cargo and native item UUIDs; evidence only, never a command to respawn drops. */
+    public record DeathCargo(int slot, ItemDescriptor item, int count) {
+        public DeathCargo {
+            Objects.requireNonNull(item);
+            if(slot<0 || slot>=9 || count<1 || count>99) throw new IllegalArgumentException("Invalid death cargo");
+        }
+    }
+    public record DeathDrop(UUID entityId, ItemDescriptor item, int count) {
+        public DeathDrop {
+            Objects.requireNonNull(entityId); Objects.requireNonNull(item);
+            if(count<1 || count>99) throw new IllegalArgumentException("Invalid death drop");
+        }
+    }
+    public record Death(UUID sourceEntityId, List<DeathCargo> cargo, List<DeathDrop> drops, boolean publicationObserved) {
+        public Death {
+            Objects.requireNonNull(sourceEntityId); cargo=List.copyOf(cargo); drops=List.copyOf(drops);
+            if(cargo.size()>9 || drops.size()>9 || !publicationObserved && !drops.isEmpty()) throw new IllegalArgumentException("Death evidence envelope exceeded");
+            var slots=new HashSet<Integer>(); var ids=new HashSet<UUID>();
+            for(var value:cargo) if(!slots.add(value.slot())) throw new IllegalArgumentException("Duplicate death cargo slot");
+            for(var value:drops) if(!ids.add(value.entityId())) throw new IllegalArgumentException("Duplicate death drop UUID");
+        }
+        public boolean sameAttempt(Death next) { return next!=null && sourceEntityId.equals(next.sourceEntityId) && cargo.equals(next.cargo); }
+        public int cargoCount() { return cargo.stream().mapToInt(DeathCargo::count).sum(); }
+        public boolean conserved() {
+            if(!publicationObserved) return false;
+            var counts=new java.util.HashMap<ItemDescriptor,Integer>();
+            for(var value:cargo) counts.merge(value.item(),value.count(),Integer::sum);
+            for(var value:drops) counts.merge(value.item(),-value.count(),Integer::sum);
+            return counts.values().stream().allMatch(value -> value==0);
+        }
+    }
     public record Food(StockRegion slot, ItemDescriptor item, UUID shareId, UUID demandId,
             int foodBefore, int foodAfter, long timerBefore, long timerAfter) {
         public Food {
@@ -161,29 +192,33 @@ public record EffectRecord(UUID operationId, UUID colonyId, UUID workId, UUID ci
                 || state == State.PREPARED && !food.unchanged()
                 || state == State.OBSERVED && (countBefore - countAfter != 1 || food.foodAfter() != Math.min(20, food.foodBefore() + 5) || food.timerBefore() != food.timerAfter())))
             throw new IllegalArgumentException("Food evidence does not match physical consumption");
+        if(death!=null && (kind!=ActionContext.Kind.DEATH || death.cargoCount()!=countBefore
+                || state==State.PREPARED && death.publicationObserved()
+                || state==State.OBSERVED && (countAfter!=0 || !death.conserved())))
+            throw new IllegalArgumentException("Death evidence does not match native finality");
     }
     public EffectRecord observed(int after, boolean ambiguous) {
-        return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,
-                itemId,countBefore,after,ambiguous ? State.AMBIGUOUS : State.OBSERVED,Math.incrementExact(revision),transfer,craft,food);
+        return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,itemId,countBefore,after,ambiguous ? State.AMBIGUOUS : State.OBSERVED,Math.incrementExact(revision),transfer,craft,food,death);
     }
     public EffectRecord observedTransfer(Transfer fact, boolean ambiguous) {
         if (transfer == null || !transfer.sameAttempt(fact)) throw new IllegalArgumentException("Transfer attempt changed");
-        return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,
-                itemId,countBefore,fact.sourceAfter(),ambiguous ? State.AMBIGUOUS : State.OBSERVED,Math.incrementExact(revision),fact,craft,food);
+        return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,itemId,countBefore,fact.sourceAfter(),ambiguous ? State.AMBIGUOUS : State.OBSERVED,Math.incrementExact(revision),fact,craft,food,death);
     }
     public EffectRecord observedCraft(Craft fact,boolean ambiguous) {
         if(craft==null || !craft.sameAttempt(fact) || fact.phase().ordinal()<craft.phase().ordinal())
             throw new IllegalArgumentException("Craft attempt changed or phase rewound");
-        return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,
-                itemId,countBefore,fact.outputAfter(),ambiguous?State.AMBIGUOUS:State.OBSERVED,Math.incrementExact(revision),transfer,fact,food);
+        return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,itemId,countBefore,fact.outputAfter(),ambiguous?State.AMBIGUOUS:State.OBSERVED,Math.incrementExact(revision),transfer,fact,food,death);
     }
     public EffectRecord observedFood(Food fact, int after, boolean ambiguous) {
         if (food == null || !food.sameAttempt(fact)) throw new IllegalArgumentException("Food attempt changed");
+        return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,itemId,countBefore,after,ambiguous?State.AMBIGUOUS:State.OBSERVED,Math.incrementExact(revision),transfer,craft,fact,death);
+    }
+    public EffectRecord observedDeath(Death fact,int after,boolean ambiguous) {
+        if(death==null || !death.sameAttempt(fact)) throw new IllegalArgumentException("Death attempt changed");
         return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,
-                itemId,countBefore,after,ambiguous?State.AMBIGUOUS:State.OBSERVED,Math.incrementExact(revision),transfer,craft,fact);
+                itemId,countBefore,after,ambiguous?State.AMBIGUOUS:State.OBSERVED,Math.incrementExact(revision),transfer,craft,food,fact);
     }
     public EffectRecord accepted() {
-        return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,
-                itemId,countBefore,countAfter,State.ACCEPTED,Math.incrementExact(revision),transfer,craft,food);
+        return new EffectRecord(operationId,colonyId,workId,citizenId,bindingEpoch,kind,target,expectedBlock,itemId,countBefore,countAfter,State.ACCEPTED,Math.incrementExact(revision),transfer,craft,food,death);
     }
 }

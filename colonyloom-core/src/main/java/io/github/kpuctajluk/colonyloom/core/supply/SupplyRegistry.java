@@ -23,17 +23,47 @@ public final class SupplyRegistry {
     private final Map<UUID, AdmissionLedger.Lease> leases = new LinkedHashMap<>();
     private final Map<UUID, UUID> obligationShares = new HashMap<>();
     private final Map<UUID, Set<UUID>> kitShares = new HashMap<>();
-    private final Map<UUID, Set<UUID>> orderShares = new HashMap<>(), demandShares = new HashMap<>();
-    private final List<UUID> deliveryIds = new ArrayList<>();
-    private final Map<UUID, Integer> deliveryOffsets = new HashMap<>();
-    private final List<UUID> criticalDeliveryIds = new ArrayList<>();
-    private final Map<UUID, Integer> criticalDeliveryOffsets = new HashMap<>();
+    private final Map<UUID, Set<UUID>> orderShares = new HashMap<>(), demandShares = new HashMap<>(), productionShares = new HashMap<>(), ownerDemands = new HashMap<>(), demandOrders = new HashMap<>();
+    private final EnumMap<Lane, List<UUID>> deliveryIds = new EnumMap<>(Lane.class);
+    private final Map<UUID, Integer> deliveryOffsets = new HashMap<>(), productionOffsets = new HashMap<>();
+    private final Map<UUID, UUID> deliveryWorks = new HashMap<>(), productionWorks = new HashMap<>();
     private final List<UUID> productionIds = new ArrayList<>();
+    private final EnumMap<Lane, NavigableSet<Demand>> planning = new EnumMap<>(Lane.class);
+    private final Map<UUID, Demand> foodDemands = new HashMap<>();
+    private long planningSequence;
+    private long productionIndexRevision;
+    private int terminalProductionCount;
+    private static final class CitizenCargo {
+        private final long bindingEpoch;
+        private int count;
+        private CitizenCargo(long bindingEpoch, int count) { this.bindingEpoch = bindingEpoch; this.count = count; }
+    }
+    private final Map<UUID, List<CitizenCargo>> allocatedCitizenCargo = new HashMap<>();
     private final LinkedHashSet<UUID> unroutedShares = new LinkedHashSet<>();
     private final LinkedHashSet<UUID> dirtyObligations = new LinkedHashSet<>();
     public SupplyRegistry(ColonyRegistry registry) {
         this.registry = Objects.requireNonNull(registry);
+        for (var lane : Lane.values()) {
+            deliveryIds.put(lane, new ArrayList<>());
+            planning.put(lane, new TreeSet<>(Comparator.comparingLong((Demand d) -> d.planningSequence)
+                    .thenComparing(Comparator.comparingInt((Demand d) -> d.snapshot().priority()).reversed())
+                    .thenComparingLong(d -> d.snapshot().createdTick()).thenComparing(Demand::id)));
+        }
         registry.storage().setLossListener(id -> { if (obligationShares.containsKey(id)) dirtyObligations.add(id); });
+    }
+    private static void adjustCargoIndex(Map<UUID, List<CitizenCargo>> index, StockRegion slot, int delta) {
+        if (slot == null || slot.storage().bindingEpoch() == 0) return;
+        UUID citizenId = slot.storage().identity(); long epoch = slot.storage().bindingEpoch();
+        List<CitizenCargo> epochs = index.get(citizenId); CitizenCargo cargo = null;
+        if (epochs != null) for (var value : epochs) if (value.bindingEpoch == epoch) { cargo = value; break; }
+        if (cargo == null) {
+            if (delta < 0) throw new IllegalStateException("Allocated citizen cargo index underflow");
+            if (epochs == null) { epochs = new ArrayList<>(1); index.put(citizenId, epochs); }
+            epochs.add(new CitizenCargo(epoch, delta)); return;
+        }
+        cargo.count += delta;
+        if (cargo.count < 0) throw new IllegalStateException("Allocated citizen cargo index underflow");
+        if (cargo.count == 0) { epochs.remove(cargo); if (epochs.isEmpty()) index.remove(citizenId); }
     }
     private void putShare(UUID id, CoverageShare share) {
         CoverageShare previous = shares.put(id, share); if (previous != null) unindex(previous);
@@ -41,22 +71,51 @@ public final class SupplyRegistry {
         demandShares.computeIfAbsent(share.demandId(), ignored -> new LinkedHashSet<>()).add(id);
         if (share.sourceOrderId() != null) orderShares.computeIfAbsent(share.sourceOrderId(), ignored -> new LinkedHashSet<>()).add(id);
         if (share.stage() == CoverageShare.Stage.RESERVED_STOCK && share.sourceOrderId() == null) unroutedShares.add(id);
+        if (share.productionOrderId() != null) productionShares.computeIfAbsent(share.productionOrderId(), ignored -> new LinkedHashSet<>()).add(id);
+        if (share.stage() == CoverageShare.Stage.ALLOCATED) adjustCargoIndex(allocatedCitizenCargo, share.slot(), 1);
         UUID owner = demand(share.demandId()).snapshot().ownerId();
         if (productions.containsKey(owner) && share.stage() == CoverageShare.Stage.RESERVED_STOCK) kitShares.computeIfAbsent(owner, ignored -> new LinkedHashSet<>()).add(id);
     }
     private void unindex(CoverageShare share) {
+        if (share.stage() == CoverageShare.Stage.ALLOCATED) adjustCargoIndex(allocatedCitizenCargo, share.slot(), -1);
         if (share.obligationId() != null) obligationShares.remove(share.obligationId());
         unroutedShares.remove(share.id());
         removeIndex(demandShares, share.demandId(), share.id());
         if (share.sourceOrderId() != null) removeIndex(orderShares, share.sourceOrderId(), share.id());
+        if (share.productionOrderId() != null) removeIndex(productionShares, share.productionOrderId(), share.id());
         UUID owner = demand(share.demandId()).snapshot().ownerId(); Set<UUID> local = kitShares.get(owner);
         if (local != null) { local.remove(share.id()); if (local.isEmpty()) kitShares.remove(owner); }
     }
     private static void removeIndex(Map<UUID, Set<UUID>> index, UUID key, UUID id) {
         Set<UUID> values = index.get(key); if (values != null) { values.remove(id); if (values.isEmpty()) index.remove(key); }
     }
-    private void clearShares() { shares.clear(); obligationShares.clear(); kitShares.clear(); orderShares.clear(); demandShares.clear(); unroutedShares.clear(); }
+    private void clearShares() { shares.clear(); obligationShares.clear(); kitShares.clear(); orderShares.clear(); demandShares.clear(); productionShares.clear(); unroutedShares.clear(); allocatedCitizenCargo.clear(); }
     private void putShares(Map<UUID, CoverageShare> values) { values.forEach(this::putShare); }
+    private void indexDemand(Demand demand) {
+        var state = demand.snapshot();
+        if (demand.deficit() > 0 && state.status() != Demand.Status.CANCELLED && state.status() != Demand.Status.COMPLETED)
+            planning.get(state.lane()).add(demand);
+    }
+    private void unindexDemand(Demand demand) { planning.get(demand.snapshot().lane()).remove(demand); }
+    private void addDemandOrder(UUID demandId, UUID orderId) { demandOrders.computeIfAbsent(demandId, ignored -> new LinkedHashSet<>()).add(orderId); }
+    private void removeDemandOrder(UUID demandId, UUID orderId) { removeIndex(demandOrders, demandId, orderId); }
+    private void putDemand(Demand demand) {
+        demands.put(demand.id(), demand); demand.index(this::unindexDemand, this::indexDemand); indexDemand(demand);
+        ownerDemands.computeIfAbsent(demand.snapshot().ownerId(), ignored -> new LinkedHashSet<>()).add(demand.id());
+        if (foodConsumer(demand.id())) foodDemands.put(demand.snapshot().ownerId(), demand);
+    }
+    private void removeDemandIndex(Demand demand) {
+        unindexDemand(demand); foodDemands.remove(demand.snapshot().ownerId(), demand);
+        removeIndex(ownerDemands, demand.snapshot().ownerId(), demand.id());
+    }
+    public Demand findDemand(UUID id) { registry.requireOwner(); return demands.get(id); }
+    public ProductionOrder findProduction(UUID id) { registry.requireOwner(); return productions.get(id); }
+    public Demand foodDemandForWork(UUID workId) { registry.requireOwner(); return foodDemands.get(workId); }
+    public Demand planningCandidate(Lane lane) { registry.requireOwner(); var frontier = planning.get(lane); return frontier.isEmpty() ? null : frontier.first(); }
+    public void planningServiced(UUID id) {
+        registry.requireOwner(); var demand = demands.get(id); if (demand == null) return;
+        unindexDemand(demand); demand.planningSequence = ++planningSequence; indexDemand(demand);
+    }
     public Demand demand(UUID id) { registry.requireOwner(); Demand d = demands.get(id); if (d == null) throw new IllegalArgumentException("Unknown demand"); return d; }
     public List<Demand> demands() { registry.requireOwner(); return List.copyOf(demands.values()); }
     public List<CoverageShare> shares() { registry.requireOwner(); return List.copyOf(shares.values()); }
@@ -65,28 +124,71 @@ public final class SupplyRegistry {
     public DeliveryOrder delivery(UUID id) { registry.requireOwner(); DeliveryOrder order = deliveries.get(id); if (order == null) throw new IllegalArgumentException("Unknown delivery"); return order; }
     public List<CoverageShare> orderShares(UUID orderId) { registry.requireOwner(); return orderShares.getOrDefault(orderId, Set.of()).stream().map(shares::get).toList(); }
     public List<CoverageShare> demandShares(UUID demandId) { registry.requireOwner(); return demandShares.getOrDefault(demandId, Set.of()).stream().map(shares::get).toList(); }
-    public DeliveryOrder deliveryForWork(UUID workId) { registry.requireOwner(); for (var order : deliveries.values()) if (workId.equals(order.workId())) return order; return null; }
+    public DeliveryOrder deliveryForWork(UUID workId) { registry.requireOwner(); return deliveries.get(deliveryWorks.get(workId)); }
     public boolean hasCargo(UUID orderId) { return orderShares(orderId).stream().anyMatch(s -> s.stage() == CoverageShare.Stage.IN_TRANSIT); }
     public boolean hasDeliveryWork(UUID workId) { return deliveryForWork(workId) != null; }
-    public int deliveryCount() { registry.requireOwner(); return deliveryIds.size(); }
-    public DeliveryOrder deliveryAt(int offset) { registry.requireOwner(); return deliveries.get(deliveryIds.get(offset)); }
-    public int criticalDeliveryCount() { registry.requireOwner(); return criticalDeliveryIds.size(); }
-    public DeliveryOrder criticalDeliveryAt(int offset) { registry.requireOwner(); return deliveries.get(criticalDeliveryIds.get(offset)); }
+    public int deliveryCount(Lane lane) { registry.requireOwner(); return deliveryIds.get(lane).size(); }
+    public DeliveryOrder deliveryAt(Lane lane, int offset) { registry.requireOwner(); return deliveries.get(deliveryIds.get(lane).get(offset)); }
     public int productionCount() { registry.requireOwner(); return productionIds.size(); }
     public ProductionOrder productionAt(int offset) { registry.requireOwner(); return productions.get(productionIds.get(offset)); }
+    public long productionIndexRevision() { registry.requireOwner(); return productionIndexRevision; }
+    public int terminalProductionCount() { registry.requireOwner(); return terminalProductionCount; }
+    public int productionRetirementStart(int offset) {
+        registry.requireOwner();
+        return productionIds.isEmpty() ? 0 : Math.floorMod(offset, productionIds.size());
+    }
+    private void replaceProduction(ProductionOrder order) {
+        ProductionOrder previous = productions.put(order.id(), order);
+        if (previous == null) throw new IllegalStateException("Production index is missing");
+        if (previous.terminal() && !order.terminal()) terminalProductionCount--;
+        else if (!previous.terminal() && order.terminal()) terminalProductionCount = Math.incrementExact(terminalProductionCount);
+        if (!Objects.equals(previous.workId(), order.workId())) {
+            if (previous.workId() != null) productionWorks.remove(previous.workId(), order.id());
+            if (order.workId() != null) productionWorks.put(order.workId(), order.id());
+        }
+    }
+    private void addProduction(ProductionOrder order) {
+        productions.put(order.id(), order);
+        productionOffsets.put(order.id(), productionIds.size()); productionIds.add(order.id());
+        addDemandOrder(order.ownerDemandId(), order.id());
+        if (order.workId() != null) productionWorks.put(order.workId(), order.id());
+        if (order.terminal()) terminalProductionCount = Math.incrementExact(terminalProductionCount);
+        productionIndexRevision = Math.incrementExact(productionIndexRevision);
+    }
+    private void removeProduction(UUID id) {
+        ProductionOrder order = productions.remove(id); int offset = productionOffsets.remove(id);
+        UUID last = productionIds.removeLast();
+        if (offset < productionIds.size()) { productionIds.set(offset, last); productionOffsets.put(last, offset); }
+        removeDemandOrder(order.ownerDemandId(), id);
+        if (order.workId() != null) productionWorks.remove(order.workId(), id);
+        if (order.terminal()) terminalProductionCount--;
+        productionIndexRevision = Math.incrementExact(productionIndexRevision);
+    }
+    public boolean hasAllocatedCitizenCargo(UUID citizenId, long bindingEpoch) {
+        registry.requireOwner(); var epochs = allocatedCitizenCargo.get(citizenId);
+        if (epochs != null) for (var value : epochs) if (value.bindingEpoch == bindingEpoch) return value.count > 0;
+        return false;
+    }
     public CoverageShare unroutedReservation() { registry.requireOwner(); return unroutedShares.isEmpty() ? null : shares.get(unroutedShares.iterator().next()); }
     private void addDelivery(DeliveryOrder order) {
-        deliveries.put(order.id(), order); deliveryOffsets.put(order.id(), deliveryIds.size()); deliveryIds.add(order.id());
-        if (order.lane() == Lane.CRITICAL) { criticalDeliveryOffsets.put(order.id(), criticalDeliveryIds.size()); criticalDeliveryIds.add(order.id()); }
+        deliveries.put(order.id(), order); var ids = deliveryIds.get(order.lane());
+        deliveryOffsets.put(order.id(), ids.size()); ids.add(order.id());
+        addDemandOrder(order.ownerDemandId(), order.id());
+        if (order.workId() != null) deliveryWorks.put(order.workId(), order.id());
+    }
+    private void removeDeliveryIndex(DeliveryOrder order) {
+        var ids = deliveryIds.get(order.lane()); int offset = deliveryOffsets.remove(order.id()); UUID last = ids.removeLast();
+        if (offset < ids.size()) { ids.set(offset, last); deliveryOffsets.put(last, offset); }
     }
     private void removeDelivery(UUID id) {
-        deliveries.remove(id); int offset = deliveryOffsets.remove(id); UUID last = deliveryIds.remove(deliveryIds.size() - 1);
-        if (offset < deliveryIds.size()) { deliveryIds.set(offset, last); deliveryOffsets.put(last, offset); }
-        Integer critical = criticalDeliveryOffsets.remove(id);
-        if (critical != null) {
-            UUID lastCritical = criticalDeliveryIds.remove(criticalDeliveryIds.size() - 1);
-            if (critical < criticalDeliveryIds.size()) { criticalDeliveryIds.set(critical, lastCritical); criticalDeliveryOffsets.put(lastCritical, critical); }
-        }
+        var order = deliveries.remove(id); removeDeliveryIndex(order);
+        removeDemandOrder(order.ownerDemandId(), id);
+        if (order.workId() != null) deliveryWorks.remove(order.workId(), id);
+    }
+    private void updateDelivery(DeliveryOrder order) {
+        var old = deliveries.get(order.id());
+        if (old.lane() != order.lane()) { removeDeliveryIndex(old); addDelivery(order); }
+        else deliveries.put(order.id(), order);
     }
     public boolean usedId(UUID id) { registry.requireOwner(); return demands.containsKey(id) || shares.containsKey(id) || productions.containsKey(id) || deliveries.containsKey(id); }
     public SupplySnapshot snapshot() { return new SupplySnapshot(demands().stream().map(Demand::snapshot).toList(), shares(), productionOrders(), deliveries()); }
@@ -108,7 +210,7 @@ public final class SupplyRegistry {
                 required == 0 ? Demand.Status.COMPLETED : Demand.Status.ACTIVE, List.of()));
         AdmissionLedger.Lease lease = admit(colony, lane, Resource.DEMANDS);
         try { registry.beforeMutation(); } catch (RuntimeException failure) { lease.close(); throw failure; }
-        demands.put(id, value); leases.put(id, lease); return value;
+        putDemand(value); leases.put(id, lease); return value;
     }
     public boolean foodConsumer(UUID demandId) {
         UUID owner = demand(demandId).snapshot().ownerId();
@@ -273,7 +375,7 @@ public final class SupplyRegistry {
             var states = new LinkedHashMap<UUID,Demand.Snapshot>();
             for (int i=0;i<recipe.ingredients().size();i++) { var child=ingredientDemand(existing,i,Math.multiplyExact(existing.batches()+existing.completedBatches(),recipe.ingredients().get(i).count()),0).snapshot(); states.put(child.id(),state(child,Math.multiplyExact(nextOrder.batches()+nextOrder.completedBatches(),recipe.ingredients().get(i).count()),child.fulfilled(),child.allocated(),child.covered(),child.deliveredTotal(),Demand.Status.ACTIVE)); }
             var lease=admit(s.colonyId(),s.lane(),Resource.COVERAGE_SHARES); try { registry.beforeMutation(); } catch(RuntimeException failure) { lease.close(); throw failure; }
-            productions.put(existing.id(),nextOrder); putShare(promise.id(),promise); leases.put(promise.id(),lease); demand(demandId).replace(nextDemand); states.forEach((id,state)->demand(id).replace(state)); recomputePriorities(); return production(existing.id());
+            replaceProduction(nextOrder); putShare(promise.id(),promise); leases.put(promise.id(),lease); demand(demandId).replace(nextDemand); states.forEach((id,state)->demand(id).replace(state)); recomputePriorities(); return production(existing.id());
         }
         ProductionOrder order = new ProductionOrder(fresh(), s.colonyId(), demandId, recipe, batches, recipe.activeTicks(), 0, null, null, ProductionOrder.State.PLANNED, s.lane(), s.priority(), workshop.id(), workshop.position(), registration.storages().getFirst(), 0, false);
         CoverageShare share = new CoverageShare(fresh(), s.colonyId(), demandId, order.id(), order.id(), null, null, recipe.output(), quantity, 0, CoverageShare.Stage.PROMISED_OUTPUT);
@@ -312,8 +414,8 @@ public final class SupplyRegistry {
             for (Demand ingredient : ingredients) admitted.put(ingredient.id(), admit(order.colonyId(), order.lane(), Resource.DEMANDS));
             registry.beforeMutation();
         } catch (RuntimeException failure) { admitted.values().forEach(AdmissionLedger.Lease::close); throw failure; }
-        productions.put(order.id(), order); productionIds.add(order.id()); promised.forEach(s -> putShare(s.id(), s)); leases.putAll(admitted); changed.forEach((id, value) -> demand(id).replace(value));
-        ingredients.forEach(d -> demands.put(d.id(), d));
+        addProduction(order); promised.forEach(s -> putShare(s.id(), s)); leases.putAll(admitted); changed.forEach((id, value) -> demand(id).replace(value));
+        ingredients.forEach(this::putDemand);
         recomputePriorities();
     }
     private boolean dependsOn(UUID demandId, UUID orderId) {
@@ -380,7 +482,7 @@ public final class SupplyRegistry {
         throw new IllegalStateException("No assigned producer workshop");
     }
     public ProductionOrder production(UUID id) { registry.requireOwner(); var order = productions.get(id); if (order == null) throw new IllegalArgumentException("Unknown production"); return order; }
-    public ProductionOrder productionForWork(UUID workId) { registry.requireOwner(); for (var p : productions.values()) if (workId.equals(p.workId())) return p; return null; }
+    public ProductionOrder productionForWork(UUID workId) { registry.requireOwner(); return productions.get(productionWorks.get(workId)); }
     public WorldPosition workshopDestination(ProductionOrder order) {
         for (var registration : registry.storage().registrations()) if (registration.colonyId().equals(order.colonyId()) && registration.role().equals("workshop") && registration.storages().contains(order.workshopStorage()))
             return registration.positions().get(registration.storages().indexOf(order.workshopStorage()));
@@ -405,7 +507,7 @@ public final class SupplyRegistry {
             var observed=registry.storage().index().observation(share.slot());
             if (!observed.ready() || !share.item().equals(observed.item()) || observed.count()<registry.storage().obligated(share.slot())) return false;
         }
-        registry.beforeMutation(); productions.put(p.id(), next);
+        registry.beforeMutation(); replaceProduction(next);
         for (var d : demands.values()) if (d.snapshot().ownerId().equals(p.id())) {
             var s = d.snapshot(); d.replace(new Demand.Snapshot(s.id(), s.colonyId(), s.ownerId(), s.matcher(), s.goalKind(), registration.positions().getFirst(), s.required(), s.fulfilled(), s.allocated(), s.covered(), s.deliveredTotal(), Math.incrementExact(s.revision()), s.lane(), s.priority(), s.createdTick(), s.status(), s.sourceStorages()));
             for (var delivery : List.copyOf(deliveries.values())) if (delivery.ownerDemandId().equals(s.id()) && !delivery.terminal()) deliveries.put(delivery.id(), new DeliveryOrder(delivery.id(), delivery.colonyId(), delivery.ownerDemandId(), delivery.source(), registration.positions().getFirst(), delivery.item(), delivery.quantity(), delivery.transferred(), Math.incrementExact(delivery.revision()), delivery.citizenId(), delivery.workId(), delivery.state(), delivery.lane(), delivery.priority()));
@@ -461,7 +563,7 @@ public final class SupplyRegistry {
                 || !work.typeId().equals(io.github.kpuctajluk.colonyloom.core.work.WorkOrder.PRODUCTION) || !work.target().equals(p.equipmentPosition())
                 || !Objects.equals(work.professionId(), p.recipe().professionId()) || completeProductionKit(p.id()).isEmpty()) throw new IllegalStateException("Production work lacks complete kit");
         if (workId.equals(p.workId())) return;
-        registry.beforeMutation(); productions.put(p.id(), p.update(p.batches(), p.remainingActiveTicks(), p.completedBatches(), p.batchStarted(), workId, null, p.state(), p.lane(), p.priority()));
+        registry.beforeMutation(); replaceProduction(p.update(p.batches(), p.remainingActiveTicks(), p.completedBatches(), p.batchStarted(), workId, null, p.state(), p.lane(), p.priority()));
     }
     public void startProduction(UUID productionId, UUID citizenId, UUID workId) {
         var p = production(productionId); var citizen = registry.citizen(citizenId); var work = registry.workBoard().work(workId);
@@ -471,7 +573,7 @@ public final class SupplyRegistry {
                 || registry.bindings().activeEntity(citizenId).isEmpty() || completeProductionKit(p.id()).isEmpty()
                 || p.batchStarted() && p.citizenId() != null && !citizenId.equals(p.citizenId())) throw new IllegalStateException("Production binding/kit not ready");
         if (p.batchStarted() && citizenId.equals(p.citizenId())) return;
-        registry.beforeMutation(); productions.put(p.id(), p.update(p.batches(), p.remainingActiveTicks(), p.completedBatches(), true, workId, citizenId, ProductionOrder.State.PROCESSING, p.lane(), p.priority()));
+        registry.beforeMutation(); replaceProduction(p.update(p.batches(), p.remainingActiveTicks(), p.completedBatches(), true, workId, citizenId, ProductionOrder.State.PROCESSING, p.lane(), p.priority()));
     }
     public void advanceProduction(UUID productionId, long activeDelta) {
         var p = production(productionId);
@@ -483,7 +585,7 @@ public final class SupplyRegistry {
                 || citizen.readiness()!=io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Readiness.READY
                 || registry.bindings().activeEntity(citizen.citizenId()).isEmpty() || !workshopAvailable(p)) throw new IllegalStateException("Inactive production cannot accrue time");
         if (activeDelta == 0 || p.remainingActiveTicks() == 0) return;
-        registry.beforeMutation(); productions.put(p.id(), p.update(p.batches(), Math.max(0, p.remainingActiveTicks() - Math.min(activeDelta, p.remainingActiveTicks())), p.completedBatches(), true, p.workId(), p.citizenId(), p.state(), p.lane(), p.priority()));
+        registry.beforeMutation(); replaceProduction(p.update(p.batches(), Math.max(0, p.remainingActiveTicks() - Math.min(activeDelta, p.remainingActiveTicks())), p.completedBatches(), true, p.workId(), p.citizenId(), p.state(), p.lane(), p.priority()));
     }
     public PreparedProduction prepareProduction(UUID productionId, List<OutputPortion> outputs, long tick) {
         var p = production(productionId); var inputs = completeProductionKit(productionId);
@@ -572,8 +674,9 @@ public final class SupplyRegistry {
             long remaining = order.batches() - 1;
             var next = order.update(remaining, remaining == 0 ? 0 : order.recipe().activeTicks(), Math.incrementExact(order.completedBatches()), false, order.workId(), null, remaining == 0 ? ProductionOrder.State.COMPLETED : ProductionOrder.State.PLANNED, order.lane(), order.priority());
             physical.commit(); registry.storage().reduceObligations(reductions); leases.putAll(admitted); admitted.clear();
-            if (surplus != null) demands.put(surplus.id(), surplus);
-            publishShares(staged); states.forEach((id, s) -> demand(id).replace(s)); productions.put(order.id(), next); closed = true;
+            if (surplus != null) putDemand(surplus);
+            publishShares(staged); states.forEach((id, s) -> demand(id).replace(s)); replaceProduction(next);
+            productionIndexRevision = Math.incrementExact(productionIndexRevision); closed = true;
             for (var share : staged.values()) if (share.stage() == CoverageShare.Stage.RESERVED_STOCK && share.sourceOrderId() == null) allocateLocalReservation(share.id());
         }
         @Override public void close() { registry.requireOwner(); physical.close(); if (!closed) { closed = true; admitted.values().forEach(AdmissionLedger.Lease::close); admitted.clear(); } }
@@ -697,6 +800,8 @@ public final class SupplyRegistry {
         if (hasCargo(orderId) && (!Objects.equals(o.citizenId(), citizenId) || !Objects.equals(o.workId(), workId))) throw new IllegalStateException("Cannot replace bound cargo courier");
         if (Objects.equals(o.citizenId(), citizenId) && Objects.equals(o.workId(), workId)) return;
         registry.beforeMutation(); deliveries.put(o.id(), new DeliveryOrder(o.id(), o.colonyId(), o.ownerDemandId(), o.source(), o.destination(), o.item(), o.quantity(), o.transferred(), Math.addExact(o.revision(), 1), citizenId, workId, o.state(), o.lane(), o.priority()));
+        if (o.workId() != null) deliveryWorks.remove(o.workId(), o.id());
+        if (workId != null) deliveryWorks.put(workId, o.id());
     }
     public void returnDelivery(UUID orderId) {
         DeliveryOrder o = delivery(orderId); if (o.terminal() || o.returnRequired()) return;
@@ -721,7 +826,7 @@ public final class SupplyRegistry {
         states.forEach((id, s) -> demand(id).replace(s));
         for (var o : List.copyOf(deliveries.values())) if (o.colonyId().equals(colonyId) && !o.terminal()) deliveries.put(o.id(), delivery(o, o.transferred(), DeliveryOrder.State.CANCELLED));
         for (var o : List.copyOf(productions.values())) if (o.colonyId().equals(colonyId))
-            productions.put(o.id(), o.update(o.batches(), o.remainingActiveTicks(), o.completedBatches(), o.batchStarted(), o.workId(), o.citizenId(), ProductionOrder.State.CANCELLED, o.lane(), o.priority()));
+            replaceProduction(o.update(o.batches(), o.remainingActiveTicks(), o.completedBatches(), o.batchStarted(), o.workId(), o.citizenId(), ProductionOrder.State.CANCELLED, o.lane(), o.priority()));
         dirtyObligations.removeIf(id -> !obligationShares.containsKey(id));
     }
 
@@ -733,6 +838,102 @@ public final class SupplyRegistry {
         registry.beforeMutation();
         for (var s : orderShares(orderId)) putShare(s.id(), new CoverageShare(s.id(), s.colonyId(), s.demandId(), null, s.productionOrderId(), s.obligationId(), s.slot(), s.item(), s.quantity(), Math.addExact(s.revision(), 1), s.stage()));
         removeDelivery(orderId); leases.remove(orderId).close();
+    }
+    /** Call only after checkpoint compaction has removed the food and transfer witnesses. */
+    public void retireFood(UUID workId) {
+        var work = registry.workBoard().work(workId);
+        if (!io.github.kpuctajluk.colonyloom.core.work.WorkOrder.FOOD.equals(work.typeId()) || !work.terminal())
+            throw new IllegalStateException("Food work still active");
+        for (var effect : registry.effects().snapshots()) if (workId.equals(effect.workId()))
+            throw new IllegalStateException("Food retains native evidence");
+        var owned = demands.values().stream().filter(d -> workId.equals(d.snapshot().ownerId())).toList();
+        for (var demand : owned) {
+            var state = demand.snapshot();
+            if (state.status() != Demand.Status.COMPLETED && state.status() != Demand.Status.CANCELLED)
+                throw new IllegalStateException("Food demand still active");
+            for (var order : deliveries.values()) if (demand.id().equals(order.ownerDemandId()))
+                throw new IllegalStateException("Food retains delivery");
+            for (var order : productions.values()) if (demand.id().equals(order.ownerDemandId()))
+                throw new IllegalStateException("Food retains production");
+            for (var share : demandShares(demand.id())) if (share.stage() != CoverageShare.Stage.FULFILLED
+                    || share.obligationId() != null || share.sourceOrderId() != null)
+                throw new IllegalStateException("Food retains physical obligation");
+        }
+        for (var reservation : registry.storage().reservations().entries()) if (workId.equals(reservation.ownerId()))
+            throw new IllegalStateException("Food retains reservation");
+        for (var allocation : registry.storage().allocations().entries()) if (workId.equals(allocation.ownerId()))
+            throw new IllegalStateException("Food retains allocation");
+        registry.beforeMutation();
+        for (var demand : owned) {
+            for (var share : demandShares(demand.id())) {
+                unindex(share); shares.remove(share.id()); leases.remove(share.id()).close();
+            }
+            removeDemandIndex(demand); demands.remove(demand.id()); leases.remove(demand.id()).close();
+        }
+    }
+    public boolean canRetireProduction(UUID productionId) {
+        registry.requireOwner(); ProductionOrder order = productions.get(productionId);
+        return order != null && productionRetirementBlocker(order) == null;
+    }
+    private String productionRetirementBlocker(ProductionOrder order) {
+        if (!order.terminal() || order.batchStarted() || order.citizenId() != null) return "Production still active";
+        UUID workId = order.workId();
+        if (workId != null) {
+            var work = registry.workBoard().findWork(workId);
+            if (work == null) return "Production work is missing";
+            if (!work.terminal() || work.assignee() != null) return "Production work still active";
+            for (var citizen : registry.citizensView()) if (workId.equals(citizen.assignedWorkId())) return "Production work retains assignment";
+            for (var claim : registry.targetClaims().snapshots()) if (workId.equals(claim.ownerId())) return "Production work retains target";
+            for (var dependency : registry.workBoard().works()) if (dependency.dependencies().contains(workId)) return "Production work has dependents";
+        }
+        for (var effect : registry.effects().snapshots()) {
+            var craft = effect.craft();
+            if (craft != null && order.id().equals(craft.productionId()) || workId != null && workId.equals(effect.workId()))
+                return "Production retains native evidence";
+        }
+        Set<UUID> children = ownerDemands.getOrDefault(order.id(), Set.of());
+        for (UUID childId : children) {
+            Demand child = demands.get(childId); if (child == null) return "Production ingredient demand is missing";
+            var state = child.snapshot();
+            if (state.status() != Demand.Status.COMPLETED && state.status() != Demand.Status.CANCELLED) return "Production ingredient demand is not terminal";
+            if (!demandOrders.getOrDefault(childId, Set.of()).isEmpty()) return "Production ingredient retains order";
+            for (UUID shareId : demandShares.getOrDefault(childId, Set.of())) {
+                CoverageShare share = shares.get(shareId); if (share == null) return "Production ingredient share is missing";
+                if (share.stage() != CoverageShare.Stage.FULFILLED || share.obligationId() != null || share.sourceOrderId() != null || share.productionOrderId() != null)
+                    return "Production ingredient retains physical obligation";
+            }
+        }
+        for (UUID shareId : productionShares.getOrDefault(order.id(), Set.of())) {
+            CoverageShare share = shares.get(shareId); if (share == null) return "Production output index changed";
+            if (share.stage() != CoverageShare.Stage.FULFILLED || share.obligationId() != null || share.sourceOrderId() != null)
+                return "Production retains live output";
+        }
+        for (var reservation : registry.storage().reservations().entries()) if (order.id().equals(reservation.ownerId())) return "Production retains reservation";
+        for (var allocation : registry.storage().allocations().entries()) if (order.id().equals(allocation.ownerId())) return "Production retains allocation";
+        return null;
+    }
+    public void retireProduction(UUID productionId) {
+        ProductionOrder order = production(productionId);
+        String blocker = productionRetirementBlocker(order);
+        if (blocker != null) throw new IllegalStateException(blocker);
+        UUID workId = order.workId();
+        Set<UUID> children = ownerDemands.getOrDefault(productionId, Set.of());
+        registry.beforeMutation();
+        for (UUID childId : List.copyOf(children)) {
+            Demand child = demands.get(childId);
+            for (UUID shareId : List.copyOf(demandShares.getOrDefault(childId, Set.of()))) {
+                CoverageShare share = shares.get(shareId); unindex(share); shares.remove(shareId); leases.remove(shareId).close();
+            }
+            removeDemandIndex(child); demands.remove(childId); leases.remove(childId).close();
+        }
+        for (UUID shareId : List.copyOf(productionShares.getOrDefault(productionId, Set.of()))) {
+            CoverageShare share = shares.get(shareId);
+            putShare(shareId, new CoverageShare(share.id(), share.colonyId(), share.demandId(), null, null, null, null,
+                    share.item(), share.quantity(), Math.incrementExact(share.revision()), share.stage()));
+        }
+        productionShares.remove(productionId);
+        removeProduction(productionId);
+        leases.remove(productionId).close();
     }
     public void markDeliveryLost(UUID orderId) {
         DeliveryOrder o = delivery(orderId); if (o.terminal()) return;
@@ -1009,8 +1210,8 @@ public final class SupplyRegistry {
         private void commit() {
             try (var physical = registry.storage().prepareOwnership(transfers, reductions)) {
                 registry.beforeMutation(); physical.commit();
-                demands.putAll(surplus); leases.putAll(admitted); admitted.clear();
-                publishShares(staged); states.forEach((id, value) -> demand(id).replace(value)); productions.putAll(orders);
+                surplus.values().forEach(SupplyRegistry.this::putDemand); leases.putAll(admitted); admitted.clear();
+                publishShares(staged); states.forEach((id, value) -> demand(id).replace(value)); orders.values().forEach(SupplyRegistry.this::replaceProduction);
                 for (UUID id : returning) { var order = delivery(id); deliveries.put(id, delivery(order, order.transferred(), DeliveryOrder.State.RETURNING)); }
                 blockUnreferencedDeliveries(); recomputePriorities();
             }
@@ -1037,7 +1238,7 @@ public final class SupplyRegistry {
                 }
                 if (!found) priority = 0;
                 if (lane != order.lane() || priority != order.priority()) {
-                    productions.put(order.id(), order.update(order.batches(), order.remainingActiveTicks(), order.completedBatches(), order.batchStarted(), order.workId(), order.citizenId(), order.state(), lane, priority)); changed = true;
+                    replaceProduction(order.update(order.batches(), order.remainingActiveTicks(), order.completedBatches(), order.batchStarted(), order.workId(), order.citizenId(), order.state(), lane, priority)); changed = true;
                 }
                 if(order.workId()!=null) { var work=registry.workBoard().work(order.workId()); int inherited=Math.max(0,Math.min(10,priority)); if(!work.terminal() && work.priority()!=inherited) registry.workBoard().priority(work.id(),inherited); }
                 for (Demand ingredient : demands.values()) {
@@ -1050,7 +1251,7 @@ public final class SupplyRegistry {
         } while (changed && ++rounds <= productions.size());
         for (DeliveryOrder order : List.copyOf(deliveries.values())) {
             var s = demand(order.ownerDemandId()).snapshot();
-            if (order.lane() != s.lane() || order.priority() != s.priority()) deliveries.put(order.id(), new DeliveryOrder(order.id(), order.colonyId(), order.ownerDemandId(), order.source(), order.destination(), order.item(), order.quantity(), order.transferred(), Math.addExact(order.revision(), 1), order.citizenId(), order.workId(), order.state(), s.lane(), s.priority()));
+            if (order.lane() != s.lane() || order.priority() != s.priority()) updateDelivery(new DeliveryOrder(order.id(), order.colonyId(), order.ownerDemandId(), order.source(), order.destination(), order.item(), order.quantity(), order.transferred(), Math.addExact(order.revision(), 1), order.citizenId(), order.workId(), order.state(), s.lane(), s.priority()));
         }
     }
 
@@ -1151,10 +1352,12 @@ public final class SupplyRegistry {
         public void commit() {
             registry.requireOwner(); if (snapshot == null) throw new IllegalStateException("Supply restore already closed");
             leases.values().forEach(AdmissionLedger.Lease::close); leases.clear(); leases.putAll(admitted); admitted.clear();
-            demands.clear(); snapshot.demands().forEach(s -> demands.put(s.id(), new Demand(s)));
-            productions.clear(); productionIds.clear(); snapshot.productionOrders().forEach(p -> { productions.put(p.id(), p); productionIds.add(p.id()); });
+            demands.clear(); planning.values().forEach(Set::clear); foodDemands.clear(); ownerDemands.clear(); planningSequence = 0;
+            snapshot.demands().forEach(s -> putDemand(new Demand(s)));
+            productions.clear(); productionIds.clear(); productionOffsets.clear(); productionWorks.clear(); demandOrders.clear(); productionIndexRevision = 0; terminalProductionCount = 0;
+            snapshot.productionOrders().forEach(SupplyRegistry.this::addProduction);
             clearShares(); snapshot.shares().forEach(s -> putShare(s.id(), s)); dirtyObligations.clear();
-            deliveries.clear(); deliveryIds.clear(); deliveryOffsets.clear(); criticalDeliveryIds.clear(); criticalDeliveryOffsets.clear(); snapshot.deliveries().forEach(SupplyRegistry.this::addDelivery); snapshot = null;
+            deliveries.clear(); deliveryIds.values().forEach(List::clear); deliveryOffsets.clear(); deliveryWorks.clear(); snapshot.deliveries().forEach(SupplyRegistry.this::addDelivery); snapshot = null;
         }
         @Override public void close() { registry.requireOwner(); if (snapshot != null) { admitted.values().forEach(AdmissionLedger.Lease::close); admitted.clear(); snapshot = null; } }
     }

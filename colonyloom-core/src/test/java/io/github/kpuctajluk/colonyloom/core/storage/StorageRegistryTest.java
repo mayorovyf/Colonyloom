@@ -87,6 +87,84 @@ final class StorageRegistryTest {
         AdmissionLedger replacement() { return new AdmissionLedger(registry.admission().limits(), () -> {}); }
     }
 
+    @Test void matchingSlotCursorUsesExactItemIdsAndCanonicalOrderWithoutFilteringStock() {
+        Fixture f = new Fixture();
+        var first = slot(100, 0); var second = slot(100, 1); var last = slot(101, 0);
+        var other = slot(102, 0);
+        f.register(A, 0, "warehouse", last, second, first);
+        f.register(A, 1, "warehouse", other);
+        var variant = new ItemDescriptor(STONE.itemId(), new byte[]{1});
+        var granite = new ItemDescriptor("minecraft:granite", new byte[0]);
+        assertNull(f.storage.index().nextMatchingSlot(STONE.itemId(), null));
+        f.storage.index().observe(last, STONE, 1, 0);
+        f.storage.index().observe(second, variant, 1, 0);
+        f.storage.index().observe(first, STONE, 1, 0);
+        f.storage.index().observe(other, granite, 1, 0);
+        f.storage.reservations().reserve(id(1001), A, OWNER, first, STONE, 1, 0, AdmissionLedger.Lane.NORMAL);
+        assertEquals(0, f.storage.index().free(first, 0));
+        assertEquals(0, f.storage.index().free(second, StockIndex.MAX_INDEX_AGE_TICKS));
+        assertEquals(first, f.storage.index().nextMatchingSlot(STONE.itemId(), null));
+        assertEquals(second, f.storage.index().nextMatchingSlot(STONE.itemId(), first));
+        assertEquals(last, f.storage.index().nextMatchingSlot(STONE.itemId(), second));
+        assertNull(f.storage.index().nextMatchingSlot(STONE.itemId(), last));
+        assertEquals(other, f.storage.index().nextMatchingSlot(granite.itemId(), null));
+        assertNull(f.storage.index().nextMatchingSlot("minecraft:stone_bricks", null));
+        f.storage.index().observe(second, granite, 1, 1);
+        assertEquals(last, f.storage.index().nextMatchingSlot(STONE.itemId(), first));
+        assertEquals(second, f.storage.index().nextMatchingSlot(granite.itemId(), null));
+        f.storage.index().unknown(second);
+        assertEquals(other, f.storage.index().nextMatchingSlot(granite.itemId(), second));
+        f.storage.index().observe(last, null, 0, 1);
+        assertNull(f.storage.index().nextMatchingSlot(STONE.itemId(), first));
+        f.storage.index().invalidate(first);
+        assertNull(f.storage.index().nextMatchingSlot(STONE.itemId(), null));
+    }
+
+    @Test void matchingSlotCursorDropsReplacementRetirementAndRestoredObservations() {
+        Fixture f = new Fixture(); var old = slot(100, 0); var next = slot(101, 0);
+        f.register(A, 0, "warehouse", old); f.storage.index().observe(old, STONE, 1, 0);
+        f.register(A, 0, "warehouse", next);
+        assertFalse(f.storage.index().slots().contains(old));
+        assertNull(f.storage.index().nextMatchingSlot(STONE.itemId(), null));
+        f.storage.index().observe(next, STONE, 1, 0);
+        assertEquals(next, f.storage.index().nextMatchingSlot(STONE.itemId(), old));
+        var snapshot = f.storage.snapshot();
+        try (var restore = f.storage.prepareRestore(snapshot, f.replacement(), f.registry.colonies())) { restore.commit(); }
+        assertNull(f.storage.index().nextMatchingSlot(STONE.itemId(), null));
+        f.storage.index().observe(next, STONE, 1, 1);
+        f.storage.retire(next.storage(), A);
+        assertNull(f.storage.index().nextMatchingSlot(STONE.itemId(), null));
+        f.storage.index().observe(next, STONE, 1, 2);
+        assertNull(f.storage.index().nextMatchingSlot(STONE.itemId(), null));
+    }
+
+    @Test void recanonicalizingReaderCannotPublishAnOldObservationIntoAnEqualReplacementSlot() {
+        Fixture f = new Fixture(); var original = slot(100, 0); var temporary = slot(101, 0);
+        f.register(A, 0, "warehouse", original); f.storage.index().observe(original, STONE, 1, 0);
+        f.budgets.beginTick(1);
+        f.storage.index().tick(1, f.budgets, reading -> {
+            f.register(A, 0, "warehouse", temporary);
+            f.register(A, 0, "warehouse", original);
+            return new StockIndex.Observation(STONE, 1, true);
+        });
+        assertFalse(f.storage.index().observation(original).ready());
+        assertNull(f.storage.index().nextMatchingSlot(STONE.itemId(), null));
+    }
+
+    @Test void reconciliationCallbackRetirementCannotRepublishMatchingMembership() {
+        Fixture f = new Fixture(); var source = slot(100, 0);
+        f.register(A, 0, "warehouse", source); f.storage.index().observe(source, STONE, 2, 0);
+        f.storage.reservations().reserve(id(1001), A, OWNER, source, STONE, 2, 0, AdmissionLedger.Lane.NORMAL);
+        f.registry.setBeforeMutation(() -> {
+            assertNull(f.storage.index().nextMatchingSlot(STONE.itemId(), null));
+            f.registry.setBeforeMutation(() -> {});
+            f.storage.retire(source.storage(), A);
+        });
+        f.storage.index().observe(source, STONE, 1, 1);
+        assertFalse(f.storage.index().observation(source).ready());
+        assertNull(f.storage.index().nextMatchingSlot(STONE.itemId(), null));
+    }
+
     @Test void aliasesAndTwoColoniesShareOnePhysical64AndOneGlobalSlotCharge() {
         Fixture f = new Fixture(); StockRegion slot = slot(100, 0);
         var first = f.register(A, 0, "warehouse", slot);
@@ -176,6 +254,95 @@ final class StorageRegistryTest {
         assertEquals(12, f.storage.index().free(last, f.tick));
     }
 
+    @Test void sharedFourCheckQuotaRefreshesLiveSlotsAndAllowsIndivisibleDownstreamReads() {
+        Fixture f = new Fixture(SimulationLimits.development().withBudget(Budget.STORAGE_SLOT_CHECKS, 4));
+        List<StockRegion> slots = new ArrayList<>();
+        for (int batch = 0; slots.size() < 400; batch++) {
+            List<StockRegion> registration = new ArrayList<>();
+            for (int local = 0; local < 27 && slots.size() < 400; local++) {
+                var slot = slot(100 + batch, local); registration.add(slot); slots.add(slot);
+                f.physical.set(slot, STONE, 64);
+            }
+            f.register(A, batch, "warehouse", registration.toArray(StockRegion[]::new));
+        }
+        assertEquals(StockIndex.SweepCapacity.SHARED, f.storage.index().sweepCapacity(4));
+        Map<StockRegion, Long> lastRead = new HashMap<>();
+        int downstreamTurns = 0;
+        for (int tick = 1; tick <= 440; tick++) {
+            f.physical.reads.clear(); f.scan();
+            assertEquals(f.physical.reads.size(), f.budgets.used(Budget.STORAGE_SLOT_CHECKS));
+            for (var slot : f.physical.reads) lastRead.put(slot, f.tick);
+            if (f.budgets.used(Budget.STORAGE_SLOT_CHECKS) == 0) {
+                for (int check = 0; check < 4; check++) {
+                    assertTrue(f.budgets.tryConsume(Budget.STORAGE_SLOT_CHECKS, AdmissionLedger.Lane.NORMAL));
+                    f.physical.read(slots.get(check));
+                }
+                downstreamTurns++;
+            }
+            assertTrue(f.budgets.used(Budget.STORAGE_SLOT_CHECKS) <= 4);
+            if (tick >= 200) for (var slot : slots) {
+                assertTrue(tick - lastRead.get(slot) < StockIndex.MAX_INDEX_AGE_TICKS);
+                assertEquals(64, f.storage.index().free(slot, tick));
+            }
+        }
+        assertEquals(22, downstreamTurns);
+        assertEquals(400, lastRead.size());
+        assertEquals(0, f.storage.index().free(slots.getFirst(), lastRead.get(slots.getFirst()) + 200));
+    }
+
+    @Test void repeatedHotNotificationsUseSpareChecksWithoutDelayingNativeSweepOrDownstreamTurn() {
+        Fixture f = new Fixture(SimulationLimits.development().withBudget(Budget.STORAGE_SLOT_CHECKS, 4));
+        List<StockRegion> slots = new ArrayList<>();
+        for (int batch = 0; slots.size() < 200; batch++) {
+            List<StockRegion> registration = new ArrayList<>();
+            for (int local = 0; local < 27 && slots.size() < 200; local++) {
+                var slot = slot(100 + batch, local); registration.add(slot); slots.add(slot);
+                f.physical.set(slot, STONE, 64);
+            }
+            f.register(A, batch, "warehouse", registration.toArray(StockRegion[]::new));
+        }
+        var hot = slots.getLast();
+        Map<StockRegion, Long> lastRead = new HashMap<>();
+        for (int tick = 1; tick <= 440; tick++) {
+            f.physical.reads.clear(); f.storage.index().invalidate(hot); f.storage.index().invalidate(hot); f.scan();
+            for (var slot : f.physical.reads) lastRead.put(slot, f.tick);
+            assertEquals(f.physical.reads.size(), new HashSet<>(f.physical.reads).size());
+            assertEquals(f.physical.reads.size(), f.budgets.used(Budget.STORAGE_SLOT_CHECKS));
+            if (tick % 20 == 0) assertTrue(f.physical.reads.isEmpty());
+            else { assertTrue(f.physical.reads.contains(hot)); assertTrue(f.budgets.used(Budget.STORAGE_SLOT_CHECKS) <= 3); }
+            if (tick >= 200) for (var slot : slots) assertTrue(tick - lastRead.get(slot) < StockIndex.MAX_INDEX_AGE_TICKS);
+        }
+        assertEquals(200, lastRead.size());
+    }
+
+    @Test void downstreamOnlyTurnDoesNotInventAnObservationOrRefreshAnUnknownSlot() {
+        Fixture f = new Fixture(SimulationLimits.development().withBudget(Budget.STORAGE_SLOT_CHECKS, 4));
+        var slot = slot(100, 0); f.register(A, 0, "warehouse", slot); f.physical.set(slot, STONE, 64);
+        f.tick = 19; f.scan();
+        assertTrue(f.physical.reads.isEmpty());
+        assertEquals(0, f.budgets.used(Budget.STORAGE_SLOT_CHECKS));
+        assertFalse(f.storage.index().observation(slot).ready());
+        assertEquals(0, f.storage.index().free(slot, f.tick));
+        f.scan();
+        assertEquals(List.of(slot), f.physical.reads);
+        assertEquals(64, f.storage.index().free(slot, f.tick));
+    }
+
+    @Test void sweepCapacityReportsWhenFreshnessAndSharedTurnsCannotBothFit() {
+        Fixture f = new Fixture(SimulationLimits.development().withBudget(Budget.STORAGE_SLOT_CHECKS, 1));
+        for (int batch = 0; batch < 8; batch++) {
+            List<StockRegion> slots = new ArrayList<>();
+            for (int local = 0; local < (batch == 7 ? 1 : 27); local++) slots.add(slot(100 + batch, local));
+            f.register(A, batch, "warehouse", slots.toArray(StockRegion[]::new));
+        }
+        assertEquals(StockIndex.SweepCapacity.FRESHNESS_ONLY, f.storage.index().sweepCapacity(1));
+        List<StockRegion> extra = new ArrayList<>();
+        for (int local = 0; local < 11; local++) extra.add(slot(108, local));
+        f.register(A, 8, "warehouse", extra.toArray(StockRegion[]::new));
+        assertEquals(StockIndex.SweepCapacity.INFEASIBLE, f.storage.index().sweepCapacity(1));
+        assertThrows(IllegalArgumentException.class, () -> f.storage.index().sweepCapacity(0));
+    }
+
     @Test void localViewsCannotLeakUnregisteredOrForeignCanonicalSlots() {
         Fixture f = new Fixture(); StockRegion first = slot(100, 0), second = slot(101, 0);
         f.register(A, 0, "warehouse", first); f.register(B, 64, "warehouse", second);
@@ -208,6 +375,7 @@ final class StorageRegistryTest {
         assertThrows(IllegalStateException.class, () -> f.storage.reservations().release(id(1001)));
         assertEquals(1, f.storage.reservations().entries().size());
         assertThrows(IllegalStateException.class, () -> f.storage.index().observe(slot, null, 0, f.tick + 1));
+        assertNull(f.storage.index().nextMatchingSlot(STONE.itemId(), null));
         assertEquals(0, f.storage.index().free(slot, f.tick + 1));
     }
 
@@ -218,6 +386,7 @@ final class StorageRegistryTest {
         var replacement = f.register(A, 0, "warehouse", next);
         assertEquals(previous.id(), replacement.id()); assertEquals(1, replacement.revision());
         assertEquals(0, f.storage.index().free(old, f.tick)); assertEquals(List.of(allocation), f.storage.allocations().entries());
+        assertNull(f.storage.index().nextMatchingSlot(STONE.itemId(), null));
         f.physical.set(next, STONE, 64); f.scan(); assertEquals(64, f.storage.index().free(next, f.tick));
         assertEquals(List.of(next), f.storage.index().candidates(A, STONE.itemId(), f.tick, 10));
         StorageSnapshot saved = f.storage.snapshot();

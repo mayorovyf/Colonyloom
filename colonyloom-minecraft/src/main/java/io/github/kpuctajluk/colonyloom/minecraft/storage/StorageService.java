@@ -27,15 +27,18 @@ public final class StorageService {
     private final StorageRegistry storage;
     private final StorageIdentity identity;
     private final GlobalWorkBudgets budgets;
+    private final Map<String, ResourceKey<net.minecraft.world.level.Level>> dimensionKeys = new HashMap<>();
     private final Map<StorageId, Set<WorldPosition>> addresses = new HashMap<>();
     private final Map<WorldPosition, StorageId> addressIdentities = new HashMap<>();
     private final Map<StorageId, WorldPosition> locators = new HashMap<>();
-    private final Map<WorldPosition, Physical> tickPhysical = new HashMap<>();
+    // Immutable mappings are reusable only after live topology, capability and UUID proof.
+    private final Map<WorldPosition, Physical> physicalSnapshots = new HashMap<>();
     private final Map<UUID, StorageRegistry.Registration> remembered = new HashMap<>();
     private final Map<StorageId, Map<UUID, StorageRegistry.Registration>> memberships = new HashMap<>();
     private record Sample(ItemStack stack, StockIndex.Observation observation,long revision) {}
     private final Map<StockRegion, Sample> samples = new HashMap<>();
     private final Map<StorageId, List<StorageRegistry.Registration>> sourceRegistrations = new HashMap<>();
+    private final Map<StockRegion, List<StorageRegistry.Registration>> slotRegistrations = new HashMap<>();
     private final Set<StorageId> blockedIdentities = new HashSet<>();
 
     public StorageService(MinecraftServer server, ColonyRegistry registry, GlobalWorkBudgets budgets, StorageIdentity identity) {
@@ -124,7 +127,7 @@ public final class StorageService {
         UUID old = identity.existing(entity);
         if (old != null) storage.retire(new StorageId(address.dimension(), old, 0), colony);
         UUID replacement = identity.replace(entity);
-        tickPhysical.clear();
+        physicalSnapshots.clear();
         note(new StorageId(address.dimension(), replacement, 0), address);
         for (var registration : List.copyOf(storage.registrations(colony))) {
             if (registration.positions().contains(address)) recanonicalize(registration);
@@ -135,7 +138,6 @@ public final class StorageService {
 
     public void tick(long now) {
         owner();
-        tickPhysical.clear();
         storage.index().tick(now, budgets, this::read);
     }
 
@@ -184,7 +186,7 @@ public final class StorageService {
         }
     }
     public long observationRevision(StockRegion slot) {owner();Sample sample=samples.get(slot);return sample==null?0:sample.revision();}
-    public StockIndex.Observation readFresh(StockRegion slot) {owner();tickPhysical.clear();return read(slot);}
+    public StockIndex.Observation readFresh(StockRegion slot) {owner();return read(slot);}
 
     /** Known locator only: no lookup loads a chunk, and live citizen locators follow their embodiment. */
     public WorldPosition locate(StorageId id) {
@@ -206,7 +208,7 @@ public final class StorageService {
         return container(slot,true);
     }
     private Container container(StockRegion slot, boolean recovery) {
-        owner(); Objects.requireNonNull(slot); tickPhysical.clear();
+        owner(); Objects.requireNonNull(slot);
         StorageId id = slot.storage();
         if (storage.isRetired(id) || conflicted(id) || !currentAuthority(slot,recovery)) return null;
         if (id.bindingEpoch() > 0) {
@@ -273,7 +275,6 @@ public final class StorageService {
         owner();
         if (count <= 0 || count > 1_000_000 || !registry.colony(colony).available()
                 || storage.registrations(colony).stream().noneMatch(registration -> registration.slots().contains(slot))) return false;
-        tickPhysical.clear();
         var observation = read(slot);
         if (!observation.ready() || observation.count() < count || !Objects.equals(observation.item(), item)) return false;
         ItemStack stack = nativeStack(slot);
@@ -302,7 +303,7 @@ public final class StorageService {
 
     public void invalidate(WorldPosition address) {
         owner();
-        tickPhysical.clear();
+        physicalSnapshots.entrySet().removeIf(entry -> entry.getValue().positions().contains(address));
         for (var registration : storage.registrations()) if (registration.positions().contains(address)) {
             for (StockRegion slot : registration.slots()) storage.index().invalidate(slot);
         }
@@ -317,34 +318,52 @@ public final class StorageService {
     }
 
     private Physical physical(WorldPosition address, boolean create) {
-        Physical cached = tickPhysical.get(address);
-        if (cached != null) return cached;
         ServerLevel level = level(address.dimension());
-        BlockPos pos = blockPos(address);
-        if (level == null || !level.hasChunkAt(pos)) return null;
-        var state = level.getBlockState(pos);
-        BlockEntity entity = level.getBlockEntity(pos);
+        if (level == null) return null;
+        Physical previous = physicalSnapshots.get(address);
+        int addressHalf = previous == null ? -1 : previous.positions().indexOf(address);
+        BlockPos pos = addressHalf < 0 ? blockPos(address) : previous.halves().get(addressHalf).getBlockPos();
+        var chunk = level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
+        if (chunk == null) return null;
+        var state = chunk.getBlockState(pos);
+        BlockEntity entity = chunk.getBlockEntity(pos);
         if (!(entity instanceof ChestBlockEntity || entity instanceof BarrelBlockEntity) || entity.isRemoved()) return null;
-        List<BlockEntity> halves = new ArrayList<>(2);
-        halves.add(entity);
+        BlockEntity other = null;
         if (state.getBlock() instanceof ChestBlock && state.getValue(ChestBlock.TYPE) != ChestType.SINGLE) {
             BlockPos otherPos = pos.relative(ChestBlock.getConnectedDirection(state));
-            if (!level.hasChunkAt(otherPos)) return null;
-            var otherState = level.getBlockState(otherPos);
-            BlockEntity other = level.getBlockEntity(otherPos);
+            var otherChunk = level.getChunkSource().getChunkNow(otherPos.getX() >> 4, otherPos.getZ() >> 4);
+            if (otherChunk == null) return null;
+            var otherState = otherChunk.getBlockState(otherPos);
+            other = otherChunk.getBlockEntity(otherPos);
             if (!(other instanceof ChestBlockEntity) || other.isRemoved() || otherState.getBlock() != state.getBlock()
                     || otherState.getValue(ChestBlock.TYPE) == ChestType.SINGLE
                     || otherState.getValue(ChestBlock.TYPE) == state.getValue(ChestBlock.TYPE)
                     || !otherPos.relative(ChestBlock.getConnectedDirection(otherState)).equals(pos)) return null;
-            halves.add(other);
         }
-        halves.sort(Comparator.comparingInt((BlockEntity value) -> value.getBlockPos().getX())
-                .thenComparingInt(value -> value.getBlockPos().getY()).thenComparingInt(value -> value.getBlockPos().getZ()));
+        BlockEntity first = entity, second = other;
+        if (other != null && comparePositions(entity.getBlockPos(), other.getBlockPos()) > 0) {
+            first = other; second = entity;
+        }
+        boolean sameHalves = previous != null && previous.halves().size() == (second == null ? 1 : 2)
+                && previous.halves().getFirst() == first && (second == null || previous.halves().get(1) == second);
+        List<BlockEntity> halves = sameHalves ? previous.halves() : second == null ? List.of(first) : List.of(first, second);
         for (BlockEntity half : halves) {
             if (half instanceof RandomizableContainerBlockEntity loot && loot.getLootTable() != null) return null;
             if (((Container)half).getContainerSize() != 27) return null;
         }
         if (!identity.supported(level, halves)) return null;
+        if (sameHalves) {
+            boolean sameIdentities = true;
+            for (int i = 0; i < halves.size(); i++) {
+                if (!previous.identities().get(i).identity().equals(identity.existing(halves.get(i)))) {
+                    sameIdentities = false; break;
+                }
+            }
+            if (sameIdentities) {
+                for (int i = 0; i < previous.positions().size(); i++) note(previous.identities().get(i), previous.positions().get(i));
+                return previous;
+            }
+        }
         List<StorageId> ids = new ArrayList<>(halves.size());
         List<WorldPosition> positions = new ArrayList<>(halves.size());
         List<StockRegion> slots = new ArrayList<>(halves.size() * 27);
@@ -358,8 +377,22 @@ public final class StorageService {
             for (int i = 0; i < 27; i++) slots.add(new StockRegion(id, i));
         }
         Physical result = new Physical(List.copyOf(halves), List.copyOf(ids), List.copyOf(positions), List.copyOf(slots));
-        for (WorldPosition location : positions) tickPhysical.put(location, result);
+        for (int i = 0; i < positions.size(); i++) {
+            WorldPosition location = positions.get(i);
+            for (var registration : registrations(ids.get(i))) {
+                if (registration.positions().contains(location)) {
+                    physicalSnapshots.put(location, result);
+                    break;
+                }
+            }
+        }
         return result;
+    }
+
+    private static int comparePositions(BlockPos first, BlockPos second) {
+        int result = Integer.compare(first.getX(), second.getX());
+        if (result == 0) result = Integer.compare(first.getY(), second.getY());
+        return result == 0 ? Integer.compare(first.getZ(), second.getZ()) : result;
     }
 
     private void remember(StorageRegistry.Registration registration) {
@@ -384,9 +417,12 @@ public final class StorageService {
         }
         if (previous != null) for (StorageId id : previous.storages()) updateMemberships(id);
         for (StorageId id : registration.storages()) updateMemberships(id);
+        if (previous != null) for (StockRegion slot : previous.slots()) updateSlotMemberships(slot);
+        for (StockRegion slot : registration.slots()) updateSlotMemberships(slot);
     }
 
     private void note(StorageId id, WorldPosition address) {
+        if (id.equals(addressIdentities.get(address))) return;
         StorageId previous = addressIdentities.put(address, id);
         if (previous != null && !previous.equals(id)) {
             Set<WorldPosition> old = addresses.get(previous);
@@ -403,10 +439,14 @@ public final class StorageService {
     private boolean conflicted(StorageId id) { return blockedIdentities.contains(id) || addresses.getOrDefault(id, Set.of()).size() > 1; }
     private boolean currentAuthority(StockRegion slot) { return currentAuthority(slot,false); }
     private boolean currentAuthority(StockRegion slot, boolean recovery) {
-        for (var registration : registrations(slot.storage())) {
-            if (!registration.slots().contains(slot)) continue;
+        for (var registration : slotRegistrations.getOrDefault(slot, List.of())) {
             var colony = registry.colony(registration.colonyId());
-            if ((recovery || colony.available()) && registration.positions().stream().allMatch(colony.territory()::contains)) return true;
+            if (!recovery && !colony.available()) continue;
+            boolean inScope = true;
+            for (WorldPosition position : registration.positions()) {
+                if (!colony.territory().contains(position)) { inScope = false; break; }
+            }
+            if (inScope) return true;
         }
         return false;
     }
@@ -417,6 +457,7 @@ public final class StorageService {
         Set<WorldPosition> active = new HashSet<>();
         for (var registration : remembered.values()) active.addAll(registration.positions());
         addressIdentities.entrySet().removeIf(entry -> !active.contains(entry.getKey()));
+        physicalSnapshots.keySet().removeIf(position -> !active.contains(position));
         addresses.entrySet().removeIf(entry -> {
             entry.getValue().removeIf(address -> !active.contains(address));
             return entry.getValue().isEmpty();
@@ -429,6 +470,13 @@ public final class StorageService {
         var entries = memberships.get(id);
         if (entries == null) sourceRegistrations.remove(id);
         else sourceRegistrations.put(id, List.copyOf(entries.values()));
+    }
+    private void updateSlotMemberships(StockRegion slot) {
+        List<StorageRegistry.Registration> registrations = registrations(slot.storage());
+        List<StorageRegistry.Registration> matches = new ArrayList<>(registrations.size());
+        for (var registration : registrations) if (registration.slots().contains(slot)) matches.add(registration);
+        if (matches.isEmpty()) slotRegistrations.remove(slot);
+        else slotRegistrations.put(slot, List.copyOf(matches));
     }
     private CitizenEntity citizen(UUID id, long epoch, String dimension) {
         var record = registry.findCitizen(id).orElse(null);
@@ -451,7 +499,10 @@ public final class StorageService {
         if (level == null || !level.getWorldBorder().isWithinBounds(blockPos(position)) || position.y() < level.getMinBuildHeight() || position.y() >= level.getMaxBuildHeight()) throw new IllegalArgumentException("Storage outside world bounds");
     }
     private void owner() { io.github.kpuctajluk.colonyloom.minecraft.runtime.MinecraftServerRuntime.requireServerThread(server); }
-    private ServerLevel level(String dimension) { return server.getLevel(ResourceKey.create(Registries.DIMENSION, ResourceLocation.parse(dimension))); }
+    private ServerLevel level(String dimension) {
+        return server.getLevel(dimensionKeys.computeIfAbsent(dimension,
+                value -> ResourceKey.create(Registries.DIMENSION, ResourceLocation.parse(value))));
+    }
     private static BlockPos blockPos(WorldPosition position) { return new BlockPos(position.x(), position.y(), position.z()); }
     private static WorldPosition position(ServerLevel level, BlockPos position) { return new WorldPosition(level.dimension().location().toString(), position.getX(), position.getY(), position.getZ()); }
     private static StockIndex.Observation unknown() { return new StockIndex.Observation(null, 0, false); }

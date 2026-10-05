@@ -34,6 +34,7 @@ public final class ManagementViews {
         private enum Phase { SUMMARY, LIMITS, MEMBERS, STOCK, CITIZENS, WORKSHOPS, REGISTRATIONS, WORK, COMPLETE }
         private final ColonyRegistry registry;
         private final UUID actor;
+        private final java.util.function.Function<UUID, io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftDeliveryService.WaitingBuffer> waitingBuffer;
         private final Subscription subscription;
         private final List<String> professions, blueprints;
         private final long authorityRevision;
@@ -52,10 +53,12 @@ public final class ManagementViews {
         private ViewData completed;
 
         public Preparation(ColonyRegistry registry, UUID actor, Subscription subscription,
-                List<String> professions, List<String> blueprints, long stateRevision) {
+                List<String> professions, List<String> blueprints, long stateRevision,
+                java.util.function.Function<UUID, io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftDeliveryService.WaitingBuffer> waitingBuffer) {
             registry.requireOwner();
             if (stateRevision < 0) throw new IllegalArgumentException("INVALID_REVISION");
             this.registry = registry;
+            this.waitingBuffer = java.util.Objects.requireNonNull(waitingBuffer);
             this.actor = actor;
             this.subscription = subscription;
             if (professions.size() > 64 || blueprints.size() > 64) throw new IllegalArgumentException("VIEW_LIMIT");
@@ -131,7 +134,8 @@ public final class ManagementViews {
                         var colony = registry.colony(subscription.colonyId());
                         if (onPage()) emit(new Row(colony.colonyId(), colony.revision(), colony.name(), colony.available() ? "READY" : "BLOCKED",
                                 colony.recoveryBlocked() ? "RECOVERY_AMBIGUOUS" : colony.contentBlocked() ? "CONTENT_UNAVAILABLE" : "NONE",
-                                "authority=" + colony.authorityRevision() + ";territory=" + colony.territory().minX() + "," + colony.territory().minZ() + ".." + colony.territory().maxX() + "," + colony.territory().maxZ(), colony.ownerId()));
+                                "authority=" + colony.authorityRevision() + ";members=" + colony.members().size() + ";memberLimit=" + ColonyRuntime.MAX_MEMBERS
+                                        + ";territory=" + colony.territory().minX() + "," + colony.territory().minZ() + ".." + colony.territory().maxX() + "," + colony.territory().maxZ(), colony.ownerId()));
                         total++;
                         phase = Phase.LIMITS;
                         return;
@@ -181,7 +185,7 @@ public final class ManagementViews {
                                 String reason = citizen.assignedWorkId() == null ? "NONE" : registry.workBoard().work(citizen.assignedWorkId()).waitingReason().name();
                                 emit(new Row(citizen.citizenId(), citizen.revision(), citizen.professionId() == null ? "unassigned" : citizen.professionId(),
                                         citizen.lifecycle() + "/" + citizen.admission() + "/" + citizen.readiness(), reason,
-                                        "food=" + citizen.food() + ";active=" + citizen.activeTimeTicks() + ";pos=" + coordinates(citizen.lastKnownPosition()), citizen.workplaceId()));
+                                        "food=" + citizen.food() + ";active=" + citizen.activeTimeTicks() + ";pos=" + coordinates(citizen.lastKnownPosition()) + capacityDetail(citizen.assignedWorkId()), citizen.workplaceId()));
                             }
                             total++;
                         }
@@ -217,7 +221,7 @@ public final class ManagementViews {
                         var work = registry.workBoard().workAtViewKey(next);
                         if (work != null && work.colonyId().equals(subscription.colonyId())) {
                             if (onPage()) emit(new Row(work.id(), work.commandRevision(), work.typeId(), work.state().name(), work.waitingReason().name(),
-                                    "stage=" + work.stage() + ";priority=" + work.priority() + ";remaining=" + work.remainingActiveTicks(), work.assignee()));
+                                    "stage=" + work.stage() + ";priority=" + work.priority() + ";remaining=" + work.remainingActiveTicks() + capacityDetail(work.id()), work.assignee()));
                             total++;
                         }
                         return;
@@ -231,6 +235,14 @@ public final class ManagementViews {
                     }
                 }
             }
+        }
+
+        private String capacityDetail(UUID workId) {
+            if (workId == null) return "";
+            var buffer = waitingBuffer.apply(workId);
+            if (buffer == null) return "";
+            return ";buffer=" + buffer.role() + ";at=" + (buffer.position() == null ? "unregistered" : coordinates(buffer.position()))
+                    + ";action=FREE_MATCHING_SLOT;cargo=RETAINED";
         }
 
         private void emit(Row row) {

@@ -33,7 +33,7 @@ final class NavigationServiceTest {
     }
     private static final class Backend implements NavigationService.Backend {
         int searches, applies, stops, pendingPortions, routeNodes=5, queryCapacity=Integer.MAX_VALUE;
-        boolean reachable=true, capacityAvailable=true;
+        boolean reachable=true, capacityAvailable=true, exhausted, unavailable, applyAccepted=true;
         WorldPosition position=new WorldPosition("minecraft:overworld",8,64,8);
         NavigationService.Motion motion=NavigationService.Motion.MOVING;
         final Map<UUID,Integer> portions=new HashMap<>();
@@ -41,15 +41,19 @@ final class NavigationServiceTest {
         Runnable duringSearch=() -> {};
         BooleanSupplier validity;
         @Override public WorldPosition position(NavigationService.Request request) { return position; }
-        @Override public NavigationService.Route search(NavigationService.Request request,List<ChunkKey> admitted) {
+        @Override public NavigationService.SearchResult search(NavigationService.Request request,List<ChunkKey> admitted) {
             searches++;searchOrder.add(request.workId());
-            NavigationService.Route result;
-            if (!capacityAvailable || (!portions.containsKey(request.id()) && portions.size() >= queryCapacity)) result=NavigationService.CAPACITY_WAIT_ROUTE;
-            else if (portions.merge(request.id(),1,Integer::sum)<=pendingPortions) result=NavigationService.PENDING_ROUTE;
-            else { portions.remove(request.id()); result=reachable ? () -> routeNodes : null; }
+            NavigationService.SearchResult result;
+            if (!capacityAvailable || (!portions.containsKey(request.id()) && portions.size() >= queryCapacity)) result=NavigationService.SearchOutcome.CAPACITY_WAIT;
+            else if (portions.merge(request.id(),1,Integer::sum)<=pendingPortions) result=NavigationService.SearchOutcome.PENDING;
+            else {
+                portions.remove(request.id());
+                result=exhausted ? NavigationService.SearchOutcome.EXHAUSTED : unavailable ? NavigationService.SearchOutcome.UNAVAILABLE
+                        : reachable ? (NavigationService.Route)() -> routeNodes : NavigationService.SearchOutcome.UNREACHABLE;
+            }
             duringSearch.run();return result;
         }
-        @Override public boolean apply(NavigationService.Request request,NavigationService.Route route,BooleanSupplier stillCurrent) { applies++;validity=stillCurrent;return true; }
+        @Override public boolean apply(NavigationService.Request request,NavigationService.Route route,BooleanSupplier stillCurrent) { applies++;validity=stillCurrent;return applyAccepted; }
         @Override public NavigationService.Motion poll(NavigationService.Request request) { return motion; }
         @Override public void stop(NavigationService.Request request) { stops++;portions.remove(request.id()); }
     }
@@ -63,7 +67,10 @@ final class NavigationServiceTest {
         final UUID colony=id(1),citizen=id(2),work=id(3);
         final WorldPosition target=new WorldPosition("minecraft:overworld",12,64,8);
         long tick;
-        Fixture() {
+        final boolean physicalMoves;
+        Fixture() { this(false); }
+        Fixture(boolean physicalMoves) {
+            this.physicalMoves=physicalMoves;
             registry.addColony(new ColonyRuntime(colony,"Colony",new Territory("minecraft:overworld",0,0,31,31),id(99),Map.of(),0,0,false,null,false));
             addMovement(citizen,id(102),work,Lane.NORMAL,0);
         }
@@ -77,7 +84,8 @@ final class NavigationServiceTest {
             registry.addCitizen(new CitizenRecord(citizen,colony,entity,1,null,null,null,null,Map.of(),Map.of("food",20),CitizenRecord.Lifecycle.ALIVE,
                     CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.READY,0,Map.of(),new WorldPosition("minecraft:overworld",8,64,8),0), proposed -> {});
             registry.bindings().observe(citizen,entity,1);
-            registry.workBoard().createTimer(work,colony,target,null,priority,lane,1000);
+            if(physicalMoves)registry.workBoard().createMove(work,colony,target,priority,lane);
+            else registry.workBoard().createTimer(work,colony,target,null,priority,lane,1000);
             registry.workBoard().transition(work,WorkOrder.State.READY,WorkOrder.Reason.NONE,"movement");
             assertTrue(registry.workBoard().assign(work,citizen));
             navigation.request(work,colony,citizen,1,0,target,lane,priority);
@@ -92,6 +100,20 @@ final class NavigationServiceTest {
         assertEquals(NavigationService.State.MOVING,f.navigation.state(f.work));
         assertTrue(f.chunks.ready(f.work));
         assertTrue(f.chunks.admitted(new ChunkKey("minecraft:overworld",0,-1)));
+        assertEquals(f.target,f.registry.workBoard().work(f.work).target());
+        f.navigation.cancel(f.work);assertEquals(0,f.access.held);
+    }
+    @Test void waitingDisplacedResidentRebuildsNegativeRouteDomainBeforeRetry() {
+        Fixture f=new Fixture(true);f.backend.reachable=false;f.step();
+        assertEquals(WorkOrder.Reason.UNREACHABLE,f.navigation.reason(f.work));
+        UUID original=f.navigation.request(f.work,f.colony,f.citizen,1,0,f.target,Lane.NORMAL,0);
+        f.backend.position=new WorldPosition("minecraft:overworld",8,64,1);
+        f.backend.reachable=true;
+        for(int tick=0;tick<40 && f.navigation.state(f.work)!=NavigationService.State.MOVING;tick++) f.step();
+        assertEquals(NavigationService.State.MOVING,f.navigation.state(f.work));
+        assertTrue(f.chunks.admitted(new ChunkKey("minecraft:overworld",0,-1)));
+        assertEquals(original,f.navigation.request(f.work,f.colony,f.citizen,1,0,f.target,Lane.NORMAL,0));
+        assertEquals(f.citizen,f.registry.workBoard().work(f.work).assignee());
         assertEquals(f.target,f.registry.workBoard().work(f.work).target());
         f.navigation.cancel(f.work);assertEquals(0,f.access.held);
     }
@@ -136,18 +158,24 @@ final class NavigationServiceTest {
         f.backend.duringSearch=() -> f.navigation.invalidate(key);f.step();assertEquals(0,f.backend.applies);
         f.backend.duringSearch=() -> {};f.step();assertEquals(2,f.backend.searches);assertEquals(1,f.backend.applies);
     }
-    @Test void unreachableBackoffHasExactDelaysAndRelevantInvalidationClearsIt() {
+    @Test void unreachableBackoffReleasesDomainAndReadmitsBeforeRetryOrInvalidation() {
         Fixture f=new Fixture();f.backend.reachable=false;f.step();assertEquals(1,f.backend.searches);
-        f.until(20);assertEquals(1,f.backend.searches);f.step();assertEquals(2,f.backend.searches);
-        f.until(60);assertEquals(2,f.backend.searches);f.step();assertEquals(3,f.backend.searches);
+        assertEquals(0,f.registry.admission().used(Resource.CHUNK_DEMANDS));assertEquals(0,f.access.held);
+        assertTrue(f.registry.admission().used(Resource.CACHE_ENTRIES)>0);
+        f.until(20);assertEquals(1,f.backend.searches);f.step();assertEquals(1,f.backend.searches);
+        assertEquals(WorkOrder.Reason.CHUNK_NOT_READY,f.navigation.reason(f.work));
+        f.step();assertEquals(2,f.backend.searches);assertEquals(0,f.registry.admission().used(Resource.CHUNK_DEMANDS));
+        f.until(61);assertEquals(2,f.backend.searches);f.step();assertEquals(2,f.backend.searches);
+        f.step();assertEquals(3,f.backend.searches);
         f.navigation.invalidate(new ChunkKey("minecraft:overworld",20,20));f.step();assertEquals(3,f.backend.searches);
         f.navigation.invalidate(new ChunkKey("minecraft:overworld",0,0));f.backend.reachable=true;f.step();
-        assertEquals(4,f.backend.searches);assertEquals(NavigationService.State.MOVING,f.navigation.state(f.work));
+        assertEquals(3,f.backend.searches);assertEquals(WorkOrder.Reason.CHUNK_NOT_READY,f.navigation.reason(f.work));
+        f.step();assertEquals(4,f.backend.searches);assertEquals(NavigationService.State.MOVING,f.navigation.state(f.work));
         assertFalse(f.navigation.atTarget(f.work));
     }
     @Test void retriesDoubleThroughTheCapWithoutTickSpin() {
         Fixture f=new Fixture();f.backend.reachable=false;
-        long[] attempts={1,21,61,141,301,501,701};
+        long[] attempts={1,22,63,144,305,506,707};
         for (int i=0;i<attempts.length;i++) {
             f.until(attempts[i]-1); assertEquals(i,f.backend.searches);
             f.step(); assertEquals(i+1,f.backend.searches);
@@ -209,8 +237,38 @@ final class NavigationServiceTest {
         f.until(2);assertEquals(2,f.backend.searches);assertEquals(WorkOrder.Reason.BUDGET,f.navigation.reason(f.work));
         f.step();assertEquals(3,f.backend.searches);assertEquals(WorkOrder.Reason.UNREACHABLE,f.navigation.reason(f.work));
         f.until(22);assertEquals(3,f.backend.searches);
+        f.step();assertEquals(3,f.backend.searches);assertEquals(WorkOrder.Reason.CHUNK_NOT_READY,f.navigation.reason(f.work));
         f.step();assertEquals(4,f.backend.searches);assertEquals(WorkOrder.Reason.BUDGET,f.navigation.reason(f.work));
         assertEquals(0,f.backend.applies);
+    }
+    @Test void exhaustedSearchRetainsComputationalReasonDuringBoundedBackoffAndRetry() {
+        Fixture f=new Fixture();f.backend.pendingPortions=2;f.backend.exhausted=true;
+        f.until(2);assertEquals(WorkOrder.Reason.BUDGET,f.navigation.reason(f.work));
+        f.step();assertEquals(WorkOrder.Reason.SEARCH_EXHAUSTED,f.navigation.reason(f.work));
+        assertEquals(0,f.backend.applies);assertTrue(f.backend.portions.isEmpty());assertEquals(0,f.access.held);
+        assertEquals(0,f.registry.admission().used(Resource.CHUNK_DEMANDS));
+        f.registry.workBoard().waitAssigned(f.work,f.navigation.reason(f.work),"move");
+        assertEquals(WorkOrder.Reason.SEARCH_EXHAUSTED,f.registry.workBoard().work(f.work).snapshot().waitingReason());
+        f.until(22);assertEquals(3,f.backend.searches);
+        assertEquals(WorkOrder.Reason.SEARCH_EXHAUSTED,f.navigation.reason(f.work));
+        f.step();assertEquals(3,f.backend.searches);assertEquals(WorkOrder.Reason.CHUNK_NOT_READY,f.navigation.reason(f.work));
+        f.backend.exhausted=false;f.until(26);assertEquals(6,f.backend.searches);
+        assertEquals(NavigationService.State.MOVING,f.navigation.state(f.work));assertEquals(WorkOrder.Reason.NONE,f.navigation.reason(f.work));
+    }
+    @Test void invalidatingExhaustedSearchWakesWithoutWaitingForNegativeBackoff() {
+        Fixture f=new Fixture();f.backend.exhausted=true;f.step();
+        assertEquals(WorkOrder.Reason.SEARCH_EXHAUSTED,f.navigation.reason(f.work));
+        f.backend.exhausted=false;f.navigation.invalidate(new ChunkKey("minecraft:overworld",0,0));
+        f.step();assertEquals(1,f.backend.searches);f.step();
+        assertEquals(2,f.backend.searches);assertEquals(NavigationService.State.MOVING,f.navigation.state(f.work));
+    }
+    @Test void unavailableSearchRejectedApplicationAndObstructionAreNotNegativeRouteProofs() {
+        Fixture unavailable=new Fixture();unavailable.backend.unavailable=true;unavailable.step();
+        assertEquals(WorkOrder.Reason.RECONCILING,unavailable.navigation.reason(unavailable.work));
+        Fixture rejected=new Fixture();rejected.backend.applyAccepted=false;rejected.step();
+        assertEquals(WorkOrder.Reason.RECONCILING,rejected.navigation.reason(rejected.work));
+        Fixture obstructed=new Fixture();obstructed.step();obstructed.backend.motion=NavigationService.Motion.OBSTRUCTED;obstructed.step();
+        assertEquals(WorkOrder.Reason.RECONCILING,obstructed.navigation.reason(obstructed.work));
     }
     @Test void cancellingPendingSearchReleasesQueryCacheAndChunkDemand() {
         Fixture f=new Fixture();f.backend.pendingPortions=2;f.step();
@@ -303,5 +361,73 @@ final class NavigationServiceTest {
         assertEquals(NavigationService.State.MOVING,f.navigation.state(high));
         assertEquals(2,f.backend.applies);assertTrue(f.backend.portions.isEmpty());
         assertTrue(f.budgets.used(Budget.NAVIGATION_STARTS)<=1);
+    }
+    @Test void originalCriticalAndNormalRoutesFinishWithProductionConsumerOrderingAndOneGlobalQuantum() {
+        Fixture f=new Fixture(true);
+        var limits=SimulationLimits.development().scale300Capacity().withBudget(Budget.DIRTY_RESCAN_OBJECTS,1)
+                .withBudget(Budget.NAVIGATION_STARTS,1).withMaxManagedNanos(5_000_000);
+        f.registry.admission().updateLimits(limits);f.budgets.updateLimits(limits);
+        f.backend.pendingPortions=3;f.backend.motion=NavigationService.Motion.ARRIVED;
+        List<UUID> original=new ArrayList<>();original.add(f.work);
+        for(int i=1;i<63;i++)original.add(f.addRequest(i,i%2==0?Lane.NORMAL:Lane.CRITICAL,0));
+        int readyTick=0;
+        while(!original.stream().allMatch(f.chunks::ready)&&readyTick<4000) {
+            f.budgets.beginTick(++readyTick);f.chunks.tick(readyTick);
+        }
+        assertTrue(original.stream().allMatch(f.chunks::ready),"Fixture routes must be actually admitted and ready before measuring continuation");
+        var scheduler=new io.github.kpuctajluk.colonyloom.core.scheduler.SimulationScheduler(f.registry.workBoard(),f.budgets);
+        scheduler.physicalExecutor(WorkOrder.MOVE,new io.github.kpuctajluk.colonyloom.core.scheduler.SimulationScheduler.PhysicalExecutor() {
+            public void step(WorkOrder work,long tick) {
+                f.navigation.request(work.id(),work.colonyId(),work.assignee(),1,0,work.target(),work.lane(),work.priority());
+                if(f.navigation.state(work.id())==NavigationService.State.WAITING)f.registry.workBoard().waitAssigned(work.id(),f.navigation.reason(work.id()),"movement");
+            }
+            public void cancel(UUID work) { f.navigation.cancel(work); }
+        });
+        scheduler.beforeWork(tick -> {
+            int first=(int)((tick/2)%9);
+            for(int offset=0;offset<9;offset++)switch((first+offset)%9) {
+                case 0 -> f.chunks.tick(tick);
+                case 2 -> f.navigation.tick(tick);
+                default -> f.budgets.tryConsume(Budget.DIRTY_RESCAN_OBJECTS,Lane.SERVICE);
+            }
+        });
+        for(int tick=readyTick+1;tick<=readyTick+1200;tick++) {
+            int before=f.backend.searches;scheduler.tick(tick);
+            assertTrue(f.backend.searches-before<=1);
+            assertTrue(f.budgets.used(Budget.NAVIGATION_STARTS)<=1);
+            assertTrue(f.budgets.used(Budget.DIRTY_RESCAN_OBJECTS)<=1);
+            if(original.stream().allMatch(f.navigation::atTarget))break;
+        }
+        assertEquals(63,f.backend.applies,() -> original.stream().filter(work -> !f.navigation.atTarget(work)).map(work -> work+":"+f.registry.workBoard().work(work).state()+":"+f.navigation.state(work)+":"+f.navigation.reason(work)+":"+f.chunks.state(work)+":"+f.chunks.ready(work)+":"+f.backend.searchOrder.stream().filter(work::equals).count()).toList().toString());
+        for(UUID work:original) {
+            assertTrue(f.navigation.atTarget(work),"Original route was buried: "+work);
+        }
+        f.budgets.beginTick(readyTick+1201);f.navigation.tick(readyTick+1201);
+        assertEquals(0,f.budgets.used(Budget.NAVIGATION_STARTS),"Cached arrivals must not consume navigation portions");
+        assertEquals(63,f.navigation.diagnostics().get("requests"));
+        assertEquals(f.budgets.totalConsumed(Budget.NAVIGATION_STARTS),f.registry.metrics().snapshot().get("NAVIGATION_UNIT").count());
+    }
+
+    @Test void paidDiscoveryStillRequiresActualReadinessAndHonorsGlobalTimeGuard() {
+        Fixture f=new Fixture();f.access.available=false;
+        f.budgets.updateLimits(f.budgets.limits().withBudget(Budget.DIRTY_RESCAN_OBJECTS,1).withBudget(Budget.NAVIGATION_STARTS,1));
+        for(int tick=1;tick<=40;tick++) {
+            f.budgets.beginTick(tick);f.chunks.tick(tick);f.navigation.tick(tick);
+        }
+        assertEquals(0,f.backend.searches);assertFalse(f.navigation.atTarget(f.work));
+        f.access.available=true;
+        for(int tick=41;tick<=80 && f.backend.applies==0;tick++) {
+            f.budgets.beginTick(tick);f.chunks.tick(tick);f.navigation.tick(tick);
+        }
+        assertEquals(1,f.backend.applies);
+        f.navigation.close();
+        var clock=new java.util.concurrent.atomic.AtomicLong();
+        var guarded=new GlobalWorkBudgets(f.budgets.limits().withMaxManagedNanos(5_000_000),clock::get);
+        var navigation=new NavigationService(f.registry,guarded,f.chunks,f.backend);
+        navigation.request(f.work,f.colony,f.citizen,1,0,f.target,Lane.NORMAL,0);
+        guarded.beginTick(1);clock.set(5_000_000);
+        int before=f.backend.searches;navigation.tick(1);
+        assertEquals(before,f.backend.searches);assertEquals(0,guarded.used(Budget.NAVIGATION_STARTS));
+        navigation.close();
     }
 }

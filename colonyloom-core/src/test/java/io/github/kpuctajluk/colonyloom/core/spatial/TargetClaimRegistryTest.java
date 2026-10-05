@@ -13,6 +13,7 @@ import io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger;
 import io.github.kpuctajluk.colonyloom.core.scheduler.GlobalWorkBudgets;
 import io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.Snapshot;
 import io.github.kpuctajluk.colonyloom.core.spatial.TargetClaimRegistry.State;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -44,6 +45,88 @@ final class TargetClaimRegistryTest {
             RegistrySnapshot old = registry.snapshot();
             registry.restore(new RegistrySnapshot(old.colonies(),old.citizens(),List.of(new BuildingRecord(BUILDING, A, "colonyloom:workshop", new WorldPosition(OVERWORLD, 0, 64, 0), 0)),old.tombstones(),old.observations(),old.works(),old.targetClaims(),java.util.List.of(),java.util.List.of(),java.util.List.of(),io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty(),io.github.kpuctajluk.colonyloom.core.supply.SupplySnapshot.empty()));
         }
+    }
+
+    private static SimulationLimits denseLimits() {
+        return SimulationLimits.development().withResource(Resource.SPATIAL_INDEX_LINKS, 128 * 128);
+    }
+
+    private static List<Snapshot> denseTargets(boolean chain) {
+        List<Snapshot> snapshots = new ArrayList<>();
+        for (int owner = 0; owner < 128; owner++) {
+            int height = owner - 64;
+            snapshots.add(new Snapshot(id(1000 + owner), owner % 2 == 0 ? A : B, null, OVERWORLD,
+                    -16 * 64, height, -1, 16 * 64 - 1, chain ? height + 1 : height, -1, 7));
+        }
+        return List.copyOf(snapshots);
+    }
+
+    @Test void denseMaximumLinkRestoreGrantsDisjointHeightsAndAccountsEveryLink() {
+        Fixture f = new Fixture(denseLimits());
+        List<Snapshot> snapshots = denseTargets(false);
+        f.claims.restore(snapshots);
+        assertEquals(snapshots, f.claims.snapshots());
+        for (Snapshot snapshot : snapshots) assertTrue(f.claims.owns(snapshot.ownerId(), 7));
+        assertEquals(128, f.registry.admission().used(Resource.PHYSICAL_TARGETS));
+        assertEquals(128 * 128, f.registry.admission().used(Resource.SPATIAL_INDEX_LINKS));
+        f.ticks(1);
+        assertEquals(0, f.budgets.used(Budget.BLUEPRINT_COMPARISONS));
+        f.claims.close();
+        assertEquals(0, f.registry.admission().used(Resource.PHYSICAL_TARGETS));
+        assertEquals(0, f.registry.admission().used(Resource.SPATIAL_INDEX_LINKS));
+    }
+
+    @Test void denseConflictChainIsFullyCheckedBeforeAtomicPublication() {
+        Fixture f = new Fixture(denseLimits());
+        Snapshot old = target(FIRST, A, 4096, 4096, 0);
+        f.claims.restore(List.of(old));
+        List<Snapshot> snapshots = denseTargets(true);
+        AdmissionLedger replacement = new AdmissionLedger(denseLimits(), () -> {});
+        try (TargetClaimRegistry.PreparedRestore prepared = f.claims.prepareRestore(snapshots, replacement)) {
+            assertEquals(List.of(old), f.claims.snapshots());
+            assertTrue(f.claims.owns(FIRST, 0));
+            for (Snapshot snapshot : snapshots) assertFalse(f.claims.owns(snapshot.ownerId(), 7));
+            assertEquals(1, f.registry.admission().used(Resource.PHYSICAL_TARGETS));
+            assertEquals(128, replacement.used(Resource.PHYSICAL_TARGETS));
+            assertEquals(128 * 128, replacement.used(Resource.SPATIAL_INDEX_LINKS));
+            prepared.commit();
+            assertFalse(f.claims.owns(FIRST, 0));
+            assertEquals(snapshots, f.claims.snapshots());
+            for (Snapshot snapshot : snapshots) {
+                assertEquals(State.CONFLICT, f.claims.state(snapshot.ownerId()));
+                assertFalse(f.claims.owns(snapshot.ownerId(), 7));
+            }
+        }
+        assertEquals(0, f.registry.admission().used(Resource.PHYSICAL_TARGETS));
+        assertEquals(0, f.registry.admission().used(Resource.SPATIAL_INDEX_LINKS));
+        f.ticks(1);
+        assertEquals(0, f.budgets.used(Budget.BLUEPRINT_COMPARISONS));
+        f.claims.close();
+        assertEquals(0, replacement.used(Resource.PHYSICAL_TARGETS));
+        assertEquals(0, replacement.used(Resource.SPATIAL_INDEX_LINKS));
+    }
+
+    @Test void densePreparationCannotPublishAfterLiveIndexChangesAndReleasesItsReservations() {
+        Fixture f = new Fixture(denseLimits());
+        Snapshot old = target(FIRST, A, 4096, 4096, 0);
+        Snapshot added = target(SECOND, B, 8192, 8192, 0);
+        f.claims.restore(List.of(old));
+        AdmissionLedger replacement = new AdmissionLedger(denseLimits(), () -> {});
+        try (TargetClaimRegistry.PreparedRestore prepared = f.claims.prepareRestore(denseTargets(false), replacement)) {
+            f.claims.propose(added);
+            assertThrows(IllegalStateException.class, prepared::commit);
+            assertTrue(f.claims.owns(FIRST, 0));
+            assertEquals(State.PENDING, f.claims.state(SECOND));
+            assertEquals(List.of(old, added), f.claims.snapshots());
+        }
+        assertEquals(0, replacement.used(Resource.PHYSICAL_TARGETS));
+        assertEquals(0, replacement.used(Resource.SPATIAL_INDEX_LINKS));
+        assertEquals(2, f.registry.admission().used(Resource.PHYSICAL_TARGETS));
+        assertEquals(2, f.registry.admission().used(Resource.SPATIAL_INDEX_LINKS));
+        f.claims.restore(List.of());
+        assertEquals(List.of(), f.claims.snapshots());
+        assertEquals(0, f.registry.admission().used(Resource.PHYSICAL_TARGETS));
+        assertEquals(0, f.registry.admission().used(Resource.SPATIAL_INDEX_LINKS));
     }
 
     @Test void crossColonyOverlapCannotGrantButDisjointBlocksInOneChunkCan() {
@@ -240,6 +323,91 @@ final class TargetClaimRegistryTest {
         assertFalse(f.claims.owns(FIRST, 0));
         f.ticks(20);
         assertTrue(f.claims.owns(FIRST, 0));
+    }
+
+    @Test void thirtyGrantedClaimsLeaveFrozenFourUnitBudgetForConstructionConsumers() {
+        Fixture f = new Fixture(SimulationLimits.development().withBudget(Budget.BLUEPRINT_COMPARISONS, 4));
+        for (int owner = 0; owner < 30; owner++) {
+            f.claims.propose(target(id(1000 + owner), A, owner * 32, owner * 32, 0));
+        }
+        f.ticks(23);
+        for (int owner = 0; owner < 30; owner++) assertTrue(f.claims.owns(id(1000 + owner), 0));
+        // Each one-chunk claim still pays for its own candidate, bucket end, and grant.
+        assertEquals(90, f.budgets.totalConsumed(Budget.BLUEPRINT_COMPARISONS));
+        int[] constructionCursors = new int[30];
+        int consumerCursor = 0;
+        for (int tick = 0; tick < 30; tick++) {
+            f.ticks(1);
+            assertEquals(0, f.budgets.used(Budget.BLUEPRINT_COMPARISONS));
+            for (int unit = 0; unit < 4; unit++) {
+                assertTrue(f.budgets.tryConsume(Budget.BLUEPRINT_COMPARISONS, AdmissionLedger.Lane.NORMAL));
+                constructionCursors[consumerCursor]++;
+                consumerCursor = (consumerCursor + 1) % constructionCursors.length;
+            }
+            assertFalse(f.budgets.tryConsume(Budget.BLUEPRINT_COMPARISONS, AdmissionLedger.Lane.NORMAL));
+        }
+        for (int cursor : constructionCursors) assertEquals(4, cursor);
+    }
+
+    @Test void widePendingClaimCannotMonopolizeFourUnitRoundRobinService() {
+        Fixture f = new Fixture(SimulationLimits.development().withBudget(Budget.BLUEPRINT_COMPARISONS, 4));
+        f.claims.propose(target(FIRST, A, 0, 16 * 128 - 1, 0));
+        for (int owner = 0; owner < 29; owner++) {
+            f.claims.propose(target(id(1000 + owner), A, 4096 + owner * 32, 4096 + owner * 32, 0));
+        }
+        f.ticks(23);
+        assertEquals(State.PENDING, f.claims.state(FIRST));
+        for (int owner = 0; owner < 29; owner++) assertTrue(f.claims.owns(id(1000 + owner), 0));
+        assertEquals(92, f.budgets.totalConsumed(Budget.BLUEPRINT_COMPARISONS));
+        f.ticks(64);
+        assertTrue(f.claims.owns(FIRST, 0));
+        f.ticks(1);
+        assertEquals(0, f.budgets.used(Budget.BLUEPRINT_COMPARISONS));
+    }
+
+    @Test void dormantConflictsSpendNothingAndReopenOnProposalAndRelease() {
+        Fixture f = new Fixture(SimulationLimits.development().withBudget(Budget.BLUEPRINT_COMPARISONS, 4));
+        UUID third = id(13), fourth = id(14);
+        f.claims.restore(List.of(target(FIRST, A, 0, 0, 0), target(SECOND, B, 0, 0, 0),
+                target(third, A, 32, 32, 0), target(fourth, B, 32, 32, 0)));
+        f.ticks(1);
+        assertEquals(0, f.budgets.used(Budget.BLUEPRINT_COMPARISONS));
+        f.claims.propose(target(SECOND, B, 64, 64, 1));
+        // Remove a reactivated conflict before it receives service, then mutate again.
+        f.claims.release(third);
+        f.ticks(20);
+        assertTrue(f.claims.owns(FIRST, 0));
+        assertTrue(f.claims.owns(SECOND, 1));
+        assertTrue(f.claims.owns(fourth, 0));
+        f.ticks(1);
+        assertEquals(0, f.budgets.used(Budget.BLUEPRINT_COMPARISONS));
+        // New conflicting debt must not revoke a stable grant or recur once resolved.
+        f.claims.propose(target(third, A, 64, 64, 1));
+        f.ticks(5);
+        assertEquals(State.CONFLICT, f.claims.state(third));
+        assertTrue(f.claims.owns(SECOND, 1));
+        f.ticks(1);
+        assertEquals(0, f.budgets.used(Budget.BLUEPRINT_COMPARISONS));
+        f.claims.release(SECOND);
+        f.ticks(5);
+        assertTrue(f.claims.owns(third, 1));
+        f.ticks(1);
+        assertEquals(0, f.budgets.used(Budget.BLUEPRINT_COMPARISONS));
+    }
+
+    @Test void mutationDuringPortionedComparisonReopensAlreadyDormantConflictDebt() {
+        Fixture f = new Fixture(SimulationLimits.development().withBudget(Budget.BLUEPRINT_COMPARISONS, 1));
+        UUID third = id(13);
+        f.claims.restore(List.of(target(FIRST, A, 0, 0, 0), target(SECOND, B, 0, 0, 0)));
+        f.claims.propose(target(third, A, 64, 95, 0));
+        f.ticks(1);
+        assertEquals(State.PENDING, f.claims.state(third));
+        f.claims.release(SECOND);
+        f.ticks(20);
+        assertTrue(f.claims.owns(FIRST, 0));
+        assertTrue(f.claims.owns(third, 0));
+        f.ticks(1);
+        assertEquals(0, f.budgets.used(Budget.BLUEPRINT_COMPARISONS));
     }
 
     @Test void failedMutationBarrierCannotRevokeGrantOrLeakExpandedLinks() {

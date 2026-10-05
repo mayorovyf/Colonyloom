@@ -41,6 +41,16 @@ final class DurableNbt {
             throw new IOException("Invalid or oversized NBT file: " + path, exception);
         }
     }
+    static void immutableBackup(Path source,Path backup) throws IOException {
+        Files.createDirectories(backup.getParent());
+        try { Files.copy(source,backup); }
+        catch(java.nio.file.FileAlreadyExistsException exists) {
+            if(!Files.isRegularFile(backup,LinkOption.NOFOLLOW_LINKS) || Files.mismatch(source,backup)!=-1)
+                throw new IOException("Conflicting immutable Colonyloom migration backup: "+backup,exists);
+        }
+        force(backup);
+        if(Files.mismatch(source,backup)!=-1)throw new IOException("Colonyloom migration backup verification failed: "+backup);
+    }
 
     static void writeVerified(Path path, CompoundTag tag, long limit) throws IOException {
         if (tag.sizeInBytes() > limit) {

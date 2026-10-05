@@ -4,7 +4,6 @@ import io.github.kpuctajluk.colonyloom.core.colony.ColonyRegistry;
 import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Budget;
 import io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger;
 import io.github.kpuctajluk.colonyloom.core.scheduler.GlobalWorkBudgets;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,7 +32,6 @@ public final class SupplyPlanner implements AutoCloseable {
     private RecipeProvider recipes;
     private PhysicalAccess physical;
     private RecipeGraphCursor cursor;
-    private long serviceSequence;
     private boolean finalizingStock;
     private long finalizingRevision;
     private Demand.Snapshot stockSearchRoot;
@@ -55,13 +53,13 @@ public final class SupplyPlanner implements AutoCloseable {
         registry.requireOwner(); close(); this.recipes = Objects.requireNonNull(recipes); this.physical = Objects.requireNonNull(physical);
     }
 
-    public void rebuild() { registry.requireOwner(); closeCursor(); serviced.clear(); lastService.clear(); serviceSequence = 0; }
+    public void rebuild() { registry.requireOwner(); closeCursor(); serviced.clear(); }
 
     public void tick(long tick) {
         registry.requireOwner();
         if (recipes == null || physical == null) return;
         if (cursor != null) {
-            Demand current = supply.demands().stream().filter(value -> value.id().equals(cursor.root().id())).findFirst().orElse(null);
+            Demand current = supply.findDemand(cursor.root().id());
             long expectedRevision = finalizingStock ? finalizingRevision : cursor.root().revision();
             if (current == null || !registry.colony(current.snapshot().colonyId()).available()
                     || current.snapshot().revision() != expectedRevision || current.deficit() == 0) closeCursor();
@@ -76,6 +74,7 @@ public final class SupplyPlanner implements AutoCloseable {
                 Demand demand = finalizingStock && stockSearchRoot != null ? supply.demand(stockSearchRoot.id()) : next();
                 if (demand == null) return;
                 if (!budgets.tryConsume(Budget.GRAPH_EXPANSIONS, demand.snapshot().lane())) return;
+                if (!registry.colony(demand.snapshot().colonyId()).available()) { handoff(demand.id()); continue; }
                 if (demand.snapshot().goalKind() == Demand.GoalKind.DELIVERY || supply.foodConsumer(demand.id())) {
                     try {
                         if (!reserveAvailableStock(demand, tick)) return;
@@ -125,12 +124,12 @@ public final class SupplyPlanner implements AutoCloseable {
             }
             UUID id = demand.id(); closeCursor(); handoff(id);
             // Each root receives at most one terminal attempt per tick, including capacity waits.
-            if (next() == null) return;
+            if (!budgets.timeAvailable()) return;
         }
     }
 
     private boolean reserveAvailableStock(Demand demand, long tick) {
-        var production = supply.productionOrders().stream().filter(order -> order.id().equals(demand.snapshot().ownerId())).findFirst().orElse(null);
+        var production = supply.findProduction(demand.snapshot().ownerId());
         if (production != null) return reserveProductionKit(demand, production, tick);
         if (!finalizingStock) {
             finalizingStock = true; finalizingRevision = demand.snapshot().revision(); stockSearchRoot = demand.snapshot();
@@ -152,7 +151,10 @@ public final class SupplyPlanner implements AutoCloseable {
                 long available = Math.min(candidate.available(), registry.storage().index().free(candidate.slot(), tick));
                 long count = Math.min(demand.deficit(), Math.min(available, observed.count()));
                 if (count > 0) {
-                    supply.coverStock(demand.id(), candidate.slot(), candidate.item(), count, tick);
+                    if(supply.foodConsumer(demand.id())) {
+                        var share=supply.reserveStock(UUID.randomUUID(),demand.id(),UUID.randomUUID(),candidate.slot(),candidate.item(),count,tick);
+                        supply.allocateLocalReservation(share.id());
+                    } else supply.coverStock(demand.id(), candidate.slot(), candidate.item(), count, tick);
                     finalizingRevision = demand.snapshot().revision();
                 }
                 if (demand.deficit() == 0) return true;
@@ -201,44 +203,34 @@ public final class SupplyPlanner implements AutoCloseable {
 
 
     private Demand next() {
-        long currentTick = budgets.tick();
-        boolean critical=false,service=false,normal=false;
-        for(var demand:supply.demands())if(eligible(demand,currentTick))switch(demand.snapshot().lane()) {
-            case CRITICAL -> critical=true;
-            case SERVICE -> service=true;
-            case NORMAL -> normal=true;
-        }
-        var lane=budgets.chooseLane(Budget.GRAPH_EXPANSIONS,critical,service,normal);if(lane==null)return null;
-        return supply.demands().stream().filter(d -> eligible(d,currentTick)&&d.snapshot().lane()==lane)
-                .min(Comparator.comparingLong((Demand d) -> lastService.getOrDefault(d.id(), Long.MIN_VALUE))
-                        .thenComparing(Comparator.comparingInt((Demand d) -> d.snapshot().priority()).reversed())
-                        .thenComparingLong(d -> d.snapshot().createdTick()).thenComparing(Demand::id)).orElse(null);
+        long tick = budgets.tick();
+        Demand critical = supply.planningCandidate(AdmissionLedger.Lane.CRITICAL);
+        Demand service = supply.planningCandidate(AdmissionLedger.Lane.SERVICE);
+        Demand normal = supply.planningCandidate(AdmissionLedger.Lane.NORMAL);
+        var lane = budgets.chooseLane(Budget.GRAPH_EXPANSIONS, eligible(critical, tick), eligible(service, tick), eligible(normal, tick));
+        return lane == null ? null : supply.planningCandidate(lane);
     }
-    private boolean eligible(Demand demand,long tick) {
-        return demand.deficit()>0 && registry.colony(demand.snapshot().colonyId()).available()
-                && demand.snapshot().status()!=Demand.Status.CANCELLED && demand.snapshot().status()!=Demand.Status.COMPLETED
-                && serviced.getOrDefault(demand.id(),Long.MIN_VALUE)!=tick;
+    private boolean eligible(Demand demand, long tick) {
+        return demand != null && serviced.getOrDefault(demand.id(), Long.MIN_VALUE) != tick;
     }
-    private final Map<UUID, Long> lastService = new HashMap<>();
     private java.util.Set<ItemMatcher> ancestors(Demand demand) {
         var ancestors = new java.util.HashSet<ItemMatcher>();
         var visited = new java.util.HashSet<UUID>();
         UUID owner = demand.snapshot().ownerId();
         while (visited.add(owner)) {
-            UUID currentOwner = owner;
-            var order = supply.productionOrders().stream().filter(value -> value.id().equals(currentOwner)).findFirst().orElse(null);
+            var order = supply.findProduction(owner);
             if (order == null) break;
             Demand parent = supply.demand(order.ownerDemandId());
             ancestors.add(parent.snapshot().matcher()); owner = parent.snapshot().ownerId();
         }
         return ancestors;
     }
-    private void handoff(UUID id) { serviced.put(id, budgets.tick()); lastService.put(id, ++serviceSequence); }
+    private void handoff(UUID id) { serviced.put(id, budgets.tick()); supply.planningServiced(id); }
     private void closeCursor() {
         if (cursor != null) { cursor.close(); cursor = null; }
         finalizingStock = false; stockSearchRoot = null; stockPage = null; stockOffset = 0; stockIndex = 0;
         kitSearch = null; preparedKit = null; kitInputs = null; kitOrderId = null; kitIngredient = 0; kitOffset = 0;
     }
     public int activeGraphNodes() { registry.requireOwner(); return cursor == null ? 0 : cursor.activeNodes(); }
-    @Override public void close() { registry.requireOwner(); closeCursor(); serviced.clear(); lastService.clear(); serviceSequence = 0; }
+    @Override public void close() { registry.requireOwner(); closeCursor(); serviced.clear(); }
 }
