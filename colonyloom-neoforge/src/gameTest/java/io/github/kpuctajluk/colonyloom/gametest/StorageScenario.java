@@ -33,6 +33,17 @@ final class StorageScenario {
     private static final class Run {
         MinecraftServerRuntime runtime;ServerPlayer actor;UUID colony;CompoundTag manifest;
         int ticks,step,changedAt;boolean done;StockRegion chestSlot,barrelSlot;ItemDescriptor item;
+        long calibrationStart, measurementStart;
+        UUID calibrationColony, calibrationCitizen, calibrationEntity, calibrationGoal;
+        UUID withdrawnProduction;
+        UUID retirementProbe;
+        StockRegion calibrationInput;
+        ItemDescriptor calibrationOutput;
+        long suppliedPlanks, removedStairs, calibrationCycles, measurementCycles, measurementSupplied, measurementRemoved;
+        long windowStart, windowGraph, windowStorage, windowCycles;
+        int retainedProductionHighWater;
+        boolean productionRetirementObserved;
+        final List<JsonObject> calibrationWindows=new ArrayList<>();
     }
     StorageScenario() {
         NeoForge.EVENT_BUS.addListener(this::configure);NeoForge.EVENT_BUS.addListener(this::tick);
@@ -44,11 +55,14 @@ final class StorageScenario {
     private void tick(ServerTickEvent.Post event) {
         if(phase().isEmpty())return;var server=event.getServer();var run=runs.computeIfAbsent(server,ignored->new Run());if(run.done)return;
         try {
-            if(!server.isDedicatedServer()||!List.of("exercise","verify").contains(phase())||!Files.isRegularFile(world(server).resolve("colonyloom-test-world")))throw new IllegalStateException("Stock fixture requires marked disposable dedicated world");
-            if(++run.ticks>1800)throw new IllegalStateException("Stock fixture progress timeout step="+run.step);
+            if(!server.isDedicatedServer()||!List.of("exercise","verify","calibrate").contains(phase())||!Files.isRegularFile(world(server).resolve("colonyloom-test-world")))throw new IllegalStateException("Stock fixture requires marked disposable dedicated world");
+            if(++run.ticks>(phase().equals("calibrate")?24000:1800))throw new IllegalStateException("Stock fixture progress timeout step="+run.step);
             if(run.runtime==null)return;
             if(run.actor==null){var profile=new GameProfile(OWNER,"StockOwner");server.getProfileCache().add(profile);run.actor=new ServerPlayer(server,server.overworld(),profile,ClientInformation.createDefault());run.actor.moveTo(8.5,64,14.5,0,0);server.overworld().setChunkForced(0,0,true);}
+            if(phase().equals("calibrate")&&run.calibrationStart==0)server.overworld().setChunkForced(2,0,true);
             if(run.ticks<60||!server.overworld().isPositionEntityTicking(LEFT))return;
+            if(phase().equals("calibrate")&&run.calibrationStart==0&&!server.overworld().isPositionEntityTicking(new BlockPos(40,64,8)))return;
+            if(phase().equals("calibrate")){calibrate(server,run);return;}
             if(phase().equals("verify")){verify(server,run);return;}
             exercise(server,run);
         } catch(Exception failure) {
@@ -145,6 +159,116 @@ final class StorageScenario {
             command(server,run,"colonyloom storage stock "+run.colony);finish(server,run,"exercise_complete");
         }
     }
+    private static void calibrate(MinecraftServer server,Run run)throws Exception {
+        long now=System.nanoTime();
+        if(run.calibrationStart==0) {
+            run.manifest=read(world(server).resolve(MANIFEST));run.colony=run.manifest.getUUID("colony");
+            initializeCalibration(server,run);run.calibrationStart=now;return;
+        }
+        cycleCalibration(server,run);
+        if(run.measurementStart==0) {
+            if(now-run.calibrationStart<300_000_000_000L)return;
+            var warmup=run.runtime.metrics().snapshot();
+            require(server,warmup.get("GRAPH_UNIT").count()>0&&warmup.get("STORAGE_EXTERNAL").count()>0&&run.calibrationCycles>0,
+                    "calibration_warmup_activity","Actual recipe graph, native barrel observations and completed batches during300second warmup");
+            run.runtime.metrics().reset();run.measurementStart=run.windowStart=now;
+            run.measurementCycles=run.windowCycles=run.calibrationCycles;
+            run.measurementSupplied=run.suppliedPlanks;run.measurementRemoved=run.removedStairs;return;
+        }
+        if(now-run.windowStart>=60_000_000_000L) {
+            var timers=run.runtime.metrics().snapshot();long graph=timers.get("GRAPH_UNIT").count(),storage=timers.get("STORAGE_EXTERNAL").count();
+            var window=new JsonObject();window.addProperty("elapsedNanos",now-run.windowStart);
+            window.addProperty("graphCalls",graph-run.windowGraph);window.addProperty("nativeStorageCalls",storage-run.windowStorage);
+            window.addProperty("nativeBatches",run.calibrationCycles-run.windowCycles);run.calibrationWindows.add(window);
+            require(server,graph>run.windowGraph&&storage>run.windowStorage&&run.calibrationCycles>run.windowCycles,
+                    "calibration_active_window",window.toString());
+            run.windowStart=now;run.windowGraph=graph;run.windowStorage=storage;run.windowCycles=run.calibrationCycles;
+        }
+        if(now-run.measurementStart<600_000_000_000L||run.calibrationWindows.size()<10)return;
+        require(server,run.calibrationCycles>run.measurementCycles&&run.suppliedPlanks>run.measurementSupplied&&run.removedStairs>run.measurementRemoved,
+                "calibration_native_samples","Ten active windows; recurring real6-plank kits and4-stair batches; existing graph/stock budgets and proofs");
+        finish(server,run,"calibrate_complete");
+    }
+    private static void initializeCalibration(MinecraftServer server,Run run)throws Exception {
+        var level=server.overworld();var core=run.runtime.core();
+        for(int x=32;x<48;x++)for(int z=0;z<16;z++) {
+            var floor=new BlockPos(x,63,z);level.setBlock(floor,Blocks.STONE.defaultBlockState(),3);
+            for(int y=1;y<=3;y++)level.setBlock(floor.above(y),Blocks.AIR.defaultBlockState(),3);
+        }
+        level.setChunkForced(2,0,true);
+        run.calibrationColony=uuid(command(server,run,"colonyloom colony create CalibrationRecipe 32 64 0 47 64 15"),"colony");
+        var barrel=new BlockPos(40,64,8);level.setBlock(barrel,Blocks.BARREL.defaultBlockState(),3);level.setBlock(barrel.east(),Blocks.CRAFTING_TABLE.defaultBlockState(),3);
+        command(server,run,"colonyloom storage register "+run.calibrationColony+" 40 64 8 workshop");
+        command(server,run,"colonyloom building register "+run.calibrationColony+" 41 64 8 40 64 8");
+        var workshop=core.registry().storage().workshops().stream().filter(value -> value.colonyId().equals(run.calibrationColony)).findFirst().orElseThrow();
+        var created=command(server,run,"colonyloom citizen create "+run.calibrationColony+" 40 64 9");
+        run.calibrationCitizen=uuid(created,"citizen");run.calibrationEntity=uuid(created,"entity");
+        command(server,run,"colonyloom storage register-citizen "+run.calibrationColony+" "+run.calibrationCitizen+" workshop");
+        command(server,run,"colonyloom citizen workplace "+run.calibrationCitizen+" "+workshop.id());
+        command(server,run,"colonyloom citizen assign "+run.calibrationCitizen+" colonyloom:carpenter");
+        var registration=core.registry().storage().registrations(run.calibrationColony).stream().filter(value -> value.role().equals("workshop")).findFirst().orElseThrow();
+        run.calibrationInput=registration.slots().getFirst();
+        run.calibrationOutput=io.github.kpuctajluk.colonyloom.minecraft.storage.NativeItemDescriptor.describe(new ItemStack(Items.OAK_STAIRS),server.registryAccess());
+        run.calibrationGoal=UUID.randomUUID();
+        core.registry().supply().request(run.calibrationGoal,run.calibrationColony,UUID.randomUUID(),new io.github.kpuctajluk.colonyloom.core.supply.ItemMatcher("minecraft:oak_stairs",run.calibrationOutput),4,
+                io.github.kpuctajluk.colonyloom.core.supply.Demand.GoalKind.CONSUMPTION,position(barrel),io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL,10,core.serverTick());
+        for(var citizen:core.registry().citizens(run.colony))if(level.getEntity(citizen.entityId()) instanceof io.github.kpuctajluk.colonyloom.minecraft.entity.CitizenEntity npc) {
+            npc.inventory().setItem(npc.inventory().getContainerSize()-1,new ItemStack(Items.BREAD,64));npc.inventory().setChanged();
+            fact(server,"calibration_external_food",true,"citizen="+citizen.citizenId()+" supplied=64bread");
+        }
+    }
+    private static void cycleCalibration(MinecraftServer server,Run run)throws Exception {
+        var core=run.runtime.core();var storage=run.runtime.storage();var supply=core.registry().supply();
+        int retainedProductions = supply.productionCount();
+        run.retainedProductionHighWater = Math.max(run.retainedProductionHighWater, retainedProductions);
+        if (run.retirementProbe != null && supply.findProduction(run.retirementProbe) == null) run.productionRetirementObserved = true;
+        if(!(server.overworld().getEntity(run.calibrationEntity) instanceof io.github.kpuctajluk.colonyloom.minecraft.entity.CitizenEntity citizen))return;
+        requireCalibrationIdentity(run,citizen);
+        var inventory=citizen.inventory();
+        if(inventory.getItem(inventory.getContainerSize()-1).isEmpty()) {
+            inventory.setItem(inventory.getContainerSize()-1,new ItemStack(Items.BREAD,64));inventory.setChanged();
+            fact(server,"calibration_external_food",true,"citizen="+run.calibrationCitizen+" supplied=64bread");
+        }
+        Container barrel=storage.currentContainer(run.calibrationInput);if(barrel==null)return;
+        if(barrel.getItem(run.calibrationInput.slot()).isEmpty()) {
+            barrel.setItem(run.calibrationInput.slot(),new ItemStack(Items.OAK_PLANKS,6));barrel.setChanged();run.suppliedPlanks+=6;
+            fact(server,"calibration_external_input",true,"slot="+run.calibrationInput+" supplied=6planks total="+run.suppliedPlanks);
+        }
+        var goal=supply.demand(run.calibrationGoal).snapshot();
+        if(goal.allocated()!=4||goal.covered()!=0||goal.fulfilled()!=0)return;
+        var output=supply.demandShares(run.calibrationGoal);
+        if(output.isEmpty()||output.stream().anyMatch(share -> share.stage()!=io.github.kpuctajluk.colonyloom.core.supply.CoverageShare.Stage.ALLOCATED
+                ||share.productionOrderId()==null||!supply.production(share.productionOrderId()).terminal()))return;
+        if(output.stream().anyMatch(share -> share.productionOrderId().equals(run.withdrawnProduction)))return;
+        var producer=supply.production(output.getFirst().productionOrderId());
+        if(producer.completedBatches()!=1)
+            throw new IllegalStateException("Calibration output lacks its single completed native batch");
+        boolean witnessed=core.registry().effects().snapshots().stream().anyMatch(effect -> effect.craft()!=null&&producer.id().equals(effect.craft().productionId())
+                &&effect.state()==io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.OBSERVED&&effect.craft().complete()
+                &&run.calibrationCitizen.equals(effect.citizenId())&&effect.bindingEpoch()==citizen.bindingEpoch()
+                &&effect.craft().inputs().stream().mapToInt(io.github.kpuctajluk.colonyloom.core.action.EffectRecord.CraftSlot::amount).sum()==6
+                &&effect.craft().outputCount()==4&&effect.craft().output().equals(run.calibrationOutput));
+        if(!witnessed)throw new IllegalStateException("Calibration external removal preceded exact real6-plank/4-stair craft evidence");
+        for(var share:output) {
+            Container nativeOutput=storage.currentContainer(share.slot());if(nativeOutput==null)return;
+            var stack=nativeOutput.getItem(share.slot().slot());
+            if(!stack.is(Items.OAK_STAIRS)||stack.getCount()<share.quantity()||!run.calibrationOutput.equals(io.github.kpuctajluk.colonyloom.minecraft.storage.NativeItemDescriptor.describe(stack,server.registryAccess())))
+                throw new IllegalStateException("Calibrated native batch lacks exact promised physical output "+share);
+        }
+        for(var share:output) {
+            var nativeOutput=storage.currentContainer(share.slot());var stack=nativeOutput.getItem(share.slot().slot());stack.shrink(Math.toIntExact(share.quantity()));
+            nativeOutput.setItem(share.slot().slot(),stack);nativeOutput.setChanged();run.removedStairs+=share.quantity();
+        }
+        run.withdrawnProduction=output.getFirst().productionOrderId();
+        if (run.retirementProbe == null) run.retirementProbe = run.withdrawnProduction;
+        run.calibrationCycles++;
+        fact(server,"calibration_external_output",true,"goal="+run.calibrationGoal+" removed=4stairs batch="+run.calibrationCycles+" total="+run.removedStairs+" noNotify=true");
+    }
+    private static void requireCalibrationIdentity(Run run,io.github.kpuctajluk.colonyloom.minecraft.entity.CitizenEntity citizen) {
+        var record=run.runtime.core().registry().citizen(run.calibrationCitizen);
+        if(!citizen.isAlive()||citizen.isRemoved()||!run.calibrationCitizen.equals(citizen.citizenId())||citizen.bindingEpoch()!=record.bindingEpoch()||!record.entityId().equals(run.calibrationEntity))
+            throw new IllegalStateException("Calibration replaced/lost original native producer");
+    }
     private static void verify(MinecraftServer server,Run run)throws Exception {
         run.manifest=read(world(server).resolve(MANIFEST));run.colony=run.manifest.getUUID("colony");var stocks=run.runtime.core().registry().storage();
         var old=new StorageId("minecraft:overworld",run.manifest.getUUID("oldChest"),0);
@@ -167,8 +291,24 @@ final class StorageScenario {
     private static void finish(MinecraftServer server,Run run,String check)throws Exception {
         var timers=run.runtime.metrics().snapshot();var graph=timers.get("GRAPH_UNIT");var storage=timers.get("STORAGE_EXTERNAL");
         var metrics=new JsonObject();metrics.addProperty("acceptanceDuration",false);metrics.addProperty("profileCalibrated",false);
+        if(phase().equals("calibrate")) {
+            metrics.addProperty("warmupSeconds",300);metrics.addProperty("measurementElapsedNanos",System.nanoTime()-run.measurementStart);
+            metrics.addProperty("measurementScope","Actual recurring6-plank native kits and4-stair batches, noNotify external withdrawal and real stock/loss/recipe graph reopening; no synthetic unit calls");
+            metrics.addProperty("graphActiveWindows",run.calibrationWindows.size());
+            metrics.add("activityWindows",new com.google.gson.Gson().toJsonTree(run.calibrationWindows));
+            metrics.addProperty("nativeBatches",run.calibrationCycles-run.measurementCycles);
+            metrics.addProperty("externalSuppliedPlanks",run.suppliedPlanks-run.measurementSupplied);
+            metrics.addProperty("externalRemovedStairs",run.removedStairs-run.measurementRemoved);
+            require(server,run.productionRetirementObserved,"calibration_checkpoint_retirement",
+                    "An original observed native batch was safely retired while its recurring root remained active; retained high-water=" + run.retainedProductionHighWater);
+            metrics.addProperty("productionRetirementObserved",run.productionRetirementObserved);
+            metrics.addProperty("retainedProductionHighWater",run.retainedProductionHighWater);
+        }
         metrics.addProperty("graphCalls",graph.count());metrics.addProperty("graphP99Nanos",graph.p99Nanos());metrics.addProperty("graphMaxNanos",graph.maxNanos());
         metrics.addProperty("nativeStorageCalls",storage.count());metrics.addProperty("nativeStorageP99Nanos",storage.p99Nanos());metrics.addProperty("nativeStorageMaxNanos",storage.maxNanos());
+        var saveScopes = new java.util.LinkedHashMap<String, io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Sample>();
+        for (String timer : List.of("MSPT", "MANAGED_TICK", "SAVE", "SAVE_ENCODE", "SAVE_WORLD", "SAVE_FLUSH", "COMPACTION")) saveScopes.put(timer, timers.get(timer));
+        metrics.add("runtimeScopes", new com.google.gson.Gson().toJsonTree(saveScopes));
         Files.writeString(world(server).resolve("colonyloom-supply-metrics-"+phase()+".json"),metrics.toString());
         fact(server,check,true,"production live path");run.done=true;server.halt(false);
     }

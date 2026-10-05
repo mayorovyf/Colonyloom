@@ -238,9 +238,9 @@ public final class ManagementViewGameTests {
         colonies(registry,colony,foreign,owner);quota(registry,100);
         var subscription=new Subscription(UUID.randomUUID(),UUID.randomUUID(),colony,ViewType.SUMMARY,0,false);
         var strings=Collections.nCopies(64,"x".repeat(ManagementProtocol.STRING_BYTES));
-        try {new ManagementViews.Preparation(registry,owner,subscription,strings,strings,1);helper.fail("Oversized retained catalogs were copied into a preparation");}
+        try {new ManagementViews.Preparation(registry,owner,subscription,strings,strings,1, ignored -> null);helper.fail("Oversized retained catalogs were copied into a preparation");}
         catch(IllegalArgumentException expected){helper.assertTrue(expected.getMessage().equals("VIEW_LIMIT"),"Catalog envelope failed for an unrelated reason");}
-        var preparation=new ManagementViews.Preparation(registry,owner,subscription,strings.subList(0,62),strings.subList(0,63),1);
+        var preparation=new ManagementViews.Preparation(registry,owner,subscription,strings.subList(0,62),strings.subList(0,63),1, ignored -> null);
         registry.budgets().beginTick(1);
         try {preparation.advance(registry.budgets());helper.fail("Incremental rows exceeded retained wire limit");}
         catch(IllegalArgumentException expected){helper.assertTrue(expected.getMessage().equals("VIEW_LIMIT"),"Incremental page envelope failed for an unrelated reason");}
@@ -271,12 +271,100 @@ public final class ManagementViewGameTests {
         helper.succeed();
     }
 
+    @GameTest(template="identity_empty")
+    public static void resyncFloodBoundsActualRowPreparationAndRevocationPurgesImmediately(GameTestHelper helper) {
+        var registry=new ColonyRegistry(() -> {});
+        UUID colony=UUID.randomUUID(),foreign=UUID.randomUUID(),owner=UUID.randomUUID();
+        colonies(registry,colony,foreign,owner);quota(registry,4);registry.budgets().beginTick(1);
+        var pending=new HashMap<UUID,ManagementViews.Preparation>();
+        var snapshots=new ArrayList<ViewData>();
+        var closes=new ArrayList<String>();
+        var session=new io.github.kpuctajluk.colonyloom.core.management.ManagementSession(
+                new io.github.kpuctajluk.colonyloom.core.management.ManagementSession.Backend() {
+                    public io.github.kpuctajluk.colonyloom.core.management.ManagementSession.Authority authorize(UUID id) {
+                        var value=registry.colony(id);
+                        return new io.github.kpuctajluk.colonyloom.core.management.ManagementSession.Authority(value.rank(owner)!=null,value.authorityRevision());
+                    }
+                    public long targetRevision(Command command) {throw new AssertionError("No command in subscription regression");}
+                    public Result execute(Command command) {throw new AssertionError("No command in subscription regression");}
+                    public boolean viewReady(Subscription subscription) {
+                        return pending.computeIfAbsent(subscription.subscriptionId(),ignored ->
+                                new ManagementViews.Preparation(registry,owner,subscription,List.of(),List.of(),registry.budgets().tick(), work -> null)).advance(registry.budgets());
+                    }
+                    public ViewData view(Subscription subscription) {return pending.get(subscription.subscriptionId()).result();}
+                    public void cancelView(Subscription subscription) {
+                        var preparation=pending.remove(subscription.subscriptionId());if(preparation!=null)preparation.cancel();
+                    }
+                    public int preparationBytes(Subscription subscription) {return pending.containsKey(subscription.subscriptionId())?ManagementProtocol.VIEW_BYTES:0;}
+                },new io.github.kpuctajluk.colonyloom.core.management.ManagementSession.Transport() {
+                    public boolean writable() {return true;}
+                    public void sendResult(Result result) {throw new AssertionError("No result in subscription regression");}
+                    public void sendSnapshot(UUID id,ViewData data) {snapshots.add(data);}
+                    public void sendDelta(UUID id,long base,ViewData data) {snapshots.add(data);}
+                    public void closeView(UUID id,String reason) {closes.add(reason);}
+                });
+        UUID id=UUID.randomUUID();
+        for(int index=0;index<1000;index++)
+            session.subscribe(new Subscription(session.sessionId(),id,colony,ViewType.SUMMARY,0,true));
+        helper.assertTrue(registry.budgets().used(Budget.VIEW_ROWS)==4,"Resync flood escaped shared actual-row budget");
+        helper.assertTrue(pending.isEmpty()&&session.subscriptionCount()==0&&session.bufferedViewBytes()==0,"Rejected live resync retained private prepared rows");
+        helper.assertTrue(closes.equals(List.of("RATE_LIMIT"))&&snapshots.isEmpty(),"Resync flood produced repeated replies or snapshots");
+        registry.budgets().beginTick(2);session.tick(20);
+        session.subscribe(new Subscription(session.sessionId(),id,colony,ViewType.SUMMARY,0,false));
+        helper.assertTrue(session.subscriptionCount()==1&&!pending.isEmpty(),"Legal retry did not restart a bounded actual preparation");
+        for(int index=1;index<ManagementProtocol.SUBSCRIPTIONS_PER_SECOND;index++)
+            session.subscribe(new Subscription(session.sessionId(),UUID.randomUUID(),colony,ViewType.SUMMARY,0,false));
+        var current=registry.colony(colony);
+        registry.updateColony(new ColonyRuntime(colony,current.name(),current.territory(),UUID.randomUUID(),Map.of(),current.revision()+1,current.authorityRevision()+1,false,null,false));
+        session.subscribe(new Subscription(session.sessionId(),UUID.randomUUID(),colony,ViewType.SUMMARY,0,true));
+        helper.assertTrue(session.subscriptionCount()==0&&pending.isEmpty()&&session.bufferedViewBytes()==0,"Saturated ingress delayed authority revocation");
+        helper.assertTrue(closes.size()<=ManagementProtocol.VIEW_CLOSES_PER_SECOND+1&&snapshots.isEmpty(),"Revocation burst flooded transport or emitted stale data");
+        session.close();helper.succeed();
+    }
+
+    @GameTest(template="identity_empty")
+    public static void maximumMembershipIsProjectedWithSharedAdmissionLimit(GameTestHelper helper) {
+        var registry=new ColonyRegistry(() -> {});
+        UUID colony=UUID.randomUUID(),owner=UUID.randomUUID();
+        var members=new HashMap<UUID,MemberRank>();
+        for(int index=0;index<ColonyRuntime.MAX_MEMBERS;index++)members.put(UUID.randomUUID(),MemberRank.VIEWER);
+        registry.addColony(new ColonyRuntime(colony,"Membership bound",new Territory("minecraft:overworld",0,0,31,31),owner,members,1,1,false,null,false));
+        var first=complete(helper,registry,owner,colony,ViewType.SUMMARY,0,1);
+        var second=complete(helper,registry,owner,colony,ViewType.SUMMARY,1,1);
+        var rows=new ArrayList<Row>();rows.addAll(first.rows());rows.addAll(second.rows());
+        helper.assertTrue(first.totalRows()==1+Resource.values().length+ColonyRuntime.MAX_MEMBERS,"Membership projection changed row accounting");
+        helper.assertTrue(first.rows().getFirst().detail().contains(";members="+ColonyRuntime.MAX_MEMBERS+";memberLimit="+ColonyRuntime.MAX_MEMBERS+";"),"UI summary omits shared membership usage/cap");
+        helper.assertTrue(rows.stream().filter(row -> row.state().equals("MEMBER")).count()==ColonyRuntime.MAX_MEMBERS,"Bounded pages dropped admitted authorities");
+        helper.succeed();
+    }
+
+    @GameTest(template="identity_empty")
+    public static void capacityBlockedWorkProjectsExactBufferAndSafePlayerAction(GameTestHelper helper) {
+        var registry=new ColonyRegistry(() -> {});
+        UUID colony=UUID.randomUUID(),foreign=UUID.randomUUID(),owner=UUID.randomUUID();colonies(registry,colony,foreign,owner);
+        var position=new WorldPosition("minecraft:overworld",4,64,5);
+        var work=registry.workBoard().createDelivery(UUID.randomUUID(),colony,position,0,AdmissionLedger.Lane.NORMAL);
+        registry.workBoard().transition(work.id(),io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.WAITING,
+                io.github.kpuctajluk.colonyloom.core.work.WorkOrder.Reason.CAPACITY,"cargo");
+        quota(registry,1);
+        var preparation=new ManagementViews.Preparation(registry,owner,new Subscription(UUID.randomUUID(),UUID.randomUUID(),colony,ViewType.WORK,0,false),List.of(),List.of(),1,
+                id -> id.equals(work.id())?new io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftDeliveryService.WaitingBuffer("return",position):null);
+        boolean ready=false;
+        for(int tick=1;tick<20&&!ready;tick++) {registry.budgets().beginTick(tick);ready=preparation.advance(registry.budgets());helper.assertTrue(registry.budgets().used(Budget.VIEW_ROWS)<=1,"Capacity details bypassed shared row budget");}
+        helper.assertTrue(ready,"Capacity work preparation did not finish");
+        var row=preparation.result().rows().getFirst();
+        helper.assertTrue(row.reason().equals("CAPACITY")&&row.detail().contains(";buffer=return;at=4,64,5;action=FREE_MATCHING_SLOT"),
+                "Capacity row omits exact physical buffer or safe matching-slot player action: "+row);
+        helper.assertTrue(work.state()==io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.WAITING,"Reading capacity details mutated blocked work");
+        helper.succeed();
+    }
+
     private static void colonies(ColonyRegistry registry,UUID a,UUID b,UUID owner) {
         registry.addColony(new ColonyRuntime(a,"A",new Territory("minecraft:overworld",0,0,31,31),owner,Map.of(),1,1,false,null,false));
         registry.addColony(new ColonyRuntime(b,"B",new Territory("minecraft:overworld",64,0,95,31),UUID.randomUUID(),Map.of(),1,1,false,null,false));
     }
     private static ManagementViews.Preparation preparation(ColonyRegistry registry,UUID owner,UUID colony,ViewType type,int page) {
-        return new ManagementViews.Preparation(registry,owner,new Subscription(UUID.randomUUID(),UUID.randomUUID(),colony,type,page,false),List.of(),List.of(),Math.max(1,registry.budgets().tick()));
+        return new ManagementViews.Preparation(registry,owner,new Subscription(UUID.randomUUID(),UUID.randomUUID(),colony,type,page,false),List.of(),List.of(),Math.max(1,registry.budgets().tick()), ignored -> null);
     }
     private static void quota(ColonyRegistry registry,int rows) {
         var limits=registry.admission().limits();var budgets=new EnumMap<Budget,Integer>(Budget.class);budgets.putAll(limits.budgets());budgets.put(Budget.VIEW_ROWS,rows);

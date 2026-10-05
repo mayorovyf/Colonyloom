@@ -4,6 +4,14 @@ import io.github.kpuctajluk.colonyloom.minecraft.storage.NativeItemDescriptor;
 import io.github.kpuctajluk.colonyloom.neoforge.NeoForgeStorageIdentity;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.IdentityHashMap;
+import java.util.Map;
+import net.neoforged.bus.api.EventPriority;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.capabilities.Capabilities;
+import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
+import net.neoforged.neoforge.items.wrapper.InvWrapper;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.component.DataComponents;
@@ -13,6 +21,8 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.Container;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.SimpleContainer;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.ChestBlock;
@@ -22,7 +32,23 @@ import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 
 @GameTestHolder("colonyloom")
 @PrefixGameTestTemplate(false)
+@EventBusSubscriber(modid="colonyloom_tests",bus=EventBusSubscriber.Bus.MOD)
 public final class StorageGameTests {
+    private static final Map<BlockEntity, CapabilityProbe> CAPABILITY_PROBES = new IdentityHashMap<>();
+    private static final class CapabilityProbe {
+        Container inventory;
+        boolean subclass;
+        CapabilityProbe(Container inventory) { this.inventory = inventory; }
+    }
+    @SubscribeEvent(priority=EventPriority.HIGHEST)
+    public static void registerCapabilityProbe(RegisterCapabilitiesEvent event) {
+        event.registerBlock(Capabilities.ItemHandler.BLOCK,(level,pos,state,entity,side) -> {
+            CapabilityProbe probe=CAPABILITY_PROBES.get(entity);
+            if(probe==null) return null;
+            if(side==Direction.EAST && probe.subclass) return new InvWrapper(probe.inventory) {};
+            return new InvWrapper(side==Direction.EAST ? probe.inventory : (Container)entity);
+        },Blocks.CHEST,Blocks.TRAPPED_CHEST,Blocks.BARREL);
+    }
     @GameTest(template="identity_empty")
     public static void nativeComponentsSeparateNamesAndNormalizeCompoundKeys(GameTestHelper helper) {
         ItemStack first=new ItemStack(Items.OAK_PLANKS,64),second=new ItemStack(Items.OAK_PLANKS,64);
@@ -59,6 +85,44 @@ public final class StorageGameTests {
         ((Container)one).setItem(0,new ItemStack(Items.OAK_PLANKS,64));((Container)two).setItem(0,new ItemStack(Items.COBBLESTONE,7));
         var bridge=new NeoForgeStorageIdentity();helper.assertTrue(bridge.supported(level,List.of(one,two)),"Combined native chest handler lost half mapping");
         helper.assertTrue(!bridge.getOrCreate(one).equals(bridge.getOrCreate(two)),"Double chest halves have one UUID");
+        helper.succeed();
+    }
+    @GameTest(template="identity_empty")
+    public static void warmedCapabilitiesRecheckInvalidatedProviderAndExactWrapper(GameTestHelper helper) {
+        var level=helper.getLevel();var relative=new BlockPos(1,2,1);
+        helper.setBlock(relative,Blocks.BARREL);
+        BlockEntity entity=level.getBlockEntity(helper.absolutePos(relative));
+        var bridge=new NeoForgeStorageIdentity();var probe=new CapabilityProbe((Container)entity);
+        CAPABILITY_PROBES.put(entity,probe);
+        try {
+            helper.assertTrue(bridge.supported(level,List.of(entity)),"Exact native provider mapping rejected");
+            probe.inventory=new SimpleContainer(27);level.invalidateCapabilities(entity.getBlockPos());
+            helper.assertTrue(!bridge.supported(level,List.of(entity)),"Invalidated side alias survived warmed proof");
+            probe.inventory=(Container)entity;probe.subclass=true;level.invalidateCapabilities(entity.getBlockPos());
+            helper.assertTrue(!bridge.supported(level,List.of(entity)),"Invalidated InvWrapper subclass bypassed exact native proof");
+            probe.subclass=false;level.invalidateCapabilities(entity.getBlockPos());
+            helper.assertTrue(bridge.supported(level,List.of(entity)),"Restored exact native provider remained blocked");
+            helper.assertTrue(!entity.saveWithFullMetadata(level.registryAccess()).getCompound("neoforge:attachments").contains("colonyloom:storage_capabilities"),
+                    "Transient capability snapshot was persisted");
+        } finally {CAPABILITY_PROBES.remove(entity);level.invalidateCapabilities(entity.getBlockPos());}
+        helper.succeed();
+    }
+    @GameTest(template="identity_empty")
+    public static void warmedCapabilitiesFollowChestSplitJoinAndReplacement(GameTestHelper helper) {
+        var level=helper.getLevel();var left=new BlockPos(1,2,1);var right=left.east();var bridge=new NeoForgeStorageIdentity();
+        helper.setBlock(left,Blocks.CHEST.defaultBlockState().setValue(ChestBlock.FACING,Direction.NORTH));
+        var one=level.getBlockEntity(helper.absolutePos(left));
+        helper.assertTrue(bridge.supported(level,List.of(one)),"Original single chest not supported");
+        helper.setBlock(left,Blocks.CHEST.defaultBlockState().setValue(ChestBlock.FACING,Direction.NORTH).setValue(ChestBlock.TYPE,ChestType.LEFT));
+        helper.setBlock(right,Blocks.CHEST.defaultBlockState().setValue(ChestBlock.FACING,Direction.NORTH).setValue(ChestBlock.TYPE,ChestType.RIGHT));
+        var two=level.getBlockEntity(helper.absolutePos(right));
+        helper.assertTrue(!bridge.supported(level,List.of(one)) && bridge.supported(level,List.of(one,two)),"Warmed single mapping survived chest join");
+        helper.setBlock(right,Blocks.AIR);
+        helper.setBlock(left,Blocks.CHEST.defaultBlockState().setValue(ChestBlock.FACING,Direction.NORTH));
+        helper.assertTrue(!bridge.supported(level,List.of(one,two)) && bridge.supported(level,List.of(one)),"Warmed double mapping survived chest split");
+        helper.setBlock(left,Blocks.AIR);helper.setBlock(left,Blocks.CHEST);
+        var replacement=level.getBlockEntity(helper.absolutePos(left));
+        helper.assertTrue(!bridge.supported(level,List.of(one)) && bridge.supported(level,List.of(replacement)),"Warmed obsolete native entity survived replacement");
         helper.succeed();
     }
 }

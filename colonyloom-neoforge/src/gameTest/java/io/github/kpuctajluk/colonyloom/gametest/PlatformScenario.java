@@ -77,6 +77,8 @@ final class PlatformScenario {
         long moveRequests, buildRequests, externalStairs;
         SimulationLimits frozen;
         int provisionColony;
+        int foundedColonies;
+        long nextFoundingTick;
         boolean metricsChecked;
         long tickStart, warmupStart, measureStart, warmupTicks, measurementTicks, actions, damage, changedBlocks, completedMoves, completedBuilds;
         long readyWaitStart, chunkRequestedAt, chunkTransitions, readyChunkCycles, clockTransitions, fixtureNanos;
@@ -120,6 +122,14 @@ final class PlatformScenario {
         try {
             guard(server);
             if (!run.initialized) { initialize(server, run); run.initialized = true; run.readyWaitStart = now; return; }
+            if (count()!=0 && run.foundedColonies<3) {
+                if(server.getTickCount()<run.nextFoundingTick)return;
+                int colony=run.foundedColonies,origin=colony*512;
+                run.colonies[colony]=uuid(command(server,run,"colonyloom colony create Platform"+colony+" "+origin+" 64 0 "+(origin+127)+" 64 127"),"colony");
+                run.foundedColonies++;
+                run.nextFoundingTick=(long)server.getTickCount()+io.github.kpuctajluk.colonyloom.minecraft.runtime.FoundingTerritoryValidation.CLIENT_WINDOW_TICKS;
+                return;
+            }
             if (run.provisionColony < 3 && count() != 0) {
                 int base = run.provisionColony * 512;
                 for (int x = 0; x < 4; x++) for (int z = 0; z < 4; z++) {
@@ -245,7 +255,6 @@ final class PlatformScenario {
             territory.addProperty("damageActions", "Each40server ticks heal actual NPC to max then generic actual1health hurt;nonlethal delta required");
             territory.addProperty("blockWorkerPolicy", "One assigned builder per colony, other physical residents carpenters; repeated finite construction uses natural production assignment without accumulating idle builders on the same target row. Parallel economy construction is stage14.");
             if (count() == 0) continue;
-            run.colonies[colony] = uuid(command(server, run, "colonyloom colony create Platform" + colony + " " + origin + " 64 0 " + (origin + 127) + " 64 127"), "colony");
             if (scenario().equals("movement-obstructed")) {
                 // Each sixteen-block corridor has a real detour inside its admitted search chunks.
                 for (int z = 0; z <= 31; z++) if (z % 16 < 11 || z % 16 > 13) for (int y = 64; y <= 65; y++) server.overworld().setBlock(new BlockPos(origin + 16, y, z), Blocks.STONE.defaultBlockState(), 3);
@@ -269,10 +278,16 @@ final class PlatformScenario {
             if (!(server.overworld().getEntity(entityId) instanceof CitizenEntity entity)) throw new IllegalStateException("Provisioned physical NPC missing");
             String role = scenario().equals("block") && npc != 0 ? "colonyloom:carpenter" : "colonyloom:builder";
             command(server, run, "colonyloom citizen assign " + entity.citizenId() + " " + role);
+            // This pre-economy fixture has no food source. Give its initial meal a finite
+            // residual covering warmup/measurement/drain; stage14 uses ordinary1200-tick hunger.
+            var record=run.runtime.core().registry().citizen(entity.citizenId());
+            long platformMealTicks=Math.multiplyExact(Math.addExact(Math.addExact(duration("Warmup",300)/SECOND,duration("Measure",600)/SECOND),600L),20L);
+            run.runtime.core().registry().updateCitizen(new CitizenRecord(record.citizenId(),record.colonyId(),record.entityId(),record.bindingEpoch(),record.homeId(),record.workplaceId(),record.assignedWorkId(),record.professionId(),record.skills(),record.needs(),record.lifecycle(),record.admission(),record.readiness(),record.activeTimeTicks(),Map.of("food",platformMealTicks),record.lastKnownPosition(),record.revision()+1));
             run.citizens.add(entity); run.lastPositions.put(entity.citizenId(), entity.position()); run.distances.put(entity.citizenId(), 0.0);
             run.citizensByColony.get(colony).add(entity);
             JsonObject citizen = new JsonObject(); citizen.addProperty("citizenId", entity.citizenId().toString()); citizen.addProperty("entityId", entityId.toString()); citizen.addProperty("colonyId", run.colonies[colony].toString()); citizen.addProperty("bindingEpoch", entity.bindingEpoch()); citizen.addProperty("position", coordinates(pos)); citizen.addProperty("role", role); citizen.addProperty("initialInventory", "empty"); run.initial.add(citizen);
         }
+        run.report.addProperty("platformInitialMealPolicy","Finite initial food residual=(warmupSeconds+measurementSeconds+600)*20 active ticks; platform fixture predates economy and has no supply sources. Native entity/own-clock ticking remains enabled; stage14 retains ordinary1200-active-tick hunger and physical bread consumption.");
     }
     private static boolean ready(MinecraftServer server, Run run) {
         for (int colony = 0; colony < 3; colony++) for (int x = 0; x < 4; x++) for (int z = 0; z < 4; z++) if (!server.overworld().isPositionEntityTicking(new BlockPos(colony * 512 + x * 16, 64, z * 16))) return false;
@@ -280,7 +295,11 @@ final class PlatformScenario {
         for (CitizenEntity entity : run.citizens) {
             CitizenRecord citizen = run.runtime.core().registry().citizen(entity.citizenId());
             if (!entity.isAlive() || entity.isQuarantined()) throw new IllegalStateException("Physical NPC lost or quarantined");
-            if (citizen.admission() != CitizenRecord.Admission.ACTIVE || citizen.readiness() != CitizenRecord.Readiness.READY || !run.runtime.chunks().ready(citizen.citizenId())) return false;
+            var pos=entity.blockPosition();
+            var center=new ChunkKey(server.overworld().dimension().location().toString(),pos.getX()>>4,pos.getZ()>>4);
+            if (citizen.admission() != CitizenRecord.Admission.ACTIVE || citizen.readiness() != CitizenRecord.Readiness.READY
+                    || !run.runtime.chunks().admitted(center) || !run.runtime.chunks().ready(center,ChunkDemandManager.Readiness.ENTITY_TICKING)
+                    || !server.overworld().isPositionEntityTicking(pos)) return false;
         }
         return true;
     }

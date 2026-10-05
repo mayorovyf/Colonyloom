@@ -31,6 +31,53 @@ import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 @PrefixGameTestTemplate(false)
 public final class PersistenceGameTests {
     @GameTest(template="identity_empty")
+    public static void missingDtoMarkerPairsNeverInitializeOverProperty(GameTestHelper helper) throws Exception {
+        Path directory=Files.createTempDirectory("colonyloom-pairs-");Path state=directory.resolve("colonyloom.dat"),marker=directory.resolve("colonyloom-session.nbt");
+        var empty=ServerRuntime.start(Thread.currentThread()).registry().snapshot();
+        try {
+            var virgin=io.github.kpuctajluk.colonyloom.minecraft.persistence.ColonyPersistence.preflightPair(state,marker,helper.getLevel().registryAccess(),empty);
+            helper.assertTrue(virgin.snapshot().colonies().isEmpty()&&!Files.exists(state)&&!Files.exists(marker),"Virgin preflight writes or activates prior state");
+            for(boolean clean:List.of(false,true)) {
+                var tag=new CompoundTag();tag.putBoolean("clean",clean);tag.putUUID("sessionId",id(900));tag.putUUID("checkpointId",id(901));NbtIo.writeCompressed(tag,marker);
+                byte[] original=Files.readAllBytes(marker);
+                try {io.github.kpuctajluk.colonyloom.minecraft.persistence.ColonyPersistence.preflightPair(state,marker,helper.getLevel().registryAccess(),empty);helper.fail("Missing DTO with marker accepted");}catch(java.io.IOException expected){}
+                helper.assertTrue(!Files.exists(state)&&Arrays.equals(original,Files.readAllBytes(marker)),"Missing DTO replaced or marker mutated");
+            }
+            Files.write(marker,new byte[]{9,8,7});
+            try {io.github.kpuctajluk.colonyloom.minecraft.persistence.ColonyPersistence.preflightPair(state,marker,helper.getLevel().registryAccess(),empty);helper.fail("Missing DTO with corrupt marker accepted");}catch(java.io.IOException expected){}
+            Files.write(state,new byte[]{1,2,3});byte[] damaged=Files.readAllBytes(state);
+            try {io.github.kpuctajluk.colonyloom.minecraft.persistence.ColonyPersistence.preflightPair(state,marker,helper.getLevel().registryAccess(),empty);helper.fail("Corrupt DTO pair accepted");}catch(java.io.IOException expected){}
+            helper.assertTrue(Arrays.equals(damaged,Files.readAllBytes(state)),"Corrupt DTO overwritten");
+            Files.delete(marker);
+            try {io.github.kpuctajluk.colonyloom.minecraft.persistence.ColonyPersistence.preflightPair(state,marker,helper.getLevel().registryAccess(),empty);helper.fail("Corrupt DTO without marker accepted");}catch(java.io.IOException expected){}
+            var envelope=new CompoundTag();envelope.put("data",fixtureRoot(helper));NbtIo.writeCompressed(envelope,state);
+            var restored=io.github.kpuctajluk.colonyloom.minecraft.persistence.ColonyPersistence.preflightPair(state,marker,helper.getLevel().registryAccess(),empty);
+            helper.assertTrue(restored.snapshot().citizens().size()==3,"Missing marker erased valid DTO");
+        } finally {Files.deleteIfExists(state);Files.deleteIfExists(marker);Files.deleteIfExists(directory);}
+        helper.succeed();
+    }
+    @GameTest(template="identity_empty")
+    public static void rootOneMigratesWithImmutableOriginalBackup(GameTestHelper helper) throws Exception {
+        var root=fixtureRoot(helper);root.putInt("schemaVersion",1);
+        try(var file=new CompressedState(root)) {
+            byte[] original=Files.readAllBytes(file.path);var loaded=ColonySavedData.preflight(file.path,helper.getLevel().registryAccess());
+            Path backup=file.directory.resolve("colonyloom-backups").resolve(loaded.checkpointId()+"-v1.dat");
+            helper.assertTrue(Arrays.equals(original,Files.readAllBytes(backup))&&Arrays.equals(original,Files.readAllBytes(file.path)),"Migration backup not exact or original changed");
+            helper.assertTrue(loaded.save(new CompoundTag(),helper.getLevel().registryAccess()).getInt("schemaVersion")==2,"Migration did not encode root2");
+            ColonySavedData.preflight(file.path,helper.getLevel().registryAccess());
+            Files.write(backup,new byte[]{7});
+            try {ColonySavedData.preflight(file.path,helper.getLevel().registryAccess());helper.fail("Conflicting immutable backup accepted");}catch(java.io.IOException expected){}
+            helper.assertTrue(Arrays.equals(original,Files.readAllBytes(file.path)),"Conflict rewrote original DTO");
+        }
+        helper.succeed();
+    }
+    @GameTest(template="identity_empty")
+    public static void oversizeMembersRejectBeforeMaterialization(GameTestHelper helper) throws Exception {
+        var root=fixtureRoot(helper);var members=new ListTag();
+        for(int i=0;i<=ColonyRuntime.MAX_MEMBERS;i++){var member=new CompoundTag();member.putUUID("playerId",id(10000+i));member.putString("rank","VIEWER");members.add(member);}
+        root.getList("colonies",Tag.TAG_COMPOUND).getCompound(0).put("members",members);assertRejected(helper,root,false);helper.succeed();
+    }
+    @GameTest(template="identity_empty")
     public static void threeHundredBindingObservationsSurviveCompressedPreflight(GameTestHelper helper) throws Exception {
         ServerRuntime source=fixture();
         source.admission().updateLimits(source.admission().limits().scale300Capacity());
@@ -55,6 +102,52 @@ public final class PersistenceGameTests {
         }
         helper.succeed();
     }
+    @GameTest(template="identity_empty")
+    public static void opaqueCitizensKeepSeparateFullBindingHistories(GameTestHelper helper) throws Exception {
+        assertOpaqueHistoryIsolation(helper, true);
+        helper.succeed();
+    }
+
+    @GameTest(template="identity_empty")
+    public static void opaqueHistoryDoesNotConsumeUnknownIdentityCapacity(GameTestHelper helper) throws Exception {
+        assertOpaqueHistoryIsolation(helper, false);
+        helper.succeed();
+    }
+
+    private static void assertOpaqueHistoryIsolation(GameTestHelper helper, boolean twoOpaqueColonies) throws Exception {
+        CompoundTag root=fixtureRoot(helper);
+        root.getList("citizens",Tag.TAG_COMPOUND).getCompound(0).putString("typeId","future:citizen");
+        if(twoOpaqueColonies) root.getList("citizens",Tag.TAG_COMPOUND).getCompound(2).putString("typeId","future:citizen");
+        ListTag observations=new ListTag();
+        for(int scope=0;scope<(twoOpaqueColonies?2:1);scope++) for(int i=0;i<BindingRegistry.MAX_OBSERVATIONS_PER_COLONY;i++) {
+            CompoundTag entry=new CompoundTag();entry.putString("typeId","colonyloom:binding_observation");
+            entry.putUUID("citizenId",id(scope==0?20:22));entry.putUUID("entityId",id(10000+scope*1000+i));
+            entry.putLong("bindingEpoch",1);entry.putBoolean("loaded",false);entry.putBoolean("quarantined",true);entry.putBoolean("retired",true);
+            observations.add(entry);
+        }
+        if(!twoOpaqueColonies) {
+            CompoundTag unknown=new CompoundTag();unknown.putString("typeId","colonyloom:binding_observation");unknown.putUUID("entityId",id(20000));
+            unknown.putLong("bindingEpoch",0);unknown.putBoolean("loaded",false);unknown.putBoolean("quarantined",true);unknown.putBoolean("retired",false);
+            observations.add(unknown);
+        }
+        root.put("bindingObservations",observations);
+        try(CompressedState file=new CompressedState(root)) {
+            byte[] original=Files.readAllBytes(file.path);
+            ColonySavedData loaded=ColonySavedData.preflight(file.path,helper.getLevel().registryAccess());
+            ColonyRegistry restored=new ColonyRegistry(()->{});restored.restore(loaded.snapshot());restored.markContentBlocked(loaded.contentBlockedColonies());
+            helper.assertTrue(!restored.colony(id(1)).available() && (twoOpaqueColonies?!restored.colony(id(2)).available():restored.colony(id(2)).available()),"Opaque history leaked its block to an unrelated colony");
+            helper.assertTrue(restored.bindings().observations().size()==(twoOpaqueColonies?0:1),"Opaque citizen history became unknown live binding authority");
+            CompoundTag saved=loaded.save(new CompoundTag(),helper.getLevel().registryAccess());
+            helper.assertTrue(saved.getList("bindingObservations",Tag.TAG_COMPOUND).size()==observations.size() && observations.stream().allMatch(saved.getList("bindingObservations",Tag.TAG_COMPOUND)::contains),"Opaque retired UUIDs or flags were lost on save");
+            helper.assertTrue(Arrays.equals(original,Files.readAllBytes(file.path)),"Read-only opaque history preflight rewrote original bytes");
+            try(CompressedState roundTrip=new CompressedState(saved)) {
+                ColonySavedData reloaded=ColonySavedData.preflight(roundTrip.path,helper.getLevel().registryAccess());
+                restored.restore(reloaded.snapshot());restored.markContentBlocked(reloaded.contentBlockedColonies());
+                helper.assertTrue(twoOpaqueColonies || restored.colony(id(2)).available(),"Repeated restore blocked independent colony");
+            }
+        }
+    }
+
     @GameTest(template="identity_empty")
     public static void activeTimerRestoresResidualWithoutOfflineProgress(GameTestHelper helper) throws Exception {
         ServerRuntime source = fixture();
@@ -123,7 +216,7 @@ public final class PersistenceGameTests {
             helper.assertTrue(Arrays.equals(damaged,Files.readAllBytes(corrupt)),"Corrupt file overwritten");
             CompoundTag root=ColonySavedData.empty(new RegistrySnapshot(List.of(),List.of(),List.of(),List.of(),List.of(),List.of(),List.of(),java.util.List.of(),java.util.List.of(),java.util.List.of(),io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot.empty(),io.github.kpuctajluk.colonyloom.core.supply.SupplySnapshot.empty()))
                     .save(new CompoundTag(),helper.getLevel().registryAccess());
-            root.putInt("schemaVersion",2);
+            root.putInt("schemaVersion",ColonySavedData.SCHEMA_VERSION+1);
             CompoundTag envelope=new CompoundTag(); envelope.put("data",root);
             Path future=directory.resolve("future.dat"); NbtIo.writeCompressed(envelope,future);
             byte[] original=Files.readAllBytes(future);
@@ -134,6 +227,45 @@ public final class PersistenceGameTests {
         } finally {
             Files.deleteIfExists(directory.resolve("corrupt.dat")); Files.deleteIfExists(directory.resolve("future.dat")); Files.deleteIfExists(directory);
         }
+    }
+
+    @GameTest(template="identity_empty")
+    public static void autosaveKeepsCurrentAuthorityCheckpointAndIndependentOpaquePayload(GameTestHelper helper) throws Exception {
+        CompoundTag root = fixtureRoot(helper);
+        CompoundTag opaque = unknownWork(id(1));
+        root.getList("works", Tag.TAG_COMPOUND).add(opaque);
+        ColonySavedData data = ColonySavedData.load(root, helper.getLevel().registryAccess());
+        ServerRuntime source = fixture();
+        var metrics = new io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics();
+        data.metrics(metrics);
+        data.bindSnapshotSource(source.registry()::snapshot);
+        data.beginCheckpoint(id(91), source.registry().snapshot());
+        // Control and clock telemetry change after capture; ordinary autosave must not reuse it.
+        CitizenRecord changed = source.registry().citizen(id(20)).withFood(17).withActiveTime(2457);
+        source.registry().updateCitizen(changed);
+        CompoundTag target = new CompoundTag();
+        CompoundTag unrelated = new CompoundTag(); unrelated.putString("owner", "external");
+        target.put("unrelated", unrelated);
+        target.put("citizens", new ListTag());
+        CompoundTag saved = data.save(target, helper.getLevel().registryAccess());
+        helper.assertTrue(saved == target && saved.getCompound("unrelated").equals(unrelated), "Save replaced its target or unrelated envelope property");
+        helper.assertTrue(saved.getUUID("checkpointId").equals(id(91)) && saved.getInt("schemaVersion") == ColonySavedData.SCHEMA_VERSION, "Save changed checkpoint identity or root version");
+        CitizenRecord current = ColonySavedData.load(saved, helper.getLevel().registryAccess()).snapshot().citizens().stream().filter(value -> value.citizenId().equals(id(20))).findFirst().orElseThrow();
+        helper.assertTrue(current.food() == 17 && current.activeTimeTicks() == 2457 && current.foodDecayTicks() == 172
+                && current.entityId().equals(id(30)) && current.bindingEpoch() == 1, "Autosave used stale capture or rewrote current original identity/timer");
+        saved.getList("works", Tag.TAG_COMPOUND).getCompound(0).getCompound("future").putLong("futureCounter", 7);
+        source.registry().updateCitizen(changed.withFood(19));
+        CompoundTag next = data.save(new CompoundTag(), helper.getLevel().registryAccess());
+        helper.assertTrue(next.getList("works", Tag.TAG_COMPOUND).getCompound(0).equals(opaque), "Returned save payload mutated retained opaque source");
+        var samples = metrics.snapshot();
+        helper.assertTrue(samples.get("SAVE_ENCODE").count() == 2 && samples.get("SAVE").count() == 0
+                && samples.get("SAVE_WORLD").count() == 0 && samples.get("SAVE_FLUSH").count() == 0
+                && samples.get("MANAGED_TICK").count() == 0, "Autosave encoding attributed latency to disk checkpoint, flush or managed tick");
+        try (CompressedState file = new CompressedState(next)) {
+            ColonySavedData loaded = ColonySavedData.preflight(file.path, helper.getLevel().registryAccess());
+            helper.assertTrue(loaded.checkpointId().equals(id(91)) && loaded.snapshot().citizens().stream().anyMatch(value -> value.citizenId().equals(id(20)) && value.food() == 19 && value.foodDecayTicks() == 172), "Repeated compressed autosave cached prior authority or changed checkpoint");
+        }
+        helper.succeed();
     }
 
     @GameTest(template="identity_empty")
@@ -177,6 +309,9 @@ public final class PersistenceGameTests {
         try (CompressedState file = new CompressedState(root)) {
             ColonySavedData loaded = ColonySavedData.preflight(file.path, helper.getLevel().registryAccess());
             helper.assertTrue(Set.of(id(1)).equals(loaded.contentBlockedColonies()), "Unknown work did not isolate its owning colony");
+            var report=loaded.retainedReport(id(1));
+            helper.assertTrue(report.opaqueCount()==1&&report.records().getFirst().type().equals("unknown_pack:future_work")&&report.records().getFirst().objectId().contains(id(80).toString())
+                    && !report.toString().contains("keep this exact data")&&!report.toString().contains("futureCounter")&&loaded.retainedReport(id(2)).opaqueCount()==0,"Scoped report leaked raw opaque NBT or lost type/object cause");
             ColonyRegistry restored = new ColonyRegistry(() -> {});
             restored.restore(loaded.snapshot());
             restored.markContentBlocked(loaded.contentBlockedColonies());
@@ -186,6 +321,14 @@ public final class PersistenceGameTests {
             helper.assertTrue(restored.citizens().size() == 3, "Independent citizen identities were discarded");
         }
         helper.succeed();
+    }
+    @GameTest(template="identity_empty")
+    public static void opaqueOperatorReportCapsRowsWithoutDroppingState(GameTestHelper helper) {
+        var root=fixtureRoot(helper);var works=new ListTag();
+        for(int i=0;i<40;i++){var unknown=unknownWork(id(1));unknown.putUUID("workId",id(8000+i));works.add(unknown);}root.put("works",works);
+        var loaded=ColonySavedData.load(root,helper.getLevel().registryAccess());var report=loaded.retainedReport(id(1));
+        helper.assertTrue(report.opaqueCount()==40&&report.records().size()==32&&report.truncated()&&loaded.retainedRecordCount()==40,"Report bound trimmed retained state or misreported overflow");
+        helper.assertTrue(loaded.save(new CompoundTag(),helper.getLevel().registryAccess()).getList("works",Tag.TAG_COMPOUND).equals(works),"Bounded report changed opaque physical obligations");helper.succeed();
     }
 
     @GameTest(template="identity_empty")
@@ -340,6 +483,8 @@ public final class PersistenceGameTests {
 
         @Override
         public void close() throws java.io.IOException {
+            Path backups=directory.resolve("colonyloom-backups");
+            if(Files.exists(backups)){try(var files=Files.list(backups)){for(var backup:files.toList())Files.delete(backup);}Files.delete(backups);}
             Files.deleteIfExists(path);
             Files.deleteIfExists(directory);
         }

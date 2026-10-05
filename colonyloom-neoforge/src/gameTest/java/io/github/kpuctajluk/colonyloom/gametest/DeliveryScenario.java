@@ -126,8 +126,8 @@ final class DeliveryScenario {
         if(run.step==9) {
             if(count(citizen(server,run).inventory())!=12)return;
             command(server,run,"colonyloom delivery cancel "+run.demand);
-            for(int[] offset:new int[][]{{0,1},{1,0},{0,-1},{-1,0}}) {
-                var pos=RETURN.offset(offset[0],0,offset[1]);level.setBlock(pos,Blocks.STONE.defaultBlockState(),3);level.setBlock(pos.above(),Blocks.STONE.defaultBlockState(),3);
+            for(int x=-2;x<=2;x++)for(int z=-2;z<=2;z++)if(x!=0||z!=0) {
+                var pos=RETURN.offset(x,0,z);level.setBlock(pos,Blocks.STONE.defaultBlockState(),3);level.setBlock(pos.above(),Blocks.STONE.defaultBlockState(),3);
             }
             run.step=10;return;
         }
@@ -135,8 +135,8 @@ final class DeliveryScenario {
             if(count(citizen(server,run).inventory())!=0||count(container(server,SOURCE))!=12)return;
             require(server,count(container(server,RETURN))==0&&supply.demand(run.demand).snapshot().fulfilled()==0,
                     "unreachable_return_uses_original_source","12 preserved at original source; no invented delivery success");
-            for(int[] offset:new int[][]{{0,1},{1,0},{0,-1},{-1,0}}) {
-                var pos=RETURN.offset(offset[0],0,offset[1]);level.setBlock(pos,Blocks.AIR.defaultBlockState(),3);level.setBlock(pos.above(),Blocks.AIR.defaultBlockState(),3);
+            for(int x=-2;x<=2;x++)for(int z=-2;z<=2;z++)if(x!=0||z!=0) {
+                var pos=RETURN.offset(x,0,z);level.setBlock(pos,Blocks.AIR.defaultBlockState(),3);level.setBlock(pos.above(),Blocks.AIR.defaultBlockState(),3);
             }
             container(server,SOURCE).clearContent();container(server,SOURCE).setItem(0,new ItemStack(Items.OAK_PLANKS,16));run.demand=request(server,run,16);run.step=7;return;
         }

@@ -127,6 +127,14 @@ final class ConstructionScenario {
             var site=savedSite(server,run.manifest.getUUID("work"));
             var marker=read(world(server).resolve("data/colonyloom-session.nbt"));
             require(server,!marker.getBoolean("clean")&&site.getInt("cursor")==2,"checkpoint_durable_before_clean_marker",site.toString());
+            var npc = entity(server, run.manifest);
+            requireIdentity(npc, run.manifest);
+            require(server, countBlocks(server) == 2 && countItems(npc) == 2,
+                    "checkpoint_crash_original_identity_and_cargo", "original citizen/entity/epoch/work; real blocks=2 cargo=2");
+            var timings = run.runtime.metrics().snapshot();
+            require(server, timings.get("SAVE_WORLD").count() > 0 && timings.get("SAVE_FLUSH").count() > 0
+                    && timings.get("SAVE_ENCODE").count() > 0,
+                    "checkpoint_crash_verified_save_phases_measured_before_marker", timings.toString());
             run.manifest.putInt("crashBlocks",countBlocks(server));run.manifest.putInt("crashItems",countItems(entity(server,run.manifest)));
             write(world(server).resolve(MANIFEST),run.manifest);
             fact(server,"expected_fault",true,"after_checkpoint_before_clean_marker exit=97 cursor=2");
@@ -235,7 +243,7 @@ final class ConstructionScenario {
                         run.maintenanceSeeded=true;
                         while(registry.effects().size()<2048) {
                             UUID id=UUID.randomUUID();
-                            var effect=new io.github.kpuctajluk.colonyloom.core.action.EffectRecord(id,run.manifest.getUUID("colony"),null,npc.citizenId(),npc.bindingEpoch(),ActionContext.Kind.DEATH,new io.github.kpuctajluk.colonyloom.core.colony.WorldPosition("minecraft:overworld",8,64,14),"fixture-observed-empty","",0,0,io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.PREPARED,0,null,null,null);
+                            var effect=new io.github.kpuctajluk.colonyloom.core.action.EffectRecord(id,run.manifest.getUUID("colony"),null,npc.citizenId(),npc.bindingEpoch(),ActionContext.Kind.DEATH,new io.github.kpuctajluk.colonyloom.core.colony.WorldPosition("minecraft:overworld",8,64,14),"fixture-observed-empty","",0,0,io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.PREPARED,0,null,null,null,null);
                             registry.effects().prepare(effect,io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.NORMAL);
                             if(run.retainedPrepared==null) run.retainedPrepared=id;
                             else registry.effects().update(effect.observed(0,false));
@@ -246,6 +254,26 @@ final class ConstructionScenario {
                     require(server,registry.effects().size()==1 && registry.effects().get(run.retainedPrepared)!=null,"live_threshold_compaction_preserves_prepared","effects="+registry.effects().size());
                     require(server,registry.construction().size()==1 && !registry.construction().site(run.manifest.getUUID("work")).closed(),"live_threshold_compaction_preserves_open_site","sites="+registry.construction().size());
                     require(server,savedSite(server,run.manifest.getUUID("work")).getInt("cursor")==2,"live_threshold_verified_durable_open_progress",savedSite(server,run.manifest.getUUID("work")).toString());
+                    var dto = saved(server);
+                    var marker = read(world(server).resolve("data/colonyloom-session.nbt"));
+                    require(server, !marker.getBoolean("clean") && marker.getUUID("checkpointId").equals(dto.getUUID("checkpointId"))
+                            && marker.getUUID("checkpointId").equals(run.runtime.persistence().checkpointId()),
+                            "live_compaction_remains_dirty_matching_checkpoint", marker.toString());
+                    CompoundTag savedCitizen = null;
+                    for (Tag value : dto.getList("citizens", Tag.TAG_COMPOUND)) {
+                        var record = (CompoundTag)value;
+                        if (record.getUUID("citizenId").equals(run.manifest.getUUID("citizen"))) savedCitizen = record;
+                    }
+                    require(server, savedCitizen != null && savedCitizen.getUUID("entityId").equals(run.manifest.getUUID("entity"))
+                            && savedCitizen.getUUID("colonyId").equals(run.manifest.getUUID("colony"))
+                            && savedCitizen.getLong("bindingEpoch") == run.manifest.getLong("epoch")
+                            && registry.workBoard().work(run.manifest.getUUID("work")) != null && blocks == 2 && items == 0,
+                            "live_compaction_preserves_original_identity_and_real_property", "original citizen/entity/colony/epoch/work; blocks=2 cargo=0");
+                    var timings = run.runtime.metrics().snapshot();
+                    require(server, timings.get("COMPACTION").count() > 0 && timings.get("SAVE").count() >= 2
+                            && timings.get("SAVE_ENCODE").count() > 0 && timings.get("SAVE_WORLD").count() > 0
+                            && timings.get("SAVE_FLUSH").count() >= 2,
+                            "live_compaction_reports_separate_durable_save_phases", timings.toString());
                     registry.effects().discardUnchanged(run.retainedPrepared);
                     require(server, blocks == 2 && items == 0 && savedSite(server, run.manifest.getUUID("work")).getInt("consumed") == 2,
                             "durable_clean_partial_progress", savedSite(server, run.manifest.getUUID("work")).toString());

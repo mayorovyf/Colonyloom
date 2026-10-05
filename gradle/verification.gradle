@@ -1,0 +1,83 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.lang.management.ManagementFactory
+
+// Development-only provenance; source/config changes invalidate calibration.
+def hashFiles = { Collection<File> files ->
+    def digest = MessageDigest.getInstance('SHA-256')
+    files.sort { rootProject.relativePath(it).replace('\\', '/') }.each { source ->
+        digest.update(rootProject.relativePath(source).replace('\\', '/').getBytes(StandardCharsets.UTF_8))
+        digest.update((byte) 0)
+        digest.update(source.bytes)
+        digest.update((byte) 0)
+    }
+    digest.digest().encodeHex().toString()
+}
+def currentProvenance = {
+    def modules = ['colonyloom-core', 'colonyloom-gameplay', 'colonyloom-minecraft', 'colonyloom-neoforge']
+    def sources = modules.collectMany { name -> rootProject.fileTree(name + '/src') { include '**/*.java' }.files.toList() }
+    def content = modules.collectMany { name -> rootProject.fileTree(name + '/src') { include '**/resources/**'; include '**/templates/**' }.files.toList() }
+    def config = rootProject.fileTree('gradle') { include '**/*.gradle'; include '**/*.json'; include '**/*.properties'; include '**/*.jar' }.files.toList()
+    config.addAll(rootProject.fileTree('.') { include 'build.gradle'; include 'settings.gradle'; include 'gradle.properties'; include 'gradlew'; include 'gradlew.bat'; include 'colonyloom-*/build.gradle' }.files)
+    [schema: 1, sourceSha256: hashFiles(sources), contentSha256: hashFiles(content), configSha256: hashFiles(config),
+     sourceFiles: sources.size(), contentFiles: content.size(), configFiles: config.size()]
+}
+ext.colonyloomProvenance = currentProvenance
+ext.colonyloomRequireProvenance = { Map observed, Map expected, String label ->
+    if (observed == null || observed.schema != 1 || ['sourceSha256', 'contentSha256', 'configSha256'].any { observed[it] != expected[it] }) {
+        throw new GradleException(label + ' is missing current source/config/content provenance; regenerate measurements for this checkout.')
+    }
+}
+ext.colonyloomWriteManifest = { File directory, Map provenance, String mode ->
+    def manifest = [schema: 1, createdAt: java.time.Instant.now().toString(), mode: mode, provenance: provenance,
+        acceptanceProfile: new JsonSlurper().parse(rootProject.file('gradle/acceptance-profile.json')),
+        environment: [os: System.getProperty('os.name'), osVersion: System.getProperty('os.version'), arch: System.getProperty('os.arch'),
+            jdk: System.getProperty('java.runtime.version'), vm: System.getProperty('java.vm.name'),
+            logicalProcessors: Runtime.runtime.availableProcessors(), physicalMemoryBytes: ManagementFactory.operatingSystemMXBean.totalMemorySize]]
+    directory.mkdirs()
+    new File(directory, 'manifest.json').setText(JsonOutput.prettyPrint(JsonOutput.toJson(manifest)), 'UTF-8')
+}
+tasks.register('verificationManifest') {
+    group = 'verification'
+    description = 'Writes current source/config/content hashes and the predeclared acceptance profile without accepting any runtime gate.'
+    doLast {
+        def directory = layout.buildDirectory.dir('reports/colonyloom/verification').get().asFile
+        colonyloomWriteManifest(directory, colonyloomProvenance(), 'NOT_RUN')
+        logger.lifecycle('Verification manifest: {}', new File(directory, 'manifest.json'))
+    }
+}
+
+// Launch runners own their processes. This hook only archives their current evidence.
+tasks.configureEach { task ->
+    if (task.name in ['runGameTestServer', 'constructionSmoke', 'deliverySmoke', 'productionSmoke', 'needsSmoke', 'recoverySmoke']) {
+        Map startedProvenance
+        Set<String> previousReports
+        File executionManifest
+        doFirst {
+            startedProvenance = colonyloomProvenance()
+            previousReports = project.fileTree(layout.buildDirectory.dir('reports/colonyloom')) { include '**/report.json' }.files.collect { it.absolutePath }.toSet()
+            executionManifest = layout.buildDirectory.dir('reports/colonyloom/' + task.name + '-execution-' + java.time.Instant.now().toEpochMilli()).get().asFile
+            colonyloomWriteManifest(executionManifest, startedProvenance, 'RUNNING')
+        }
+        gradle.taskGraph.afterTask { finished, state ->
+            if (finished != task || startedProvenance == null) return
+            boolean unchanged = colonyloomProvenance() == startedProvenance
+            def execution = [task: task.path, passed: state.failure == null && unchanged, checkoutUnchanged: unchanged,
+                failure: state.failure?.toString(), provenance: startedProvenance]
+            new File(executionManifest, 'report.json').setText(JsonOutput.prettyPrint(JsonOutput.toJson(execution)), 'UTF-8')
+            project.fileTree(layout.buildDirectory.dir('reports/colonyloom')) { include '**/report.json' }.files.each { report ->
+                if (!previousReports.contains(report.absolutePath)) {
+                    def observed = new JsonSlurper().parse(report)
+                    observed.provenance = startedProvenance
+                    observed.runnerPassed = state.failure == null && unchanged
+                    observed.checkoutUnchanged = unchanged
+                    report.setText(JsonOutput.prettyPrint(JsonOutput.toJson(observed)), 'UTF-8')
+                    colonyloomWriteManifest(report.parentFile, startedProvenance, task.name)
+                }
+            }
+            if (!unchanged) throw new GradleException('Checkout changed during ' + task.name + '; archived evidence is not acceptance.')
+        }
+    }
+}

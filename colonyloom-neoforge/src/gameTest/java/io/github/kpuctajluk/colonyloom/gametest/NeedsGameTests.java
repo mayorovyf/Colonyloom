@@ -51,17 +51,32 @@ public final class NeedsGameTests {
     public static void foodProtectionVetoLeavesBreadAndNutritionUnchanged(GameTestHelper helper){run(helper,true,null,true);}
     @GameTest(template="identity_empty",batch="stage11_loaded_food",timeoutTicks=2200)
     public static void hungryLoadedCourierReturnsActualCargoBeforeTakingFoodAssignment(GameTestHelper helper){run(helper,true,null,false,true);}
+    @GameTest(template="identity_empty",batch="stage11_crowded_food_reach",timeoutTicks=2200)
+    public static void hungryResidentInNativeReachConsumesWithAllAdjacentPickupCellsOccupied(GameTestHelper helper){run(helper,true,null,false,false,1);}
+    @GameTest(template="identity_empty",batch="stage11_crowded_food_route",timeoutTicks=2200)
+    public static void hungryResidentApproachesOccupiedSourceThroughRealTransferRadius(GameTestHelper helper){run(helper,true,null,false,false,2);}
+    @GameTest(template="identity_empty",batch="stage11_carried_food",timeoutTicks=2200)
+    public static void hungryResidentConsumesOwnBreadBeforeWarehouseWithoutTouchingOtherInventory(GameTestHelper helper){run(helper,true,null,false,false,0,true);}
 
     private static void run(GameTestHelper helper,boolean bread){run(helper,bread,null,false);}
     private static void run(GameTestHelper helper,boolean bread,FoodConsumptionExecutor.FaultPoint fault,boolean veto){run(helper,bread,fault,veto,false);}
-    private static void run(GameTestHelper helper,boolean bread,FoodConsumptionExecutor.FaultPoint fault,boolean veto,boolean cargo){
+    private static void run(GameTestHelper helper,boolean bread,FoodConsumptionExecutor.FaultPoint fault,boolean veto,boolean cargo){run(helper,bread,fault,veto,cargo,0);}
+    private static void run(GameTestHelper helper,boolean bread,FoodConsumptionExecutor.FaultPoint fault,boolean veto,boolean cargo,int crowded){
+        run(helper,bread,fault,veto,cargo,crowded,false);
+    }
+    private static void run(GameTestHelper helper,boolean bread,FoodConsumptionExecutor.FaultPoint fault,boolean veto,boolean cargo,int crowded,boolean carried){
         var origin=helper.absolutePos(new BlockPos(1,1,1));var access=new NeoForgeChunkAccess(helper.getLevel().getServer(),new TicketController(ResourceLocation.parse("colonyloom:runtime")));
         UUID ticketOwner=UUID.randomUUID();List<ChunkKey> keys=new ArrayList<>();String dimension=helper.getLevel().dimension().location().toString();
         for(int x=((origin.getX()-6)>>4)-1;x<=((origin.getX()+10)>>4)+1;x++)for(int z=((origin.getZ()-6)>>4)-1;z<=((origin.getZ()+8)>>4)+1;z++){var key=new ChunkKey(dimension,x,z);keys.add(key);if(!access.acquire(ticketOwner,key,ChunkDemandManager.Readiness.ENTITY_TICKING))throw new IllegalStateException("Needs fixture ticket denied");}
         Fixture[] fixture={null};int[] ticks={0};boolean[] done={false};
         helper.onEachTick(() -> {if(done[0])return;try{
             if(++ticks[0]>2000)throw new IllegalStateException("Needs timeout "+(fixture[0]==null?"chunks":fixture[0].diagnostics()));
-            if(fixture[0]==null){if(!keys.stream().allMatch(key -> access.ready(key,ChunkDemandManager.Readiness.ENTITY_TICKING)))return;fixture[0]=new Fixture(helper,origin,access,bread,fault,veto,cargo);}
+            if(fixture[0]==null){
+                for(var key:keys)for(int x=key.x()-2;x<=key.x()+2;x++)for(int z=key.z()-2;z<=key.z()+2;z++)
+                    if(helper.getLevel().getChunkSource().getChunk(x,z,net.minecraft.world.level.chunk.status.ChunkStatus.FULL,false)==null)return;
+                if(!keys.stream().allMatch(key -> access.ready(key,ChunkDemandManager.Readiness.ENTITY_TICKING)))return;
+                fixture[0]=new Fixture(helper,origin,access,bread,fault,veto,cargo,crowded,carried);
+            }
             fixture[0].core.tick(fixture[0].core.serverTick()+1);
             if(!fixture[0].observe())return;
             done[0]=true;fixture[0].close();for(var key:keys)access.release(ticketOwner,key,ChunkDemandManager.Readiness.ENTITY_TICKING);helper.succeed();
@@ -76,15 +91,18 @@ public final class NeedsGameTests {
         final Container warehouse;final UUID hungry;final WorkOrder healthy;final boolean bread;boolean needsEnabled;long started=-1,observed=-1;UUID foodWork;
         final FoodConsumptionExecutor.FaultPoint fault;final boolean veto;boolean faultInjected;
         final boolean cargo;UUID cargoOrder,cargoWork;boolean criticalReturnObserved;Container blockedDestination;
-        Fixture(GameTestHelper helper,BlockPos origin,NeoForgeChunkAccess access,boolean bread,FoodConsumptionExecutor.FaultPoint fault,boolean veto,boolean cargo){
-            this.helper=helper;this.bread=bread;this.fault=fault;this.veto=veto;this.cargo=cargo;var level=helper.getLevel();var server=level.getServer();
+        final int crowded;final boolean carried;
+        Fixture(GameTestHelper helper,BlockPos origin,NeoForgeChunkAccess access,boolean bread,FoodConsumptionExecutor.FaultPoint fault,boolean veto,boolean cargo,int crowded,boolean carried){
+            this.helper=helper;this.bread=bread;this.fault=fault;this.veto=veto;this.cargo=cargo;this.crowded=crowded;this.carried=carried;var level=helper.getLevel();var server=level.getServer();
             for(int x=-6;x<=10;x++)for(int z=-6;z<=8;z++){var pos=origin.offset(x,0,z);level.setBlockAndUpdate(pos.below(),Blocks.STONE.defaultBlockState());for(int y=0;y<3;y++)level.setBlockAndUpdate(pos.above(y),Blocks.AIR.defaultBlockState());}
             var warehousePos=origin.offset(-4,0,-4);level.setBlockAndUpdate(warehousePos,Blocks.BARREL.defaultBlockState());warehouse=(Container)level.getBlockEntity(warehousePos);if(bread)warehouse.setItem(0,new ItemStack(Items.BREAD,2));
             core=ServerRuntime.start(Thread.currentThread());var content=ContentLoader.load(server.getResourceManager(),server.registryAccess());core.configureCommands(() -> {},content.professions().values());
             var limits=SimulationLimits.development();var resources=new EnumMap<Resource,Integer>(Resource.class);resources.putAll(limits.resources());resources.put(Resource.WORKS,128);resources.put(Resource.DEMANDS,12);resources.put(Resource.GRAPH_NODES,12);core.updateLimits(new SimulationLimits(resources,limits.budgets(),100_000_000L));
             core.registry().addColony(new ColonyRuntime(colony,"Critical physical needs",new Territory(position(origin).dimension(),origin.getX()-16,origin.getZ()-16,origin.getX()+16,origin.getZ()+16),owner,Map.of(),1,1,false,null,false));
             storage=new StorageService(server,core.registry(),core.budgets(),new NeoForgeStorageIdentity());storage.register(colony,position(warehousePos),"warehouse");
-            hungry=citizen(origin.offset(-1,0,-1),cargo?"colonyloom:courier":"colonyloom:builder",cargo?20:bread?6:0);citizen(origin.offset(8,0,7),"colonyloom:carpenter",20);
+            hungry=citizen(crowded==1?warehousePos.offset(1,0,1):crowded==2?warehousePos.offset(5,0,0):origin.offset(-1,0,-1),cargo?"colonyloom:courier":"colonyloom:builder",cargo?20:bread?6:0);citizen(origin.offset(8,0,7),"colonyloom:carpenter",20);
+            if(carried){citizens.getFirst().inventory().setItem(8,new ItemStack(Items.BREAD,2));citizens.get(1).inventory().setItem(8,new ItemStack(Items.BREAD,3));}
+            if(crowded>0)for(int[] offset:new int[][]{{0,1},{1,0},{0,-1},{-1,0}})citizen(warehousePos.offset(offset[0],0,offset[1]),null,20);
             var controller=new ConstructionController(core.registry(),new MinecraftConstructionGeometry(server));var loaded=content.blueprints().get("colonyloom:test_four_stairs");
             var blueprint=BlueprintDefinition.create("colonyloom:needs_single_stair",1,List.of(loaded.blocks().getFirst()),loaded.markers());controller.definitions(Map.of(blueprint.id(),blueprint));core.commands().construction(controller);core.commands().delivery(new DeliveryController(core.registry(),new MinecraftDeliveryAccess(core.registry(),storage)));
             chunks=new ChunkDemandManager(core.registry(),core.budgets(),access);admission=new io.github.kpuctajluk.colonyloom.minecraft.runtime.CitizenAdmissionService(server,core,chunks);
@@ -136,15 +154,26 @@ public final class NeedsGameTests {
             }
             if(bread){
                 if(citizen.needs().get("food")!=11)return false;
-                check(totalBread()==1,"Food increment lacked exactly one native bread expense");check(foodWork!=null&&core.workBoard().work(foodWork).state()==WorkOrder.State.COMPLETED,"Exact hungry subject work not terminal");
+                check(totalBread()==(carried?6:1),"Food increment lacked exactly one native bread expense");check(foodWork!=null&&core.workBoard().work(foodWork).state()==WorkOrder.State.COMPLETED,"Exact hungry subject work not terminal");
+                if(carried){
+                    check(count(warehouse)==2&&count(citizens.get(1).inventory())==3&&count(citizens.getFirst().inventory())==1,"Own meal used warehouse or another resident's bread");
+                    check(core.registry().supply().deliveries().isEmpty(),"Already carried food created a pickup delivery");
+                    check(core.registry().effects().snapshots().stream().filter(effect -> effect.kind()==io.github.kpuctajluk.colonyloom.core.action.ActionContext.Kind.FOOD_CONSUME&&hungry.equals(effect.citizenId())).count()==1,"Carried meal lacks one native expense witness");
+                }
+                if(crowded>0) {
+                    var pickup=core.registry().supply().deliveries().stream().filter(order -> order.workId()!=null&&hungry.equals(core.workBoard().work(order.workId()).subjectId())).findFirst().orElseThrow();
+                    check(pickup.terminal()&&core.workBoard().work(pickup.workId()).state()==WorkOrder.State.COMPLETED,"Crowded pickup did not publish a real terminal transfer");
+                    check(navigation.state(pickup.workId())==NavigationService.State.CANCELLED&&!chunks.admitted(pickup.workId()),"Completed food retained its route/domain");
+                    check(core.registry().effects().snapshots().stream().filter(effect -> effect.kind()==io.github.kpuctajluk.colonyloom.core.action.ActionContext.Kind.STORAGE_TRANSFER&&hungry.equals(effect.citizenId())).count()==1,"Crowded food fabricated or repeated native transfer");
+                }
                 if(cargo){
                     check(criticalReturnObserved&&!core.registry().supply().hasCargo(cargoOrder)&&core.registry().supply().delivery(cargoOrder).state()==io.github.kpuctajluk.colonyloom.core.logistics.DeliveryOrder.State.RETURNED,"Food assignment preceded critical safe cargo return");
                     int stairs=0;for(int slot=0;slot<warehouse.getContainerSize();slot++)if(warehouse.getItem(slot).is(Items.OAK_STAIRS))stairs+=warehouse.getItem(slot).getCount();
                     check(stairs==3&&citizens.stream().allMatch(entity -> {for(int slot=0;slot<entity.inventory().getContainerSize();slot++)if(entity.inventory().getItem(slot).is(Items.OAK_STAIRS))return false;return true;}),"Safe return lost or orphaned actual three stairs");
                 }
-                check(core.workBoard().snapshots().stream().anyMatch(snapshot -> snapshot.id().equals(healthy.id())&&snapshot.remainingActiveTicks()<500),"Healthy ordinary timer did not progress behind critical food");
                 if(observed<0){observed=core.serverTick();return false;}if(core.serverTick()-observed<100)return false;
-                check(totalBread()==1&&citizen.needs().get("food")==11,"Food spent twice after completed chain");
+                check(core.workBoard().snapshots().stream().anyMatch(snapshot -> snapshot.id().equals(healthy.id())&&snapshot.remainingActiveTicks()<500),"Healthy ordinary timer did not progress behind critical food");
+                check(totalBread()==(carried?6:1)&&citizen.needs().get("food")==11,"Food spent twice after completed chain");
                 check(core.registry().effects().snapshots().stream().allMatch(effect -> effect.state()==EffectRecord.State.OBSERVED),"Physical chain lacks observed native evidence");return true;
             }
             if(core.serverTick()-started<200)return false;

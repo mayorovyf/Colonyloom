@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "platform": {"minecraft": "1.21.1", "loader": "NeoForge", "jdkMajor": 21, "heapGiB": 4, "seed": 424242},
+  "population": {"colonies": 3, "residentsPerColony": 100, "platformStages": [0, 30, 100, 300]},
+  "platformScenarios": ["idle", "movement-open", "movement-obstructed", "damage", "block", "chunks"],
+  "scaleScenarios": ["economy", "parallel", "critical", "mutations", "restart", "overload", "ui"],
+  "timing": {"warmupSeconds": 300, "platformMeasurementSeconds": 600, "scaleMeasurementSeconds": 1800, "overloadMeasurementSeconds": 3600, "platformDrainSeconds": 120, "scaleDrainSeconds": 1200},
+  "latencyNanos": {"meanMsptMax": 50000000, "p95MsptMax": 50000000, "p99MsptMax": 75000000, "p999MsptMax": 150000000, "vanillaNavigationP99Max": 2000000},
+  "progressTicks": {"criticalFoodMax": 1200, "residentReadinessMax": 1200, "readyStockAgeMax": 200, "noNotificationWakeupMax": 220},
+  "statePolicy": "SimulationLimits.scale300Capacity; measured per-unit budgets frozen before load; no guard/quota/deadline relaxation after FAIL",
+  "physicalPolicy": "Actual native entities, items, crafts, block placement and cargo cleanup; no virtual inventory compensation; zero samples cannot certify an action category",
+  "provenancePolicy": "Current source, build/config and content hashes must match every calibration prerequisite and remain unchanged during measurement",
+  "diagnostics": "Any reduced duration, selected partial scenario or incomplete prerequisite is NON-ACCEPTANCE even when its observations pass"
+}

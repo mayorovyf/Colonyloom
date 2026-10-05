@@ -1,0 +1,292 @@
+import groovy.json.JsonOutput
+import java.util.concurrent.TimeUnit
+
+tasks.register('dedicatedSmoke') {
+    group = 'verification'
+    description = 'Starts production-only dedicated Minecraft, executes metrics, stops and observes runtime release in a disposable world.'
+    dependsOn provider {
+        def run = tasks.named('runReleaseServer', JavaExec).get()
+        run.taskDependencies.getDependencies(run)
+    }
+    doLast {
+        def run = tasks.named('runReleaseServer', JavaExec).get()
+        def eula = file(providers.gradleProperty('colonyloomEulaFile').getOrElse('runs/server/eula.txt'))
+        if (!eula.isFile() || !eula.readLines().any { it.trim() == 'eula=true' }) throw new GradleException('Dedicated smoke requires an already owner-accepted EULA.')
+        def directory = layout.buildDirectory.dir('reports/colonyloom/dedicated-' + java.time.Instant.now().toEpochMilli()).get().asFile
+        def provenance = colonyloomProvenance()
+        colonyloomWriteManifest(directory, provenance, 'PRODUCTION_DEDICATED')
+        java.nio.file.Files.copy(eula.toPath(), new File(directory, 'eula.txt').toPath())
+        new File(directory, 'server.properties').text = '''level-name=world
+level-seed=424242
+level-type=minecraft:flat
+generator-settings={"biome":"minecraft:plains","layers":[{"block":"minecraft:bedrock","height":1},{"block":"minecraft:dirt","height":2},{"block":"minecraft:grass_block","height":1}]}
+online-mode=false
+server-ip=127.0.0.1
+server-port=0
+view-distance=4
+simulation-distance=4
+spawn-protection=0
+spawn-monsters=false
+spawn-animals=false
+max-tick-time=60000
+'''
+        def argv = [run.javaLauncher.get().executablePath.asFile.absolutePath]
+        argv.addAll(run.allJvmArgs)
+        def cp = run.classpath + run.classpathProvider
+        if (!cp.isEmpty()) argv.addAll(['-cp', cp.asPath])
+        argv.add(run.mainClass.get()); argv.addAll(run.args)
+        def stdout = new File(directory, 'stdout.log'), stderr = new File(directory, 'stderr.log')
+        def builder = new ProcessBuilder(argv.collect { it.toString() }).directory(directory)
+        run.environment.each { key, value -> builder.environment().put(key.toString(), value.toString()) }
+        run.environmentProperty.get().each { key, value -> builder.environment().put(key.toString(), value.toString()) }
+        builder.redirectOutput(stdout).redirectError(stderr)
+        def child = builder.start()
+        boolean started = false, metrics = false, exited = false
+        try {
+            long deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(4)
+            while (child.isAlive() && System.nanoTime() < deadline) {
+                if (stdout.isFile() && stdout.getText('UTF-8').contains('Done (')) { started = true; break }
+                Thread.sleep(100)
+            }
+            if (started) {
+                child.outputStream.write('colonyloom metrics server\n'.getBytes('UTF-8')); child.outputStream.flush()
+                deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+                while (child.isAlive() && System.nanoTime() < deadline) {
+                    if (stdout.getText('UTF-8').contains('timingScopes=')) { metrics = true; break }
+                    Thread.sleep(100)
+                }
+                child.outputStream.write('stop\n'.getBytes('UTF-8')); child.outputStream.flush()
+                exited = child.waitFor(60, TimeUnit.SECONDS)
+            }
+            def log = stdout.isFile() ? stdout.getText('UTF-8') : ''
+            boolean released = log.contains('Colonyloom runtime released:') && log.contains('activeRuntimes=0')
+            boolean contentValidated = log.contains('Colonyloom content validated:')
+            boolean unchanged = colonyloomProvenance() == provenance
+            boolean productionOnly = !log.contains('colonyloom_tests')
+            boolean passed = started && metrics && exited && child.exitValue() == 0 && released && contentValidated && unchanged && productionOnly
+            def persistenceCases = []
+            if (passed) {
+                byte[] cleanMarker = new File(directory, 'world/data/colonyloom-session.nbt').bytes
+                ['missing-dto-clean-marker', 'missing-dto-corrupt-marker', 'corrupt-dto-clean-marker'].each { scenario ->
+                    def instance = new File(directory, scenario)
+                    def dataDirectory = new File(instance, 'world/data')
+                    dataDirectory.mkdirs()
+                    java.nio.file.Files.copy(eula.toPath(), new File(instance, 'eula.txt').toPath())
+                    java.nio.file.Files.copy(new File(directory, 'server.properties').toPath(), new File(instance, 'server.properties').toPath())
+                    new File(instance, 'colonyloom-test-instance').text = 'Disposable persistence refusal fixture\n'
+                    byte[] markerBytes = scenario == 'missing-dto-corrupt-marker' ? 'invalid-marker'.getBytes('UTF-8') : cleanMarker
+                    def marker = new File(dataDirectory, 'colonyloom-session.nbt')
+                    marker.bytes = markerBytes
+                    def dto = new File(dataDirectory, 'colonyloom.dat')
+                    byte[] corruptBytes = 'invalid-dto'.getBytes('UTF-8')
+                    if (scenario.startsWith('corrupt-dto')) dto.bytes = corruptBytes
+                    def caseOut = new File(instance, 'stdout.log'), caseErr = new File(instance, 'stderr.log')
+                    def caseBuilder = new ProcessBuilder(argv.collect { it.toString() }).directory(instance)
+                    builder.environment().each { key, value -> caseBuilder.environment().put(key, value) }
+                    caseBuilder.redirectOutput(caseOut).redirectError(caseErr)
+                    def caseChild = caseBuilder.start()
+                    boolean caseStarted = false, refused = false, caseExited = false
+                    try {
+                        long caseDeadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(4)
+                        while (caseChild.isAlive() && System.nanoTime() < caseDeadline) {
+                            if (caseOut.isFile() && caseOut.getText('UTF-8').contains('Done (')) { caseStarted = true; break }
+                            Thread.sleep(100)
+                        }
+                        if (caseStarted) {
+                            caseChild.outputStream.write('colonyloom colony create Refused 0 64 0 15 64 15\n'.getBytes('UTF-8'))
+                            caseChild.outputStream.flush()
+                            caseDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+                            while (caseChild.isAlive() && System.nanoTime() < caseDeadline) {
+                                def output = caseOut.getText('UTF-8')
+                                if (output.contains('Colonyloom:') && output.contains('persistence blocked')) { refused = true; break }
+                                Thread.sleep(100)
+                            }
+                            caseChild.outputStream.write('stop\n'.getBytes('UTF-8')); caseChild.outputStream.flush()
+                            caseExited = caseChild.waitFor(60, TimeUnit.SECONDS)
+                        }
+                        def caseLog = caseOut.isFile() ? caseOut.getText('UTF-8') : ''
+                        boolean bytesPreserved = java.util.Arrays.equals(marker.bytes, markerBytes)
+                                && (scenario.startsWith('corrupt-dto') ? dto.isFile() && java.util.Arrays.equals(dto.bytes, corruptBytes) : !dto.exists())
+                        boolean casePassed = caseStarted && refused && caseExited && caseChild.exitValue() == 0 && bytesPreserved
+                                && caseLog.contains('mutations are disabled; existing save is not replaced')
+                                && caseLog.contains('activeRuntimes=0')
+                        persistenceCases.add([scenario: scenario, passed: casePassed, started: caseStarted, mutationRefused: refused,
+                            rejectedFilesPreserved: bytesPreserved, exited: caseExited, stdout: caseOut.absolutePath, stderr: caseErr.absolutePath])
+                    } finally {
+                        if (caseChild.isAlive()) {
+                            try { caseChild.outputStream.write('stop\n'.getBytes('UTF-8')); caseChild.outputStream.flush() } catch (IOException ignored) { }
+                            if (!caseChild.waitFor(30, TimeUnit.SECONDS)) { caseChild.destroy(); if (!caseChild.waitFor(15, TimeUnit.SECONDS)) caseChild.destroyForcibly().waitFor(15, TimeUnit.SECONDS) }
+                        }
+                    }
+                }
+                passed = persistenceCases.every { it.passed } && colonyloomProvenance() == provenance
+            }
+            def result = [passed: passed, provenance: provenance, checks: [started: started, metrics: metrics, exited: exited,
+                runtimeReleased: released, contentValidated: contentValidated, checkoutUnchanged: unchanged, productionOnly: productionOnly],
+                exit: child.isAlive() ? null : child.exitValue(), stdout: stdout.absolutePath, stderr: stderr.absolutePath, persistenceCases: persistenceCases]
+            new File(directory, 'report.json').text = JsonOutput.prettyPrint(JsonOutput.toJson(result))
+            if (!passed) throw new GradleException('Dedicated smoke failed; see ' + directory)
+            logger.lifecycle('Production-only dedicated evidence: {}', directory)
+        } finally {
+            if (child.isAlive()) {
+                try { child.outputStream.write('stop\n'.getBytes('UTF-8')); child.outputStream.flush() } catch (IOException ignored) { }
+                if (!child.waitFor(30, TimeUnit.SECONDS)) { child.destroy(); if (!child.waitFor(15, TimeUnit.SECONDS)) child.destroyForcibly().waitFor(15, TimeUnit.SECONDS) }
+            }
+        }
+    }
+}
+
+tasks.register('firstMutationSmoke') {
+    group = 'verification'
+    description = 'Halts after the first public mutation with a durable dirty marker and no DTO, then proves same-world restart refuses replacement.'
+    dependsOn provider {
+        def run = tasks.named('runRecovery', JavaExec).get()
+        run.taskDependencies.getDependencies(run)
+    }
+    doLast {
+        def run = tasks.named('runRecovery', JavaExec).get()
+        def eula = file(providers.gradleProperty('colonyloomEulaFile').getOrElse('runs/server/eula.txt'))
+        if (!eula.isFile() || !eula.readLines().any { it.trim() == 'eula=true' }) throw new GradleException('First mutation smoke requires owner-accepted EULA.')
+        def root = layout.buildDirectory.dir('reports/colonyloom/first-mutation-' + java.time.Instant.now().toEpochMilli()).get().asFile
+        def world = new File(root, 'world'); world.mkdirs()
+        new File(world, 'colonyloom-test-world').text = 'Disposable first mutation crash/restart fixture\n'
+        java.nio.file.Files.copy(eula.toPath(), new File(root, 'eula.txt').toPath())
+        new File(root, 'server.properties').text = '''level-name=world
+level-seed=424242
+level-type=minecraft:flat
+generator-settings={"biome":"minecraft:plains","layers":[{"block":"minecraft:bedrock","height":1},{"block":"minecraft:dirt","height":2},{"block":"minecraft:grass_block","height":1}]}
+online-mode=false
+server-port=0
+spawn-protection=0
+view-distance=4
+simulation-distance=4
+difficulty=peaceful
+max-tick-time=60000
+'''
+        def provenance = colonyloomProvenance()
+        colonyloomWriteManifest(root, provenance, 'FIRST_MUTATION_CRASH_RESTART')
+        byte[] markerBytes
+        def phases = []
+        ['exercise', 'verify'].each { phase ->
+            def argv = [run.javaLauncher.get().executablePath.asFile.absolutePath]
+            argv.addAll(run.allJvmArgs)
+            argv.addAll(['-Dcolonyloom.test.identityAction=', '-Dcolonyloom.test.firstMutationPhase=' + phase,
+                '-Dcolonyloom.testFaults=' + (phase == 'exercise')])
+            def cp = run.classpath + run.classpathProvider
+            if (!cp.isEmpty()) argv.addAll(['-cp', cp.asPath])
+            argv.add(run.mainClass.get()); argv.addAll(run.args)
+            def stdout = new File(root, phase + '.stdout.log'), stderr = new File(root, phase + '.stderr.log')
+            def builder = new ProcessBuilder(argv.collect { it.toString() }).directory(root)
+            run.environment.each { key, value -> builder.environment().put(key.toString(), value.toString()) }
+            run.environmentProperty.get().each { key, value -> builder.environment().put(key.toString(), value.toString()) }
+            builder.redirectOutput(stdout).redirectError(stderr)
+            def child = builder.start()
+            try {
+                boolean exited = child.waitFor(240, TimeUnit.SECONDS)
+                def log = stdout.isFile() ? stdout.getText('UTF-8') : ''
+                def marker = new File(world, 'data/colonyloom-session.nbt'), dto = new File(world, 'data/colonyloom.dat')
+                boolean witnessed = log.contains(phase == 'exercise' ? 'COLONYLOOM_FIRST_MUTATION_CRASH' : 'COLONYLOOM_FIRST_MUTATION_REFUSED')
+                boolean preserved = marker.isFile() && (phase == 'exercise' || java.util.Arrays.equals(marker.bytes, markerBytes)) && !dto.exists()
+                if (phase == 'exercise' && marker.isFile()) markerBytes = marker.bytes
+                boolean passed = exited && child.exitValue() == (phase == 'exercise' ? 97 : 0) && witnessed && preserved
+                    && (phase == 'exercise' || log.contains('activeRuntimes=0')) && colonyloomProvenance() == provenance
+                phases.add([phase: phase, passed: passed, exit: exited ? child.exitValue() : null, witness: witnessed,
+                    markerPreserved: preserved, dtoAbsent: !dto.exists(), stdout: stdout.absolutePath, stderr: stderr.absolutePath])
+                new File(root, 'report.json').text = JsonOutput.prettyPrint(JsonOutput.toJson([passed: phases.every { it.passed }, provenance: provenance, phases: phases]))
+                if (!passed) throw new GradleException('First mutation ' + phase + ' failed; see ' + root)
+            } finally {
+                if (child.isAlive()) { child.destroy(); if (!child.waitFor(20, TimeUnit.SECONDS)) child.destroyForcibly().waitFor(10, TimeUnit.SECONDS) }
+            }
+        }
+        logger.lifecycle('First mutation crash/restart evidence: {}', root)
+    }
+}
+
+tasks.register('identityOverflowSmoke') {
+    group = 'verification'
+    description = 'Runs the real dedicated identity-history cap overflow, scoped quarantine/recovery and same-world restart proof.'
+    dependsOn provider {
+        def run = tasks.named('runIdentityOverflow', JavaExec).get()
+        run.taskDependencies.getDependencies(run)
+    }
+    doLast {
+        def run = tasks.named('runIdentityOverflow', JavaExec).get()
+        def acceptedEula = file(providers.gradleProperty('colonyloomEulaFile').getOrElse('runs/server/eula.txt'))
+        if (!acceptedEula.isFile() || !acceptedEula.readLines().any { it.trim() == 'eula=true' }) {
+            throw new GradleException('Identity overflow smoke requires an already owner-accepted disposable-instance EULA.')
+        }
+        def report = layout.buildDirectory.dir('reports/colonyloom/identity-overflow-' + java.time.Instant.now().toEpochMilli()).get().asFile
+        def instance = new File(report, 'world-instance')
+        def world = new File(instance, 'world')
+        world.mkdirs()
+        java.nio.file.Files.copy(acceptedEula.toPath(), new File(instance, 'eula.txt').toPath())
+        new File(world, 'colonyloom-test-world').text = 'Disposable Colonyloom identity-history overflow runner\n'
+        new File(instance, 'server.properties').text = '''level-name=world
+level-seed=424242
+level-type=minecraft:flat
+generator-settings={"biome":"minecraft:plains","layers":[{"block":"minecraft:bedrock","height":1},{"block":"minecraft:dirt","height":2},{"block":"minecraft:grass_block","height":1}]}
+online-mode=false
+server-ip=127.0.0.1
+server-port=0
+enable-rcon=false
+enable-query=false
+spawn-protection=0
+view-distance=6
+simulation-distance=6
+gamemode=survival
+difficulty=peaceful
+spawn-monsters=false
+spawn-animals=false
+max-tick-time=120000
+'''
+        def provenance = colonyloomProvenance()
+        colonyloomWriteManifest(report, provenance, 'IDENTITY_HISTORY_OVERFLOW')
+        def phases = [
+            [name: 'initialize', expected: 'overflow_history_initialized'],
+            [name: 'exercise', expected: 'overflow_recovery_accepted_without_compensation'],
+            [name: 'verify', expected: 'overflow_same_world_restart_and_late_retired_load_complete']
+        ]
+        def results = []
+        phases.each { phaseSpec ->
+            def phase = phaseSpec.name
+            def argv = [run.javaLauncher.get().executablePath.asFile.absolutePath]
+            argv.addAll(run.allJvmArgs)
+            argv.addAll(['-Dcolonyloom.test.identityOverflowPhase=' + phase])
+            def launchClasspath = run.classpath + run.classpathProvider
+            if (!launchClasspath.isEmpty()) argv.addAll(['-cp', launchClasspath.asPath])
+            argv.add(run.mainClass.get())
+            argv.addAll(run.args)
+            def stdout = new File(report, phase + '.stdout.log')
+            def stderr = new File(report, phase + '.stderr.log')
+            def builder = new ProcessBuilder(argv.collect { it.toString() }).directory(instance)
+            run.environment.each { key, value -> builder.environment().put(key.toString(), value.toString()) }
+            run.environmentProperty.get().each { key, value -> builder.environment().put(key.toString(), value.toString()) }
+            builder.redirectOutput(stdout).redirectError(stderr)
+            long started = System.nanoTime()
+            def child = builder.start()
+            boolean exited = child.waitFor(240, TimeUnit.SECONDS)
+            if (!exited) {
+                child.destroy()
+                if (!child.waitFor(20, TimeUnit.SECONDS)) child.destroyForcibly().waitFor(10, TimeUnit.SECONDS)
+            }
+            def observations = new File(world, 'colonyloom-identity-overflow-observations.jsonl')
+            def facts = observations.isFile() ? observations.readLines().findAll { !it.isBlank() }
+                    .collect { new groovy.json.JsonSlurper().parseText(it) } : []
+            def phaseFacts = facts.findAll { it.scenario == 'identity_history_overflow' && it.phase == phase }
+            def log = stdout.isFile() ? stdout.getText('UTF-8') : ''
+            boolean clean = phaseFacts.any { it.check == 'normal_stop_clean_checkpoint' && it.passed }
+            boolean released = log.contains('Colonyloom runtime released:') && log.contains('activeRuntimes=0')
+            boolean passed = exited && child.exitValue() == 0 && phaseFacts.any { it.check == phaseSpec.expected && it.passed }
+                    && !phaseFacts.any { !it.passed } && clean && released && colonyloomProvenance() == provenance
+            results.add([phase: phase, expectedExit: 0, exit: child.isAlive() ? null : child.exitValue(), timedOut: !exited,
+                    elapsedMillis: (System.nanoTime() - started) / 1_000_000L, runtimeReleased: released,
+                    cleanCheckpoint: clean, stdout: stdout.absolutePath, stderr: stderr.absolutePath,
+                    observations: observations.absolutePath, facts: phaseFacts, passed: passed])
+            new File(report, 'report.json').text = JsonOutput.prettyPrint(JsonOutput.toJson([passed: results.every { it.passed },
+                    provenance: provenance, phases: results]))
+            if (!passed) throw new GradleException('Identity overflow ' + phase + ' failed; see ' + report)
+        }
+        if (colonyloomProvenance() != provenance) throw new GradleException('Identity overflow provenance changed during run; see ' + report)
+        logger.lifecycle('Identity history overflow evidence: {}', report)
+    }
+}

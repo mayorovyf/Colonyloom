@@ -10,6 +10,8 @@ import io.github.kpuctajluk.colonyloom.core.colony.ColonyRuntime;
 import io.github.kpuctajluk.colonyloom.core.colony.Territory;
 import io.github.kpuctajluk.colonyloom.core.colony.WorldPosition;
 import io.github.kpuctajluk.colonyloom.core.command.ColonyCommands;
+import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Budget;
+import io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane;
 import io.github.kpuctajluk.colonyloom.core.content.BlueprintDefinition;
 import io.github.kpuctajluk.colonyloom.core.navigation.NavigationService;
 import io.github.kpuctajluk.colonyloom.core.runtime.ServerRuntime;
@@ -22,6 +24,7 @@ import io.github.kpuctajluk.colonyloom.core.work.WorkOrder;
 import io.github.kpuctajluk.colonyloom.gameplay.construction.ConstructionController;
 import io.github.kpuctajluk.colonyloom.gameplay.logistics.DeliveryController;
 import io.github.kpuctajluk.colonyloom.gameplay.production.ProcessDefinition;
+import io.github.kpuctajluk.colonyloom.gameplay.needs.NeedsController;
 import io.github.kpuctajluk.colonyloom.gameplay.production.ProductionCatalog;
 import io.github.kpuctajluk.colonyloom.minecraft.construction.BlockPlacementExecutor;
 import io.github.kpuctajluk.colonyloom.minecraft.construction.MinecraftConstructionGeometry;
@@ -29,6 +32,8 @@ import io.github.kpuctajluk.colonyloom.minecraft.construction.MinecraftConstruct
 import io.github.kpuctajluk.colonyloom.minecraft.content.ContentLoader;
 import io.github.kpuctajluk.colonyloom.minecraft.entity.CitizenEntity;
 import io.github.kpuctajluk.colonyloom.minecraft.navigation.MinecraftNavigationBackend;
+import io.github.kpuctajluk.colonyloom.minecraft.needs.FoodConsumptionExecutor;
+import io.github.kpuctajluk.colonyloom.minecraft.needs.MinecraftNeedsService;
 import io.github.kpuctajluk.colonyloom.minecraft.production.MinecraftProductionService;
 import io.github.kpuctajluk.colonyloom.minecraft.production.RecipeExecutor;
 import io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftDeliveryAccess;
@@ -76,7 +81,28 @@ public final class SharedProductionGameTests {
         run(helper,true);
     }
 
+    @GameTest(template="identity_empty",batch="stage10_shared_food_pause",timeoutTicks=6200)
+    public static void sharedBegunBatchResumesOriginalProducerAfterNativeFoodPreemption(GameTestHelper helper) {
+        run(helper,false,PauseMode.FOOD);
+    }
+
+    @GameTest(template="identity_empty",batch="stage10_shared_output_pause",timeoutTicks=6200)
+    public static void sharedBatchRetainsPaidLastSlotOutputScanAcrossReadinessPauses(GameTestHelper helper) {
+        run(helper,false,PauseMode.OUTPUT);
+    }
+
+    @GameTest(template="identity_empty",batch="stage10_shared_output_changed",timeoutTicks=6200)
+    public static void pausedSharedOutputHintRejectsChangedNativeCapacityBeforeCraft(GameTestHelper helper) {
+        run(helper,false,PauseMode.OUTPUT_CHANGED);
+    }
+
+    private enum PauseMode { NONE,FOOD,OUTPUT,OUTPUT_CHANGED }
+
     private static void run(GameTestHelper helper,boolean blockReceiver) {
+        run(helper,blockReceiver,PauseMode.NONE);
+    }
+
+    private static void run(GameTestHelper helper,boolean blockReceiver,PauseMode pauseMode) {
         var origin=helper.absolutePos(new BlockPos(1,1,1));
         var access=new NeoForgeChunkAccess(helper.getLevel().getServer(),new TicketController(ResourceLocation.parse("colonyloom:runtime")));
         UUID ticketOwner=UUID.randomUUID(); List<ChunkKey> keys=new ArrayList<>();
@@ -90,10 +116,10 @@ public final class SharedProductionGameTests {
         helper.onEachTick(() -> {
             if(done[0]) return;
             try {
-                if(++ticks[0]>MAX_TICKS) throw new IllegalStateException("Shared production timeout: "+(fixture[0]==null?"chunks":fixture[0].diagnostics()));
+                if(++ticks[0]>(pauseMode==PauseMode.NONE?MAX_TICKS:6000)) throw new IllegalStateException("Shared production timeout: "+(fixture[0]==null?"chunks":fixture[0].diagnostics()));
                 if(fixture[0]==null) {
                     if(!keys.stream().allMatch(key -> access.ready(key,ChunkDemandManager.Readiness.ENTITY_TICKING))) return;
-                    fixture[0]=new Fixture(helper,origin,access,blockReceiver);
+                    fixture[0]=new Fixture(helper,origin,access,blockReceiver,pauseMode);
                 }
                 fixture[0].core.tick(fixture[0].core.serverTick()+1);
                 if(!fixture[0].observe()) return;
@@ -124,16 +150,27 @@ public final class SharedProductionGameTests {
         final MinecraftProductionService production;
         final NavigationService navigation;
         final SupplyPlanner planner;
+        final NeedsController needs;
         final ColonyCommands.CommandContext context;
         final WorkOrder a,b;
         final net.minecraft.world.level.block.state.BlockState expectedStair;
         final boolean blockReceiver;
+        final PauseMode pauseMode;
+        final Budget[] frozenBudgets={Budget.ASSIGNMENT_CANDIDATES,Budget.GRAPH_EXPANSIONS,Budget.NAVIGATION_STARTS,
+                Budget.BLUEPRINT_COMPARISONS,Budget.PHYSICAL_ACTIONS,Budget.STORAGE_SLOT_CHECKS,Budget.CHUNK_REQUESTS,
+                Budget.VIEW_ROWS,Budget.DIRTY_RESCAN_OBJECTS};
+        final int[] frozenQuanta={3,1,1,4,1,60,1,1,1};
+        UUID originalProducer,originalWork,foodWork;
+        long preemptedActive,resumedActive;long detachedRemaining=-1;
+        boolean foodTriggered,foodDetached,foodConsumed,foodResumed,outputChanged,staleOutputRejected;
+        int outputPauses,outputCursorBeforeAttempt;
+        long outputAttemptTick=-1;
         UUID batch,surplus;
         boolean cancelled,receiverBlocked,capacityObserved,unblocked;
         long blockedAt,completedAt=-1;
 
-        Fixture(GameTestHelper helper,BlockPos origin,NeoForgeChunkAccess access,boolean blockReceiver) {
-            this.helper=helper; this.blockReceiver=blockReceiver;
+        Fixture(GameTestHelper helper,BlockPos origin,NeoForgeChunkAccess access,boolean blockReceiver,PauseMode pauseMode) {
+            this.helper=helper; this.blockReceiver=blockReceiver;this.pauseMode=pauseMode;
             var level=helper.getLevel(); var server=level.getServer();
             for(int x=-6;x<=10;x++) for(int z=-6;z<=7;z++) {
                 var pos=origin.offset(x,0,z); level.setBlockAndUpdate(pos.below(),Blocks.STONE.defaultBlockState());
@@ -145,10 +182,16 @@ public final class SharedProductionGameTests {
             level.setBlockAndUpdate(workshopPos.east(),Blocks.CRAFTING_TABLE.defaultBlockState());
             workshop=container(workshopPos); warehouse=container(warehousePos); returns=container(returnPos); aBuffer=container(bufferA); bBuffer=container(bufferB);
             workshop.setItem(0,new ItemStack(Items.OAK_PLANKS,6));
+            if(pauseMode==PauseMode.FOOD)warehouse.setItem(0,new ItemStack(Items.BREAD));
+            if(pauseMode==PauseMode.OUTPUT||pauseMode==PauseMode.OUTPUT_CHANGED)
+                for(int slot=1;slot<26;slot++)workshop.setItem(slot,new ItemStack(Items.STONE,64));
             core=ServerRuntime.start(Thread.currentThread());
             var content=ContentLoader.load(server.getResourceManager(),server.registryAccess());
             core.configureCommands(() -> {},content.professions().values());
-            core.updateLimits(core.admission().limits().withMaxManagedNanos(100_000_000L));
+            var limits=core.admission().limits();
+            if(pauseMode==PauseMode.NONE)limits=limits.withMaxManagedNanos(100_000_000L);
+            else for(int i=0;i<frozenBudgets.length;i++)limits=limits.withBudget(frozenBudgets[i],frozenQuanta[i]);
+            core.updateLimits(limits);
             core.registry().addColony(new ColonyRuntime(colony,"Shared physical production",new Territory(position(origin).dimension(),origin.getX()-16,origin.getZ()-16,origin.getX()+16,origin.getZ()+16),owner,Map.of(),1,1,false,null,false));
             storage=new StorageService(server,core.registry(),core.budgets(),new NeoForgeStorageIdentity());
             storage.register(colony,position(workshopPos),"workshop"); storage.register(colony,position(warehousePos),"warehouse"); storage.register(colony,position(returnPos),"return");
@@ -176,14 +219,23 @@ public final class SharedProductionGameTests {
             NavigationService.GoalAuthority goals=(work,request) -> WorkOrder.DELIVERY.equals(work.typeId())?delivery.current(work,request):WorkOrder.PRODUCTION.equals(work.typeId())?production.current(work,request):construction.current(work,request);
             navigation=new NavigationService(core.registry(),core.budgets(),chunks,new MinecraftNavigationBackend(server,core.registry(),chunks,goals),goals);
             construction.navigation(navigation); delivery.navigation(navigation); production.navigation(navigation);
+            var food=new MinecraftNeedsService(core.registry(),storage,delivery,new FoodConsumptionExecutor(server,core.registry(),storage,(action,principal,prepared) -> true,() -> checkpoint,null));
+            needs=new NeedsController(core.registry(),food);food.needs(needs);
             planner=new SupplyPlanner(core.registry(),core.registry().supply(),core.budgets());
             // Longer active time makes sharing observable without replacing the native six-plank/four-stair recipe.
             var recipe=RecipeDefinition.create("colonyloom:shared_oak_stairs",1,"colonyloom:carpenter","minecraft:crafting_table",List.of(new RecipeDefinition.Ingredient(new ItemMatcher("minecraft:oak_planks",null),6)),NativeItemDescriptor.describe(new ItemStack(Items.OAK_STAIRS),level.registryAccess()),4,160);
             planner.configure(new ProductionCatalog(core.registry(),Map.of(recipe.id(),new ProcessDefinition(recipe))),new MinecraftSupplyAccess(core.registry(),storage));
-            core.scheduler().physicalExecutor(WorkOrder.CONSTRUCTION,construction); core.scheduler().physicalExecutor(WorkOrder.DELIVERY,delivery); core.scheduler().physicalExecutor(WorkOrder.PRODUCTION,production);
-            core.scheduler().beforeWork(tick -> {
-                chunks.tick(tick); admission.tick(); navigation.tick(tick); storage.tick(tick); core.registry().targetClaims().tick();
-                core.registry().supply().reconcile(tick,core.budgets()); planner.tick(tick); delivery.tick(tick); production.tick();
+            core.scheduler().physicalExecutor(WorkOrder.CONSTRUCTION,construction); core.scheduler().physicalExecutor(WorkOrder.DELIVERY,delivery); core.scheduler().physicalExecutor(WorkOrder.PRODUCTION,production);core.scheduler().physicalExecutor(WorkOrder.FOOD,food);
+            core.scheduler().beforeWork(this::beforeWork);
+            core.scheduler().beforeStep(() -> {
+                if(pauseMode!=PauseMode.OUTPUT&&pauseMode!=PauseMode.OUTPUT_CHANGED)return;
+                var order=batch==null?null:core.registry().supply().production(batch);
+                if(order==null||order.terminal()||!order.workId().equals(executingWork().id()))return;
+                outputAttemptTick=core.serverTick();outputCursorBeforeAttempt=outputCursor();
+                // Unrelated native observers have used56 checks; the frozen60-check quota
+                // still admits the exact four-slot final guard on a later paid turn.
+                while(core.budgets().used(Budget.STORAGE_SLOT_CHECKS)<56)
+                    if(!core.budgets().tryConsume(Budget.STORAGE_SLOT_CHECKS,Lane.NORMAL))break;
             });
             context=new ColonyCommands.CommandContext(owner,false,new ColonyCommands.PhysicalChecks() {
                 public void validateTerritory(Territory territory) {}
@@ -192,6 +244,54 @@ public final class SharedProductionGameTests {
             });
             a=core.commands().build(context,UUID.randomUUID(),colony,blueprint.id(),position(siteA),0);
             b=core.commands().build(context,UUID.randomUUID(),colony,blueprint.id(),position(siteB),0);
+        }
+
+        private void beforeWork(long tick) {
+            if(pauseMode==PauseMode.NONE) {
+                chunks.tick(tick);admission.tick();navigation.tick(tick);storage.tick(tick);core.registry().targetClaims().tick();
+                core.registry().supply().reconcile(tick,core.budgets());planner.tick(tick);delivery.tick(tick);production.tick();return;
+            }
+            // The same frozen dirty quantum rotates among the real runtime consumers.
+            int first=(int)((tick/2)%9);
+            for(int offset=0;offset<9;offset++)switch((first+offset)%9) {
+                case 0 -> chunks.tick(tick);
+                case 1 -> admission.tick();
+                case 2 -> {if(pauseMode==PauseMode.FOOD&&foodTriggered)needs.tick(tick);}
+                case 3 -> navigation.tick(tick);
+                case 4 -> storage.tick(tick);
+                case 5 -> core.registry().targetClaims().tick();
+                case 6 -> core.registry().supply().reconcile(tick,core.budgets());
+                case 7 -> planner.tick(tick);
+                case 8 -> {delivery.tick(tick);production.tick();}
+                default -> throw new IllegalStateException("Unknown shared production phase");
+            }
+        }
+
+        private WorkOrder executingWork() {
+            try {
+                var executing=core.scheduler().getClass().getDeclaredField("executing");executing.setAccessible(true);
+                var node=executing.get(core.scheduler());var work=node.getClass().getDeclaredField("work");work.setAccessible(true);
+                return (WorkOrder)work.get(node);
+            } catch(ReflectiveOperationException failure) {throw new IllegalStateException("Missing scoped scheduler observer",failure);}
+        }
+
+        private Object productionState() {
+            try {
+                var field=production.getClass().getDeclaredField("active");field.setAccessible(true);
+                return ((Map<?,?>)field.get(production)).get(originalWork);
+            } catch(ReflectiveOperationException failure) {throw new IllegalStateException("Missing production scan observer",failure);}
+        }
+
+        private int outputCursor() {
+            var state=productionState();if(state==null)return -1;
+            try {var field=state.getClass().getDeclaredField("outputCursor");field.setAccessible(true);return field.getInt(state);}
+            catch(ReflectiveOperationException failure) {throw new IllegalStateException("Missing production output cursor",failure);}
+        }
+
+        private boolean hasOutputHint() {
+            var state=productionState();if(state==null)return false;
+            try {var field=state.getClass().getDeclaredField("outputs");field.setAccessible(true);return !((List<?>)field.get(state)).isEmpty();}
+            catch(ReflectiveOperationException failure) {throw new IllegalStateException("Missing production output hint",failure);}
         }
 
         private void citizen(BlockPos start,String profession,UUID workplace) {
@@ -215,10 +315,27 @@ public final class SharedProductionGameTests {
                 check(count(workshop,Items.OAK_PLANKS)==6 && count(workshop,Items.OAK_STAIRS)==0,"Cancellation did not precede native batch effect");
                 check(core.registry().construction().site(a.id()).consumed()==0 && core.registry().construction().site(b.id()).consumed()==0,"Sites placed before batch began");
                 batch=shared.id(); core.commands().cancelWork(context,a.id()); cancelled=true;
+                originalProducer=shared.citizenId();originalWork=shared.workId();
+                if(pauseMode==PauseMode.FOOD) {
+                    preemptedActive=core.registry().citizen(originalProducer).activeTimeTicks();
+                    core.registry().updateCitizen(core.registry().citizen(originalProducer).withFood(6));foodTriggered=true;
+                }
                 var retained=supply.production(batch);
                 check(retained.batchStarted() && !retained.terminal() && retained.batches()==1,"Cancellation destroyed shared begun batch");
                 var promised=supply.orderShares(batch).stream().filter(share -> share.stage()==CoverageShare.Stage.PROMISED_OUTPUT).toList();
                 check(promised.size()==1 && promised.getFirst().quantity()==1 && supply.demand(promised.getFirst().demandId()).snapshot().ownerId().equals(b.id()),"Cancelled A retained output promise or B lost its share");
+            }
+            if(pauseMode!=PauseMode.NONE) {
+                for(int i=0;i<frozenBudgets.length;i++) {
+                    check(core.admission().limits().budget(frozenBudgets[i])==frozenQuanta[i],"Pause fixture changed a frozen service quantum");
+                    check(core.budgets().used(frozenBudgets[i])<=frozenQuanta[i],"Shared pause exceeded "+frozenBudgets[i]);
+                }
+                check(core.admission().limits().maxManagedNanos()==5_000_000L,"Pause fixture changed the managed deadline");
+                var order=supply.production(batch);var work=core.workBoard().work(originalWork);
+                check(originalWork.equals(order.workId()),"Pause replaced the original production work");
+                if(!order.terminal())check(originalProducer.equals(order.citizenId()),"Pause replaced the begun batch's exact producer");
+                if(pauseMode==PauseMode.FOOD)observeFoodPause(order);
+                else observeOutputPause(order,work);
             }
             var internal=supply.demands().stream().map(Demand::snapshot).filter(d -> supply.productionSurplus(d.id()) && d.matcher().itemId().equals("minecraft:oak_stairs")).findFirst().orElse(null);
             if(internal!=null) {
@@ -233,7 +350,10 @@ public final class SharedProductionGameTests {
                 check(count(workshop,Items.OAK_STAIRS)>=3 && count(warehouse,Items.OAK_STAIRS)==0 && count(returns,Items.OAK_STAIRS)==0,"Blocked surplus left retained workshop stack");
                 var pending=supply.demand(surplus).snapshot();
                 check(pending.covered()==3 && pending.fulfilled()==0 && pending.deliveredTotal()==0,"Blocked receiver released/deleted surplus ownership");
-                capacityObserved|=supply.deliveries().stream().filter(order -> order.ownerDemandId().equals(surplus) && order.workId()!=null).anyMatch(order -> core.workBoard().work(order.workId()).state()==WorkOrder.State.WAITING && core.workBoard().work(order.workId()).waitingReason()==WorkOrder.Reason.CAPACITY);
+                // The sole courier may encounter the full return receiver on B's share first.
+                // Require a real capacity wait while all three surplus items remain covered/physical,
+                // not an incidental dispatch order between the two deliveries from the same batch.
+                capacityObserved|=supply.deliveries().stream().filter(order -> order.workId()!=null && !order.terminal()).anyMatch(order -> core.workBoard().work(order.workId()).state()==WorkOrder.State.WAITING && core.workBoard().work(order.workId()).waitingReason()==WorkOrder.Reason.CAPACITY);
                 if(!capacityObserved || core.serverTick()-blockedAt<40) return false;
                 clear(warehouse); clear(returns); unblocked=true;
             }
@@ -241,6 +361,51 @@ public final class SharedProductionGameTests {
             if(completedAt<0) completedAt=core.serverTick();
             if(core.serverTick()-completedAt<40) return false;
             assertComplete(); return true;
+        }
+
+        private void observeFoodPause(io.github.kpuctajluk.colonyloom.core.production.ProductionOrder order) {
+            var citizen=core.registry().citizen(originalProducer);
+            var pending=needs.workForCitizen(originalProducer);
+            if(pending!=null)foodWork=pending.id();
+            var food=core.registry().effects().snapshots().stream().filter(effect -> effect.food()!=null&&originalProducer.equals(effect.citizenId())).findFirst().orElse(null);
+            if(!originalWork.equals(citizen.assignedWorkId())&&food==null) {
+                if(!foodDetached){detachedRemaining=order.remainingActiveTicks();foodDetached=true;}
+                check(order.remainingActiveTicks()==detachedRemaining && order.batchStarted(),"Food pause accrued production time or reset the begun batch");
+                check(count(workshop,Items.OAK_PLANKS)==6 && total(Items.OAK_STAIRS)==0,"Food pause expended the retained exact kit");
+                check(!core.workBoard().assign(originalWork,originalProducer),"Food-pending citizen rebound to ordinary production");
+            }
+            if(food!=null) {
+                check(food.state()==EffectRecord.State.OBSERVED&&food.countBefore()-food.countAfter()==1&&food.food().foodAfter()-food.food().foodBefore()==5,"Food resumption lacked one exact native bread expense/nutrition fact");
+                check(foodWork!=null&&foodWork.equals(food.workId())&&core.workBoard().work(foodWork).terminal(),"Native food did not complete the original exact subject work");
+                foodConsumed=true;
+            }
+            if(foodConsumed&&!foodResumed&&originalWork.equals(citizen.assignedWorkId())) {
+                check(order.remainingActiveTicks()==detachedRemaining,"Production caught up food-paused own ticks on rebind");
+                check(citizen.activeTimeTicks()>preemptedActive,"Native food did not exercise a live own-clock pause");
+                resumedActive=citizen.activeTimeTicks();foodResumed=true;
+            }
+            if(foodResumed&&!order.terminal())check(order.remainingActiveTicks()>=Math.max(0,detachedRemaining-(citizen.activeTimeTicks()-resumedActive)),"Production included paused/offline catch-up time");
+        }
+
+        private void observeOutputPause(io.github.kpuctajluk.colonyloom.core.production.ProductionOrder order,WorkOrder work) {
+            if(order.terminal()||order.remainingActiveTicks()!=0)return;
+            if(outputChanged&&!staleOutputRejected&&work.waitingReason()==WorkOrder.Reason.CAPACITY) {
+                staleOutputRejected=true;
+                check(count(workshop,Items.OAK_PLANKS)==6&&total(Items.OAK_STAIRS)==0,"Stale output hint spent the exact native kit");
+                check(core.registry().effects().snapshots().stream().noneMatch(effect -> effect.craft()!=null),"Stale output hint published a craft fact");
+            }
+            int cursor=outputCursor();
+            if(work.assignee()==null||outputAttemptTick!=core.serverTick()||cursor<=outputCursorBeforeAttempt)return;
+            check(outputPauses<40,"Shared batch repeatedly discarded its paid output prefix");
+            check(originalProducer.equals(work.assignee()),"Output pause changed the original producer");
+            core.commands().updateCitizenReadiness(originalProducer,CitizenRecord.Readiness.UNKNOWN);
+            core.commands().updateCitizenReadiness(originalProducer,CitizenRecord.Readiness.READY);
+            check(outputCursor()==cursor,"Readiness pause discarded a charged output-slot cursor");
+            outputPauses++;
+            if(pauseMode==PauseMode.OUTPUT_CHANGED&&!outputChanged&&cursor==27&&hasOutputHint()) {
+                check(workshop.getItem(26).isEmpty()&&workshop.getItem(25).is(Items.STONE),"Changed output fixture lacks the native last-slot hint");
+                workshop.setItem(26,workshop.removeItemNoUpdate(25));workshop.setChanged();outputChanged=true;
+            }
         }
 
         private void assertComplete() {
@@ -266,6 +431,17 @@ public final class SharedProductionGameTests {
             check(core.registry().storage().reservations().entries().isEmpty() && core.registry().storage().allocations().entries().isEmpty(),"Terminal sites retained storage obligations");
             check(core.registry().citizens(colony).stream().allMatch(citizen -> citizen.assignedWorkId()==null),"Terminal chain retained worker assignment");
             check(!blockReceiver || capacityObserved && unblocked,"Blocked surplus never exposed CAPACITY and recovered");
+            check(craft.inputs().size()==1&&craft.inputs().getFirst().afterCount()==0&&craft.outputs().size()==1&&craft.outputs().getFirst().amount()==4,"Shared craft lacks exact typed native slot facts");
+            if(pauseMode==PauseMode.FOOD) {
+                check(foodTriggered&&foodDetached&&foodConsumed&&foodResumed,"Shared batch did not exercise native food preemption and original producer resumption");
+                check(total(Items.BREAD)==0&&core.registry().effects().snapshots().stream().filter(effect -> effect.food()!=null).count()==1,"Food pause lost/duplicated native bread");
+                check(originalProducer.equals(core.registry().effects().snapshots().stream().filter(effect -> effect.craft()!=null).findFirst().orElseThrow().citizenId()),"Batch completed on a substitute producer");
+            } else if(pauseMode==PauseMode.OUTPUT||pauseMode==PauseMode.OUTPUT_CHANGED) {
+                check(outputPauses>=6,"Shared batch did not pay multiple native output portions across pauses");
+                check(total(Items.STONE)==25*64,"Paused capacity validation deleted/created unrelated native property");
+                check(craft.outputs().getFirst().slot().slot()==(pauseMode==PauseMode.OUTPUT_CHANGED?25:26),"Craft bypassed the paid last-slot output scan");
+                check(pauseMode!=PauseMode.OUTPUT_CHANGED||outputChanged&&staleOutputRejected,"Changed native output hint was not rejected before expense");
+            }
         }
 
         private void check(boolean condition,String message) {helper.assertTrue(condition,message);}
@@ -281,7 +457,9 @@ public final class SharedProductionGameTests {
         private static void fill(Container inventory) {for(int slot=0;slot<inventory.getContainerSize();slot++) inventory.setItem(slot,new ItemStack(Items.STONE,64)); inventory.setChanged();}
         private static void clear(Container inventory) {inventory.clearContent(); inventory.setChanged();}
         String diagnostics() {
-            var result=new StringBuilder("cancelled=").append(cancelled).append(" blocked=").append(receiverBlocked).append(" capacity=").append(capacityObserved).append(" chunks=").append(chunks.diagnostics(null));
+            var result=new StringBuilder("cancelled=").append(cancelled).append(" blocked=").append(receiverBlocked).append(" capacity=").append(capacityObserved)
+                    .append(" pause=").append(pauseMode).append(':').append(outputPauses).append(':').append(outputChanged).append(':').append(staleOutputRejected)
+                    .append(" food=").append(foodDetached).append(':').append(foodConsumed).append(':').append(foodResumed).append(" chunks=").append(chunks.diagnostics(null));
             for(var resource:io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.values()) if(resource==io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.LOADED_FOOTPRINT || resource==io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.BLOCK_TICKING || resource==io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource.ENTITY_TICKING) {
                 result.append(' ').append(resource).append('=').append(core.admission().used(resource));for(var lane:io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane.values())result.append(':').append(lane).append('=').append(core.admission().used(resource,lane)).append('/').append(core.admission().laneCapacity(resource,lane));
             }

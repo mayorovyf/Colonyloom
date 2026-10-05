@@ -57,7 +57,7 @@ public final class SupplyPersistenceGameTests {
             var migrated=loaded.snapshot().supply().productionOrders().getFirst();
             helper.assertTrue(!migrated.pinned() && !migrated.batchStarted() && migrated.completedBatches()==0
                     && migrated.batches()==4 && migrated.remainingActiveTicks()==40,"Legacy pending batch invented physical identity/progress");
-            var backup=directory.resolve("colonyloom-backups").resolve(loaded.checkpointId()+"-v1.dat");
+            var backup=directory.resolve("colonyloom-backups").resolve(loaded.checkpointId()+"-v"+root.getInt("schemaVersion")+".dat");
             helper.assertTrue(java.util.Arrays.equals(original,java.nio.file.Files.readAllBytes(backup)),"Migration did not retain exact compressed checkpoint");
             var saved=loaded.save(new CompoundTag(),helper.getLevel().registryAccess());
             helper.assertTrue(saved.getList("productionOrders",Tag.TAG_COMPOUND).getCompound(0).getInt("schemaVersion")==2,"Migrated order retained old encoding");

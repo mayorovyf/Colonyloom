@@ -182,6 +182,49 @@ public final class StorageTransferGameTests {
             helper.assertTrue(saved.getList("evidence",Tag.TAG_COMPOUND).contains(evidence),"Unknown native evidence schema rewritten/lost");
         });
     }
+    @GameTest(template="identity_empty",timeoutTicks=240)
+    public static void warmedNativeMappingRejectsSameTickIdentityAndEntityReplacement(GameTestHelper helper) {
+        withReadyFixture(helper,f -> {
+            f.barrel.setItem(0,new ItemStack(Items.OAK_PLANKS,13));
+            helper.assertTrue(f.storage.read(f.barrelSlot).ready(),"Original native mapping not ready");
+            new NeoForgeStorageIdentity().replace((net.minecraft.world.level.block.entity.BlockEntity)f.barrel);
+            helper.assertTrue(!f.storage.read(f.barrelSlot).ready(),"Same-instance UUID change reused warmed canonical mapping");
+            var registration=f.registry.storage().registrations(f.colony).stream().filter(r -> r.address().equals(f.position(f.barrelPos))).findFirst().orElseThrow();
+            var renewed=registration.slots().getFirst();
+            helper.assertTrue(!renewed.storage().equals(f.barrelSlot.storage()) && f.storage.read(renewed).count()==13,
+                    "Changed native UUID did not recanonicalize actual inventory");
+            helper.getLevel().setBlockAndUpdate(f.barrelPos,Blocks.AIR.defaultBlockState());
+            helper.getLevel().setBlockAndUpdate(f.barrelPos,Blocks.BARREL.defaultBlockState());
+            helper.assertTrue(!f.storage.read(renewed).ready(),"Same-tick native replacement reused previous block entity");
+            helper.assertTrue(!new NeoForgeStorageIdentity().supported(helper.getLevel(),List.of((net.minecraft.world.level.block.entity.BlockEntity)f.barrel)),
+                    "Known-state capability overload accepted an obsolete block entity");
+        });
+    }
+    @GameTest(template="identity_empty",timeoutTicks=240)
+    public static void warmedNativeReadsKeepCurrentItemsLootAndColonyScope(GameTestHelper helper) {
+        withReadyFixture(helper,f -> {
+            f.barrel.setItem(0,named("before",13));
+            var first=f.storage.read(f.barrelSlot);
+            helper.assertTrue(first.ready() && first.count()==13,"Original stock observation not ready");
+            f.barrel.setItem(0,named("after",7));
+            var changed=f.storage.read(f.barrelSlot);
+            helper.assertTrue(changed.ready() && changed.count()==7 && !changed.item().equals(first.item()),"Warmed mapping reused old native item components/count");
+            var loot=(net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity)f.barrel;
+            loot.setLootTable(net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.LOOT_TABLE,ResourceLocation.parse("minecraft:chests/simple_dungeon")));
+            helper.assertTrue(!f.storage.read(f.barrelSlot).ready(),"Warmed mapping unpacked or accepted unresolved loot");
+            loot.setLootTable(null);
+            helper.assertTrue(f.storage.read(f.barrelSlot).count()==7,"Clearing unresolved loot fabricated or changed native stock");
+            var colony=f.registry.colony(f.colony);
+            f.registry.updateColony(new ColonyRuntime(colony.colonyId(),colony.name(),colony.territory(),colony.ownerId(),colony.members(),2,2,false,null,true));
+            helper.assertTrue(!f.storage.read(f.barrelSlot).ready(),"Warmed mapping bypassed current colony availability");
+            var outside=new Territory(colony.territory().dimension(),f.origin.getX()+32,f.origin.getZ()+32,f.origin.getX()+63,f.origin.getZ()+63);
+            f.registry.updateColony(new ColonyRuntime(colony.colonyId(),colony.name(),outside,colony.ownerId(),colony.members(),3,3,false,null,false));
+            helper.assertTrue(!f.storage.read(f.barrelSlot).ready(),"Warmed mapping bypassed changed territory criteria");
+            f.registry.updateColony(new ColonyRuntime(colony.colonyId(),colony.name(),colony.territory(),colony.ownerId(),colony.members(),4,4,false,null,false));
+            helper.assertTrue(f.storage.read(f.barrelSlot).count()==7,"Restored authority failed to observe the exact native stack");
+        });
+    }
+
     private static ItemStack named(String name,int count) { ItemStack stack=new ItemStack(Items.OAK_PLANKS,count); stack.set(DataComponents.CUSTOM_NAME,Component.literal(name)); return stack; }
     private static void withReadyFixture(GameTestHelper helper,Consumer<Fixture> check) {
         BlockPos origin=helper.absolutePos(new BlockPos(1,1,1)); var access=new NeoForgeChunkAccess(helper.getLevel().getServer(),new TicketController(ResourceLocation.parse("colonyloom:runtime")));

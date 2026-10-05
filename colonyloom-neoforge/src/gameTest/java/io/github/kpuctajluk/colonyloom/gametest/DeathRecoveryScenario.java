@@ -54,8 +54,8 @@ final class DeathRecoveryScenario {
         MinecraftServerRuntime runtime;
         ServerPlayer actor;
         CompoundTag manifest;
-        boolean done, killed, prepared, verified, accepted;
-        int ticks, stableTicks;
+        boolean done, killed, prepared, verified, accepted, vetoChecked;
+        int ticks, stableTicks, vetoTick;
     }
     private record Counts(int sourceStairs, int sourceBread, int dropStairs, int dropBread) {
         int source() { return sourceStairs + sourceBread; }
@@ -137,6 +137,8 @@ final class DeathRecoveryScenario {
     }
     private static void exercise(MinecraftServer server, Run run) throws Exception {
         if (!run.killed) {
+            // The vetoed hit still sets vanilla hurt cooldown; wait for native ticks, do not reset it.
+            if (run.vetoChecked && run.ticks - run.vetoTick <= 20) return;
             CitizenEntity npc = entity(server, run);
             identity(server, run);
             require(server, run, npc.isAlive() && !npc.isQuarantined() && counts(server, run).equals(new Counts(4, 3, 0, 0)),
@@ -147,6 +149,19 @@ final class DeathRecoveryScenario {
             require(server, run, durableCounts(server, run).equals(new Counts(4, 3, 0, 0))
                     && RecoveryNativeState.entity(server, id(run, "entity"), CHUNK).getFloat("Health") > 0,
                     "native_alive_baseline_flushed", "raw original UUID MCA inventory stairs4 bread3; no native drops");
+            if (!run.vetoChecked) {
+                java.util.function.Consumer<net.neoforged.neoforge.event.entity.living.LivingDeathEvent> lateVeto=event -> {if(event.getEntity()==npc){npc.setHealth(20);event.setCanceled(true);}};
+                NeoForge.EVENT_BUS.addListener(net.neoforged.bus.api.EventPriority.LOWEST,false,net.neoforged.neoforge.event.entity.living.LivingDeathEvent.class,lateVeto);
+                try {
+                    npc.hurt(npc.damageSources().genericKill(),Float.MAX_VALUE);
+                    require(server,run,npc.isAlive()&&!npc.isQuarantined()&&run.runtime.core().registry().citizen(id(run,"citizen")).lifecycle()==CitizenRecord.Lifecycle.ALIVE
+                            && run.runtime.core().registry().effects().snapshots().stream().noneMatch(value -> value.kind()==ActionContext.Kind.DEATH && value.citizenId().equals(id(run,"citizen")))
+                            && counts(server,run).equals(new Counts(4,3,0,0)),"late_lowest_veto_preserves_alive_authority_and_cargo","genuine dispatch cancelled after all earlier listeners; no death effect/tombstone/removal/drop");
+                } finally {NeoForge.EVENT_BUS.unregister(lateVeto);}
+                run.vetoChecked = true;
+                run.vetoTick = run.ticks;
+                return;
+            }
             run.killed = true;
             state(npc.hurt(npc.damageSources().genericKill(), Float.MAX_VALUE), "Native genericKill hurt was refused");
             state(clean(), "Configured production death fault did not halt at its named boundary");
@@ -246,6 +261,25 @@ final class DeathRecoveryScenario {
         if (!run.accepted) {
             state(colony.recoveryBlocked(), "Acceptance requires original recovery quarantine");
             inspect(server, run);
+            if(!drops(server).isEmpty()) {
+                ItemEntity drop=drops(server).getFirst();ItemStack original=drop.getItem().copy();
+                var capture=new Capture();int refused;
+                drop.setItem(new ItemStack(Items.DIRT,original.getCount()));
+                try {
+                    refused=server.getCommands().getDispatcher().execute("colonyloom recovery accept-world "+id(run,"colony")+" "+colony.recoveryCheckpointId(),run.actor.createCommandSourceStack().withPermission(2).withSource(capture));
+                } finally {drop.setItem(original);}
+                require(server,run,refused==0&&colony.recoveryBlocked()&&String.join("\n",capture.messages).contains("changed"),"changed_death_drop_rejects_inspect_accept","same UUID changed item descriptor; no acceptance/replay/compensation; response="+String.join("\n",capture.messages));
+                inspect(server,run);
+                // Restore the same object before property logging, even if the public command throws.
+                drop.discard();capture=new Capture();
+                try {
+                    refused=server.getCommands().getDispatcher().execute("colonyloom recovery accept-world "+id(run,"colony")+" "+colony.recoveryCheckpointId(),run.actor.createCommandSourceStack().withPermission(2).withSource(capture));
+                } finally {
+                    drop.revive();state(server.overworld().addFreshEntity(drop),"Fixture could not restore the original physical object after removal regression");
+                }
+                require(server,run,refused==0&&colony.recoveryBlocked(),"removed_death_drop_rejects_inspect_accept","published UUID removed after inspect; UNKNOWN cannot equal unchanged destination; response="+String.join("\n",capture.messages));
+                inspect(server,run);
+            }
             String accepted = command(server, run, "colonyloom recovery accept-world " + id(run, "colony") + " " + colony.recoveryCheckpointId());
             require(server, run, accepted.contains("without item creation/removal/compensation") && counts(server, run).equals(expected), "accept_world_preserves_actual_property", accepted);
             run.accepted = true;
@@ -258,7 +292,7 @@ final class DeathRecoveryScenario {
     }
     private static void inspect(MinecraftServer server, Run run) throws Exception {
         String inspected = command(server, run, "colonyloom recovery inspect " + id(run, "colony"));
-        require(server, run, inspected.contains("actualPhysical=") && inspected.contains(id(run, "operation").toString()), "public_inspect_original_death", inspected);
+        require(server, run, inspected.contains("actualPhysical=") && inspected.contains("cargoBefore=") && inspected.contains("publication=") && inspected.contains(id(run, "operation").toString()), "public_inspect_original_death", inspected);
     }
     private static void identity(MinecraftServer server, Run run) {
         var registry = run.runtime.core().registry(); var record = registry.citizen(id(run, "citizen"));

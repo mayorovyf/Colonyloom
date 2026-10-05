@@ -11,6 +11,10 @@ configurations {
     gameTestImplementation.extendsFrom implementation
     gameTestRuntimeOnly.extendsFrom runtimeOnly
 }
+
+// Compile every native regression fixture during check without launching Minecraft.
+tasks.named('check') { dependsOn tasks.named('gameTestClasses') }
+apply from: rootProject.file('gradle/verification.gradle')
 neoForge {
     version = project.neo_version
     parchment {
@@ -80,7 +84,28 @@ tasks.named('runServer', JavaExec) {
     standardInput = System.in
 }
 
+neoForge.runs {
+    releaseServer {
+        server()
+        programArgument '--nogui'
+        gameDirectory = project.file('runs/release-server')
+        loadedMods = [neoForge.mods.colonyloom]
+        jvmArguments.addAll('-Xms4G', '-Xmx4G')
+    }
+}
+apply from: rootProject.file('gradle/dedicated-smoke.gradle')
+apply from: rootProject.file('gradle/integrated-smoke.gradle')
+
 // Test-only named run supplies the exact ModDevGradle launch classpath/environment to child JVMs.
+neoForge.runs {
+    identityOverflow {
+        server()
+        programArgument '--nogui'
+        gameDirectory = project.file('runs/identity-overflow')
+        loadedMods = [neoForge.mods.colonyloom, neoForge.mods.colonyloom_tests]
+        jvmArguments.addAll('-Xms4G', '-Xmx4G')
+    }
+}
 neoForge.runs {
     construction {
         server()
@@ -211,6 +236,8 @@ tasks.register('platformSmoke') {
         if (warmup <= 0 || measure <= 0 || (!diagnostic && (warmup != 300 || measure != 600))) throw new GradleException('Short durations require -PcolonyloomPlatformDiagnostic=true and are explicitly NON-ACCEPTANCE.')
         def root = layout.buildDirectory.dir('reports/colonyloom/platform-' + java.time.Instant.now().toEpochMilli()).get().asFile
         root.mkdirs()
+        def provenance = colonyloomProvenance()
+        colonyloomWriteManifest(root, provenance, diagnostic ? 'NON_ACCEPTANCE' : 'ACCEPTANCE_REQUESTED')
         def names = ['idle', 'movement-open', 'movement-obstructed', 'damage', 'block', 'chunks']
         def scenarios = [[name: 'baseline', citizens: 0]]
         [30, 100, 300].each { population -> names.each { name -> scenarios.add([name: name, citizens: population]) } }
@@ -232,6 +259,7 @@ tasks.register('platformSmoke') {
             if (!existing.isFile()) throw new GradleException('Measured profile file missing: ' + existing)
             def recorded = new groovy.json.JsonSlurper().parse(existing)
             if (recorded.thirtyCitizenBarrierPassed != true || recorded.acceptanceDuration != true) throw new GradleException('Replay requires genuine full-duration thirty-citizen frozen-profile, not an experimental estimate.')
+            colonyloomRequireProvenance(recorded.provenance, provenance, 'Platform replay profile')
             java.nio.file.Files.copy(existing.toPath(), calibration.toPath())
         }
         def budgetTimers = [ASSIGNMENT_CANDIDATES: 'ASSIGNMENT_UNIT', NAVIGATION_STARTS: 'NAVIGATION_UNIT', BLUEPRINT_COMPARISONS: 'BLUEPRINT_UNIT', PHYSICAL_ACTIONS: 'PHYSICAL_UNIT', CHUNK_REQUESTS: 'CHUNK_UNIT', DIRTY_RESCAN_OBJECTS: 'DIRTY_RESCAN_UNIT']
@@ -252,7 +280,7 @@ tasks.register('platformSmoke') {
                     computed[budget] = Math.min(starting[budget], Math.max(1L, (long)(targets[budget] / costs[budget])))
                 }
                 calibration.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([thirtyCitizenBarrierPassed: true,
-                        acceptanceDuration: !diagnostic, measuredP99UnitNanos: costs, sampleCounts: samples, calibratedCounts: computed,
+                        acceptanceDuration: !diagnostic, provenance: provenance, measuredP99UnitNanos: costs, sampleCounts: samples, calibratedCounts: computed,
                         percentilePolicy: 'Conservative maximum observed scenario p99 upper-bound (not falsely pooled raw samples)',
                         experimentalUnmeasuredCounts: [GRAPH_EXPANSIONS: 128, STORAGE_SLOT_CHECKS: 256, VIEW_ROWS: 100],
                         capacities: 'Explicit SimulationLimits.scale300Capacity; same computational counts for100and300']))
@@ -304,12 +332,14 @@ max-tick-time=120000
                 if (!child.waitFor(45, java.util.concurrent.TimeUnit.SECONDS)) { child.destroy(); if (!child.waitFor(15, java.util.concurrent.TimeUnit.SECONDS)) child.destroyForcibly().waitFor(15, java.util.concurrent.TimeUnit.SECONDS) }
             }
             def observation = output.isFile() ? new groovy.json.JsonSlurper().parse(output) : [passed: false, failure: 'Scenario never wrote observations: missing measurement']
+            colonyloomRequireProvenance(colonyloomProvenance(), provenance, 'Checkout changed during platform measurement')
+            observation.provenance = provenance
             observation.putAll([scenario: scenario.name, citizens: scenario.citizens, timedOut: !exited, exit: child.isAlive() ? null : child.exitValue(),
                     stdout: stdout.absolutePath, stderr: stderr.absolutePath, elapsedMillis: (System.nanoTime() - started) / 1000000L,
                     launchMain: run.mainClass.get(), jvmArguments: run.allJvmArgs, acceptanceDuration: !diagnostic])
             observation.passed = exited && !child.isAlive() && child.exitValue() == 0 && observation.passed == true && observation.observedCitizens == scenario.citizens && observation.measurementTicks > 0 && observation.measurementElapsedNanos >= measure * 1000000000L
             output.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(observation)); results.add(observation)
-            new File(root, 'report.json').text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([acceptanceDuration: !diagnostic,
+            new File(root, 'report.json').text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([acceptanceDuration: !diagnostic, provenance: provenance,
                     barrierConfirmed: !diagnostic && selected == 'all' && results.size() >= 19 && results.every { it.passed },
                     scenarios: results.collect { [scenario: it.scenario, citizens: it.citizens, passed: it.passed, needsPortionedNavigation: it.needsPortionedNavigation, failure: it.failure] }]))
             if (!observation.passed) throw new GradleException("Platform ${key} failed; needsPortionedNavigation=${observation.needsPortionedNavigation}; scale progression paused. See ${output}")
@@ -347,6 +377,8 @@ tasks.register('storageSmoke') {
         if (!acceptedEula.isFile() || !acceptedEula.readLines().any { it.trim() == 'eula=true' }) throw new GradleException('Storage runner requires an already accepted EULA.')
         def report = layout.buildDirectory.dir('reports/colonyloom/storage-' + java.time.Instant.now().toEpochMilli()).get().asFile
         def instance = new File(report, 'instance');def world = new File(instance, 'world');world.mkdirs()
+        def provenance = colonyloomProvenance()
+        colonyloomWriteManifest(report, provenance, 'NATIVE_STORAGE')
         java.nio.file.Files.copy(acceptedEula.toPath(), new File(instance, 'eula.txt').toPath())
         new File(world, 'colonyloom-test-world').text = 'Disposable Colonyloom stock runner\n'
         new File(instance, 'server.properties').text = '''level-name=world
@@ -367,7 +399,9 @@ spawn-animals=false
 max-tick-time=120000
 '''
         def results = []
-        ['exercise','verify'].each { phase ->
+        def stockPhases=['exercise','verify']
+        if(providers.gradleProperty('colonyloomStorageCalibration').getOrElse('false').toBoolean()) stockPhases.add('calibrate')
+        stockPhases.each { phase ->
             def argv = [run.javaLauncher.get().executablePath.asFile.absolutePath];argv.addAll(run.allJvmArgs)
             argv.addAll(['-Dcolonyloom.test.storagePhase=' + phase, '-Dcolonyloom.test.identityAction=', '-Dcolonyloom.test.platformScenario=', '-Dcolonyloom.test.constructionScenario='])
             def launchClasspath = run.classpath + run.classpathProvider
@@ -378,13 +412,20 @@ max-tick-time=120000
             run.environment.each { key, value -> builder.environment().put(key.toString(), value.toString()) }
             run.environmentProperty.get().each { key, value -> builder.environment().put(key.toString(), value.toString()) }
             builder.redirectOutput(stdout).redirectError(stderr)
-            def child = builder.start();boolean exited = child.waitFor(240, java.util.concurrent.TimeUnit.SECONDS)
+            def child = builder.start();boolean exited = child.waitFor(phase=='calibrate'?1020:240, java.util.concurrent.TimeUnit.SECONDS)
             if (!exited) {child.destroy();if (!child.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)) child.destroyForcibly().waitFor(10, java.util.concurrent.TimeUnit.SECONDS)}
             def observation = new File(world, 'colonyloom-storage-observations.jsonl')
             def facts = observation.isFile() ? observation.readLines().findAll { !it.isBlank() }.collect { new groovy.json.JsonSlurper().parseText(it) }.findAll { it.phase == phase } : []
             boolean passed = exited && child.exitValue() == 0 && facts.any { it.check == phase + '_complete' && it.passed } && facts.any { it.check == 'clean_checkpoint' && it.passed } && !facts.any { !it.passed }
+            colonyloomRequireProvenance(colonyloomProvenance(), provenance, 'Checkout changed during storage measurement')
+            def unitReport = new File(world, 'colonyloom-supply-metrics-' + phase + '.json')
+            if (unitReport.isFile()) {
+                def sample = new groovy.json.JsonSlurper().parse(unitReport)
+                sample.provenance = provenance
+                unitReport.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(sample))
+            }
             results.add([phase:phase,exit:child.isAlive() ? null : child.exitValue(),timedOut:!exited,stdout:stdout.absolutePath,stderr:stderr.absolutePath,facts:facts,passed:passed])
-            new File(report,'report.json').text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([seed:424242,heap:'4GiB',phases:results]))
+            new File(report,'report.json').text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([seed:424242,heap:'4GiB',provenance:provenance,phases:results]))
             if (!passed) throw new GradleException("Stock ${phase} failed; see ${report}")
         }
         logger.lifecycle('Canonical stock dedicated evidence: {}',report)
@@ -608,6 +649,8 @@ tasks.register('managementSmoke') {
         if (!eula.isFile() || !eula.readLines().any { it.trim() == 'eula=true' }) throw new GradleException('Provide an owner-accepted disposable-instance EULA.')
         def root = layout.buildDirectory.dir('reports/colonyloom/management-' + java.time.Instant.now().toEpochMilli()).get().asFile
         root.mkdirs()
+        def provenance = colonyloomProvenance()
+        colonyloomWriteManifest(root, provenance, 'GRAPHICAL_MANAGEMENT')
         new File(root, 'colonyloom-management-test').text = 'Disposable graphical management scenario\n'
         def instance = new File(root, 'server'), world = new File(instance, 'world')
         world.mkdirs()
@@ -634,10 +677,11 @@ max-tick-time=60000
                 def run = tasks.named(entry.task, JavaExec).get()
                 def directory = new File(root, entry.role)
                 directory.mkdirs()
-                if (entry.role != 'server') new File(directory, 'options.txt').text = 'guiScale:2\nmaxFps:30\nrenderDistance:4\nsimulationDistance:4\nfullscreen:false\npauseOnLostFocus:false\ntutorialStep:none\n'
+                if (entry.role != 'server') new File(directory, 'options.txt').text = 'guiScale:2\nmaxFps:30\nrenderDistance:4\nsimulationDistance:5\nfullscreen:false\npauseOnLostFocus:false\ntutorialStep:none\n'
                 def argv = [run.javaLauncher.get().executablePath.asFile.absolutePath]
                 argv.addAll(run.allJvmArgs)
-                argv.addAll(['-Dcolonyloom.test.managementRoot=' + root.absolutePath, '-Dcolonyloom.test.identityAction='])
+                argv.addAll(['-Dcolonyloom.test.managementRoot=' + root.absolutePath, '-Dcolonyloom.test.identityAction=',
+                        '-Dcolonyloom.test.managementCalibration=' + providers.gradleProperty('colonyloomManagementCalibration').getOrElse('false')])
                 def launchClasspath = run.classpath + run.classpathProvider
                 if (!launchClasspath.isEmpty()) argv.addAll(['-cp', launchClasspath.asPath])
                 argv.add(run.mainClass.get()); argv.addAll(run.args)
@@ -647,17 +691,28 @@ max-tick-time=60000
                 builder.redirectOutput(new File(root,entry.role + '.stdout.log')).redirectError(new File(root,entry.role + '.stderr.log'))
                 children.add([role:entry.role,process:builder.start()])
             }
-            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MINUTES.toNanos(18)
+            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MINUTES.toNanos(providers.gradleProperty('colonyloomManagementCalibration').getOrElse('false').toBoolean() ? 40 : 18)
             def results = []
             children.each { child ->
                 boolean exited = child.process.waitFor(Math.max(1L, deadline-System.nanoTime()),java.util.concurrent.TimeUnit.NANOSECONDS)
                 def observation = new File(root,child.role + '-observations.jsonl')
                 def facts = observation.isFile() ? observation.readLines().findAll { !it.isBlank() }.collect { new groovy.json.JsonSlurper().parseText(it) } : []
                 boolean passed = exited && child.process.exitValue()==0 && new File(root,child.role + '-done').isFile() && !facts.isEmpty() && !facts.any { !it.passed }
+                if (providers.gradleProperty('colonyloomManagementCalibration').getOrElse('false').toBoolean()) {
+                    passed = passed && (child.role == 'server' || new File(root, child.role + '-calibration-finished').isFile())
+                }
+                colonyloomRequireProvenance(colonyloomProvenance(), provenance, 'Checkout changed during graphical measurement')
                 results.add([role:child.role,exit:exited ? child.process.exitValue() : null,timedOut:!exited,facts:facts,passed:passed])
-                new File(root,'report.json').text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([roles:results]))
+                new File(root,'report.json').text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([provenance:provenance,roles:results]))
             }
             if (results.any { !it.passed }) throw new GradleException("Management graphical verification failed; see ${root}")
+            def viewReport = new File(root, 'view-calibration.json')
+            if (viewReport.isFile()) {
+                def sample = new groovy.json.JsonSlurper().parse(viewReport)
+                sample.passed = results.every { it.passed }
+                sample.provenance = provenance
+                viewReport.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(sample))
+            }
             logger.lifecycle('Actual two-client management evidence: {}',root)
         } finally {
             children.each { child ->
@@ -761,5 +816,192 @@ max-tick-time=120000
             }
         }
         logger.lifecycle('Economic dedicated crash/restart evidence: {}',report)
+    }
+}
+
+neoForge.runs {
+    scale {
+        server()
+        programArgument '--nogui'
+        gameDirectory = project.file('runs/scale')
+        loadedMods = [neoForge.mods.colonyloom, neoForge.mods.colonyloom_tests]
+        jvmArguments.addAll('-Xms4G', '-Xmx4G')
+    }
+    scaleOwner {
+        client()
+        programArguments.addAll('--username', 'ScaleOwner', '--width', '1100', '--height', '760')
+        gameDirectory = project.file('runs/scale-owner')
+        loadedMods = [neoForge.mods.colonyloom, neoForge.mods.colonyloom_tests]
+        jvmArguments.addAll('-Xms1G', '-Xmx2G')
+    }
+    scaleViewer {
+        client()
+        programArguments.addAll('--username', 'ScaleViewer', '--width', '1100', '--height', '760')
+        gameDirectory = project.file('runs/scale-viewer')
+        loadedMods = [neoForge.mods.colonyloom, neoForge.mods.colonyloom_tests]
+        jvmArguments.addAll('-Xms1G', '-Xmx2G')
+    }
+}
+tasks.register('scaleSmoke') {
+    group = 'verification'
+    description = 'Verifies actual 300-resident economy, interruptions, critical chains, overload and two graphical clients on a measured profile.'
+    dependsOn provider {
+        ['runScale', 'runScaleOwner', 'runScaleViewer'].collectMany { name ->
+            def launch = tasks.named(name, JavaExec).get()
+            launch.taskDependencies.getDependencies(launch)
+        }
+    }
+    doLast {
+        if (providers.gradleProperty('colonyloomProfile').getOrElse('') != 'scale300') throw new GradleException('Explicit -PcolonyloomProfile=scale300 is required.')
+        boolean diagnostic = providers.gradleProperty('colonyloomScaleDiagnostic').getOrElse('false').toBoolean()
+        def sourceProfile = file(providers.gradleProperty('colonyloomScaleProfile').getOrElse(''))
+        if (!sourceProfile.isFile()) throw new GradleException('Provide the genuinely measured -PcolonyloomScaleProfile=<frozen-profile.json>.')
+        def parsed = new groovy.json.JsonSlurper().parse(sourceProfile)
+        def provenance = colonyloomProvenance()
+        colonyloomRequireProvenance(parsed.provenance, provenance, 'Scale platform profile')
+        if (parsed.thirtyCitizenBarrierPassed != true || parsed.acceptanceDuration != true) throw new GradleException('The profile must retain a genuine full-duration thirty-citizen barrier.')
+        def platformReport = new File(sourceProfile.parentFile, 'report.json')
+        if (!diagnostic && (!platformReport.isFile() || new groovy.json.JsonSlurper().parse(platformReport).barrierConfirmed != true)) throw new GradleException('Final scale acceptance requires the complete baseline/30/100/300 platform barrier, not partial promotion.')
+        if (platformReport.isFile()) colonyloomRequireProvenance(new groovy.json.JsonSlurper().parse(platformReport).provenance, provenance, 'Scale platform barrier')
+        def eula = file(providers.gradleProperty('colonyloomEulaFile').getOrElse('runs/server/eula.txt'))
+        if (!eula.isFile() || !eula.readLines().any { it.trim() == 'eula=true' }) throw new GradleException('Scale runner requires an already accepted disposable-instance EULA.')
+        def root = layout.buildDirectory.dir('reports/colonyloom/scale-' + java.time.Instant.now().toEpochMilli()).get().asFile
+        root.mkdirs()
+        colonyloomWriteManifest(root, provenance, diagnostic ? 'NON_ACCEPTANCE' : 'ACCEPTANCE_REQUESTED')
+        def stockPaths = providers.gradleProperty('colonyloomScaleStockMeasurements').getOrElse('').split(',').findAll { !it.isBlank() }
+        if (stockPaths.isEmpty()) throw new GradleException('Provide -PcolonyloomScaleStockMeasurements=<current native unit report paths>; no machine-local default evidence.')
+        def stockSamples = stockPaths.collect { path ->
+            def source = file(path)
+            if (!source.isFile()) throw new GradleException('Actual graph/storage unit measurements missing: ' + source)
+            def sample = new groovy.json.JsonSlurper().parse(source)
+            if (!diagnostic && (sample.graphActiveWindows == null || sample.graphActiveWindows < 9 || sample.nativeBatches == null || sample.nativeBatches <= 0 || sample.warmupSeconds == null || sample.warmupSeconds < 300 || sample.measurementElapsedNanos == null || sample.measurementElapsedNanos < 600000000000L || sample.graphCalls <= 0)) throw new GradleException('Scale acceptance requires full-duration active native graph samples: ' + source)
+            colonyloomRequireProvenance(sample.provenance, provenance, 'Scale graph/storage measurement ' + source)
+            sample
+        }
+        def viewPath = providers.gradleProperty('colonyloomScaleViewMeasurement').getOrElse('')
+        if (viewPath.isBlank()) throw new GradleException('Provide -PcolonyloomScaleViewMeasurement=<current graphical view report>.')
+        def viewSource = file(viewPath)
+        if (!viewSource.isFile()) throw new GradleException('Actual graphical view-unit measurement missing: ' + viewSource)
+        def view = new groovy.json.JsonSlurper().parse(viewSource)
+        colonyloomRequireProvenance(view.provenance, provenance, 'Scale view measurement')
+        if (!diagnostic && (view.passed != true || view.positiveActivityWindows == null || view.positiveActivityWindows < 9 || view.warmupSeconds == null || view.warmupSeconds < 300 || view.measurementElapsedNanos == null || view.measurementElapsedNanos < 600000000000L)) throw new GradleException('Scale acceptance requires completed full-duration real graphical view calibration; use -PcolonyloomManagementCalibration=true.')
+        long graphP99 = stockSamples.findAll { it.graphCalls > 0 }.collect { it.graphP99Nanos as long }.max() ?: 0L
+        def nativeStorageSamples=stockSamples
+        def warmedStockPath=providers.gradleProperty('colonyloomScaleNativeStockMeasurement').getOrElse('')
+        if (!diagnostic && warmedStockPath.isBlank()) throw new GradleException('Scale acceptance requires -PcolonyloomScaleNativeStockMeasurement=<full-duration native report>.')
+        if(!warmedStockPath.isEmpty()) {
+            def source=file(warmedStockPath)
+            if(!source.isFile()) throw new GradleException('Warmed native stock measurement missing: '+source)
+            def warmed=new groovy.json.JsonSlurper().parse(source)
+            colonyloomRequireProvenance(warmed.provenance, provenance, 'Scale warmed stock measurement')
+            if(warmed.warmupSeconds == null || warmed.warmupSeconds<300 || warmed.measurementElapsedNanos == null || warmed.measurementElapsedNanos<600000000000L || warmed.nativeStorageCalls<=0) throw new GradleException('Native stock recalibration requires actual five-minute warmup/ten-minute production samples.')
+            nativeStorageSamples=[warmed]
+        }
+        long storageP99 = nativeStorageSamples.findAll { it.nativeStorageCalls > 0 }.collect { it.nativeStorageP99Nanos as long }.max() ?: 0L
+        long viewP99 = view.measuredP99UnitNanos as long
+        if (graphP99 <= 0 || storageP99 <= 0 || viewP99 <= 0 || view.unitCount <= 0) throw new GradleException('Every economic budget requires positive actual unit samples.')
+        parsed.measuredP99UnitNanos.putAll([GRAPH_EXPANSIONS:graphP99, STORAGE_SLOT_CHECKS:storageP99, VIEW_ROWS:viewP99])
+        parsed.calibratedCounts.putAll([GRAPH_EXPANSIONS:Math.min(128L, Math.max(1L, 600000L.intdiv(graphP99))),
+                STORAGE_SLOT_CHECKS:Math.min(256L, Math.max(1L, 800000L.intdiv(storageP99))), VIEW_ROWS:Math.min(100L, Math.max(1L, 400000L.intdiv(viewP99)))])
+        parsed.remove('experimentalUnmeasuredCounts')
+        parsed.economicMeasurementSources = [graph:stockPaths.toList(), storage:warmedStockPath.isEmpty()?stockPaths.toList():[warmedStockPath], views:viewSource.absolutePath]
+        parsed.fullPlatformBarrierPassed = platformReport.isFile() && new groovy.json.JsonSlurper().parse(platformReport).barrierConfirmed == true
+        def mergedProfile = new File(root, 'frozen-profile.json')
+        mergedProfile.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(parsed))
+        def names = ['economy', 'parallel', 'critical', 'mutations', 'restart', 'overload', 'ui']
+        def selected = providers.gradleProperty('colonyloomScaleScenario').getOrElse('all')
+        if (selected != 'all') {
+            if (!diagnostic) throw new GradleException('Scenario selection is diagnostic-only; final acceptance requires every named scenario.')
+            def selection = selected.split(',').toList()
+            if (selection.toSet().size() != selection.size() || selection.any { !names.contains(it) }) throw new GradleException('Unknown/duplicate scale scenario: ' + selected)
+            names = selection
+        }
+        long warmup = providers.gradleProperty('colonyloomScaleWarmupSeconds').getOrElse('300').toLong()
+        if (warmup <= 0 || (!diagnostic && warmup != 300)) throw new GradleException('Short warmup requires explicit NON-ACCEPTANCE diagnostic.')
+        def phases = []
+        names.each { scenario ->
+            long expectedMeasure = scenario == 'overload' ? 3600L : 1800L
+            long measure = providers.gradleProperty('colonyloomScaleMeasureSeconds').getOrElse(expectedMeasure.toString()).toLong()
+            if (measure <= 0 || (!diagnostic && measure != expectedMeasure)) throw new GradleException('Short measurement requires explicit NON-ACCEPTANCE diagnostic.')
+            def scenarioRoot = new File(root, scenario), instance = new File(scenarioRoot, 'server'), world = new File(instance, 'world')
+            world.mkdirs()
+            new File(scenarioRoot, 'colonyloom-scale-test').text = 'Disposable 300-resident scale scenario\n'
+            new File(world, 'colonyloom-test-world').text = 'Disposable Colonyloom scale runner: ' + scenario + '\n'
+            java.nio.file.Files.copy(eula.toPath(), new File(instance, 'eula.txt').toPath())
+            new File(instance, 'server.properties').text = '''level-name=world
+level-seed=424242
+level-type=minecraft:flat
+generator-settings={"biome":"minecraft:plains","layers":[{"block":"minecraft:bedrock","height":1},{"block":"minecraft:dirt","height":2},{"block":"minecraft:grass_block","height":1}]}
+online-mode=false
+server-port=25577
+enable-rcon=false
+enable-query=false
+spawn-protection=0
+view-distance=6
+simulation-distance=6
+gamemode=creative
+difficulty=peaceful
+spawn-monsters=false
+spawn-animals=false
+max-tick-time=120000
+'''
+            def phaseNames = scenario == 'restart' ? ['exercise', 'verify'] : ['exercise']
+            phaseNames.each { phase ->
+                def children = []
+                try {
+                    def launches = [[role:'server', task:'runScale', directory:instance]]
+                    if (scenario == 'ui') launches.addAll([[role:'owner', task:'runScaleOwner', directory:new File(scenarioRoot,'owner')], [role:'viewer', task:'runScaleViewer', directory:new File(scenarioRoot,'viewer')]])
+                    launches.each { entry ->
+                        entry.directory.mkdirs()
+                        if (entry.role != 'server') new File(entry.directory,'options.txt').text = 'guiScale:2\nmaxFps:30\nrenderDistance:4\nsimulationDistance:4\nfullscreen:false\npauseOnLostFocus:false\ntutorialStep:none\n'
+                        def launch = tasks.named(entry.task,JavaExec).get()
+                        def argv = [launch.javaLauncher.get().executablePath.asFile.absolutePath]
+                        argv.addAll(launch.allJvmArgs)
+                        argv.addAll(['-Dcolonyloom.test.identityAction=', '-Dcolonyloom.test.platformScenario=', '-Dcolonyloom.test.constructionScenario=', '-Dcolonyloom.test.recoveryScenario=', '-Dcolonyloom.test.managementRoot=',
+                                '-Dcolonyloom.test.scaleRoot=' + scenarioRoot.absolutePath, '-Dcolonyloom.test.scaleScenario=' + scenario, '-Dcolonyloom.test.scalePhase=' + phase,
+                                '-Dcolonyloom.test.scaleProfile=' + mergedProfile.absolutePath, '-Dcolonyloom.test.scaleDiagnostic=' + diagnostic,
+                                '-Dcolonyloom.test.scaleWarmupSeconds=' + warmup, '-Dcolonyloom.test.scaleMeasureSeconds=' + measure])
+                        def launchClasspath = launch.classpath + launch.classpathProvider
+                        if (!launchClasspath.isEmpty()) argv.addAll(['-cp',launchClasspath.asPath])
+                        argv.add(launch.mainClass.get()); argv.addAll(launch.args)
+                        def stdout = new File(scenarioRoot,phase + '-' + entry.role + '.stdout.log'), stderr = new File(scenarioRoot,phase + '-' + entry.role + '.stderr.log')
+                        def builder = new ProcessBuilder(argv.collect { it.toString() }).directory(entry.directory)
+                        launch.environment.each { key,value -> builder.environment().put(key.toString(),value.toString()) }
+                        launch.environmentProperty.get().each { key,value -> builder.environment().put(key.toString(),value.toString()) }
+                        builder.redirectOutput(stdout).redirectError(stderr)
+                        children.add([role:entry.role,process:builder.start(),stdout:stdout.absolutePath,stderr:stderr.absolutePath])
+                    }
+                    long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(warmup + measure + 1800L)
+                    def exits = children.collect { child ->
+                        boolean exited = child.process.waitFor(Math.max(1L,deadline-System.nanoTime()),java.util.concurrent.TimeUnit.NANOSECONDS)
+                        [role:child.role,exit:exited ? child.process.exitValue() : null,timedOut:!exited,stdout:child.stdout,stderr:child.stderr]
+                    }
+                    def observationFile = new File(scenarioRoot,'scale-report.json')
+                    def observation = observationFile.isFile() ? new groovy.json.JsonSlurper().parse(observationFile) : [passed:false,failure:'No actual scale observations']
+                    boolean passed = exits.every { !it.timedOut && it.exit == 0 } && observation.passed == true && observation.phase == phase && observation.scenario == scenario && observation.observedCitizens == 300
+                    if (scenario == 'ui') ['owner','viewer'].each { role ->
+                        def file = new File(scenarioRoot,role + '-observations.jsonl')
+                        def facts = file.isFile() ? file.readLines().findAll { !it.isBlank() }.collect { new groovy.json.JsonSlurper().parseText(it) } : []
+                        passed = passed && !facts.isEmpty() && facts.every { it.passed } && new File(scenarioRoot,role + '-done').isFile()
+                        observation[role + 'Facts'] = facts
+                    }
+                    if (phase == 'exercise') passed = passed && observation.measurementElapsedNanos != null && observation.measurementElapsedNanos >= measure * 1000000000L
+                    colonyloomRequireProvenance(colonyloomProvenance(), provenance, 'Checkout changed during scale measurement')
+                    observation.provenance = provenance
+                    phases.add([scenario:scenario,phase:phase,passed:passed,exits:exits,observation:observation])
+                    new File(scenarioRoot,phase + '-report.json').text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(observation))
+                    new File(root,'report.json').text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson([acceptanceDuration:!diagnostic,provenance:provenance,barrierConfirmed:!diagnostic && selected == 'all' && phases.size() == 8 && phases.every { it.passed },profile:parsed,phases:phases]))
+                    if (!passed) throw new GradleException('Actual scale ' + scenario + '/' + phase + ' failed; see ' + scenarioRoot)
+                } finally {
+                    children.each { child ->
+                        if (child.process.isAlive()) {
+                            try { child.process.outputStream.write('stop\r\n'.getBytes('UTF-8'));child.process.outputStream.flush() } catch(IOException ignored) { }
+                            if (!child.process.waitFor(30,java.util.concurrent.TimeUnit.SECONDS)) {child.process.destroy();if (!child.process.waitFor(15,java.util.concurrent.TimeUnit.SECONDS)) child.process.destroyForcibly().waitFor(15,java.util.concurrent.TimeUnit.SECONDS)}
+                        }
+                    }
+                }
+            }
+        }
+        logger.lifecycle('Actual scale {} evidence: {}',diagnostic ? 'NON-ACCEPTANCE diagnostic' : 'full duration',root)
     }
 }

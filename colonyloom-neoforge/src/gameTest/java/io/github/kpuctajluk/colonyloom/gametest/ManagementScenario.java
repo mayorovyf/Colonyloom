@@ -78,6 +78,10 @@ final class ManagementScenario {
         Result ownerBuildResult;
         int buildInputs, buildResults, viewerDenied, guessedDenied, accessClosed;
         int snapshots, deltas, postRevokeData;
+        volatile boolean proofFinished;
+        long calibrationWarmupStart, calibrationMeasureStart;
+        long calibrationWindowStart, calibrationWindowUnits;
+        int calibrationWindows;
     }
     private final Map<MinecraftServer,Run> runs = new IdentityHashMap<>();
     ManagementScenario() {
@@ -98,13 +102,12 @@ final class ManagementScenario {
         var server=event.getServer();var run=runs.computeIfAbsent(server,ignored -> new Run());if(run.done)return;
         try {
             if(!disposable(server,root))throw new IllegalStateException("Management smoke requires absolute marked root and marked dedicated disposable world");
-            if(++run.ticks>18000)throw new IllegalStateException("Management timeout: colony="+run.colony+" inputs="+run.buildInputs+" results="+run.buildResults+" denied="+run.viewerDenied+" revoked="+run.revoked);
+            if(++run.ticks>(Boolean.getBoolean("colonyloom.test.managementCalibration") ? 48_000 : 18000))throw new IllegalStateException("Management timeout: colony="+run.colony+" inputs="+run.buildInputs+" results="+run.buildResults+" denied="+run.viewerDenied+" revoked="+run.revoked);
             if(run.observerFailure!=null)throw new IllegalStateException(run.observerFailure);
             if(run.runtime==null)return;
-            if(run.ticks%20==0) {
-                Path temporary=root.resolve("server-game-time.tmp");
-                Files.writeString(temporary,Long.toString(server.overworld().getGameTime()));
-                Files.move(temporary,root.resolve("server-game-time"),java.nio.file.StandardCopyOption.ATOMIC_MOVE,java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            if (run.proofFinished) {
+                calibrateViews(server, root, run);
+                return;
             }
             if(run.forcedAt<0) {
                 run.owner=server.getPlayerList().getPlayerByName("UIOwner");run.viewer=server.getPlayerList().getPlayerByName("UIGuest");
@@ -211,6 +214,12 @@ final class ManagementScenario {
                 require(root,run.runtime.core().registry().colony(UUID.fromString(formRequest.get("colony").getAsString())).rank(OWNER)==null
                         &&Files.isRegularFile(root.resolve("owner-revoked-form-cleared")),"revoked_owner_form_completed",
                         "old UIOwner has no created-colony rank and actual production build form cleared after ACCESS_DENIED");
+                if (Boolean.getBoolean("colonyloom.test.managementCalibration")) {
+                    command(server,run,"colonyloom member set " + run.colony + " UIGuest viewer");
+                    signal(root,"calibration-authority-ready",new JsonObject());
+                    run.proofFinished = true;
+                    return;
+                }
                 var sample = run.runtime.core().metrics().snapshot().get("VIEW_UNIT");
                 require(root, sample.count() > 0 && sample.p99Nanos() > 0, "actual_view_unit_measurement",
                         "units=" + sample.count() + " p99=" + sample.p99Nanos() + " max=" + sample.maxNanos());
@@ -236,6 +245,54 @@ final class ManagementScenario {
             // A bad opt-in must never halt an ordinary server, integrated server, or unmarked save.
             if(disposable(server,root))server.halt(false);
         }
+    }
+
+    private static void calibrateViews(MinecraftServer server, Path root, Run run) throws Exception {
+        if (!Files.isRegularFile(root.resolve("owner-calibration-ready")) || !Files.isRegularFile(root.resolve("viewer-calibration-ready"))) return;
+        if (Files.isRegularFile(root.resolve("calibration-done"))) {
+            if (!Files.isRegularFile(root.resolve("owner-calibration-finished")) || !Files.isRegularFile(root.resolve("viewer-calibration-finished"))) return;
+            fact(root, "server-done", true, "Real two-client full-duration calibration and client completion witnessed");
+            signal(root, "server-done", new JsonObject());
+            run.done = true;
+            server.halt(false);
+            return;
+        }
+        long now = System.nanoTime();
+        if (run.calibrationWarmupStart == 0) {
+            run.calibrationWarmupStart = now;
+            return;
+        }
+        if (run.calibrationMeasureStart == 0) {
+            if (now - run.calibrationWarmupStart < 300_000_000_000L) return;
+            run.runtime.metrics().reset();
+            run.calibrationWindowStart = now;
+            run.calibrationMeasureStart = now;
+            return;
+        }
+        if (server.getPlayerList().getPlayer(run.owner.getUUID()) != run.owner || server.getPlayerList().getPlayer(run.viewer.getUUID()) != run.viewer) {
+            throw new IllegalStateException("Full-duration calibration lost a real graphical client");
+        }
+        if (now - run.calibrationWindowStart < 60_000_000_000L && now - run.calibrationMeasureStart < 600_000_000_000L) return;
+        var sample = run.runtime.metrics().snapshot().get("VIEW_UNIT");
+        if (now - run.calibrationWindowStart >= 60_000_000_000L) {
+            require(root, sample.count() > run.calibrationWindowUnits, "calibration_live_view_window", "window=" + run.calibrationWindows + " actualUnits=" + (sample.count() - run.calibrationWindowUnits));
+            run.calibrationWindowUnits = sample.count();
+            run.calibrationWindowStart = now;
+            run.calibrationWindows++;
+        }
+        if (now - run.calibrationMeasureStart < 600_000_000_000L) return;
+        require(root, sample.count() > 0 && sample.p99Nanos() > 0 && run.calibrationWindows >= 9, "calibration_actual_view_samples", "Full-duration live authorized bounded preparation portions");
+        var calibration = new JsonObject();
+        calibration.addProperty("budget", "VIEW_ROWS");
+        calibration.addProperty("measuredP99UnitNanos", sample.p99Nanos());
+        calibration.addProperty("maxUnitNanos", sample.maxNanos());
+        calibration.addProperty("unitCount", sample.count());
+        calibration.addProperty("warmupSeconds", 300);
+        calibration.addProperty("positiveActivityWindows", run.calibrationWindows);
+        calibration.addProperty("measurementElapsedNanos", now - run.calibrationMeasureStart);
+        calibration.addProperty("measurementScope", "Four actual views per connected client, ordinary production acknowledgments, full-duration observation");
+        Files.writeString(root.resolve("view-calibration.json"), calibration.toString(), StandardOpenOption.CREATE_NEW);
+        signal(root, "calibration-done", new JsonObject());
     }
     private static void setup(MinecraftServer server,Path root,Run run)throws Exception {
         var level=server.overworld();
@@ -269,11 +326,11 @@ final class ManagementScenario {
             try {
                 channel.pipeline().addBefore("packet_handler","colonyloom_management_smoke",new ChannelDuplexHandler() {
                     @Override public void channelRead(ChannelHandlerContext context,Object message)throws Exception {
-                        if(message instanceof ServerboundCustomPayloadPacket packet)run.wire.add(new Wire(owner,false,packet.payload()));
+                        if(!run.proofFinished && message instanceof ServerboundCustomPayloadPacket packet)run.wire.add(new Wire(owner,false,packet.payload()));
                         super.channelRead(context,message);
                     }
                     @Override public void write(ChannelHandlerContext context,Object message,ChannelPromise promise)throws Exception {
-                        if(message instanceof ClientboundCustomPayloadPacket packet)run.wire.add(new Wire(owner,true,packet.payload()));
+                        if(!run.proofFinished && message instanceof ClientboundCustomPayloadPacket packet)run.wire.add(new Wire(owner,true,packet.payload()));
                         super.write(context,message,promise);
                     }
                 });

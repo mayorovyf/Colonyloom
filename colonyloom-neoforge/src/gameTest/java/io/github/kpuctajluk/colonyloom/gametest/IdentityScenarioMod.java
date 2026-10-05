@@ -74,6 +74,11 @@ public final class IdentityScenarioMod {
         new TransferRecoveryScenario();
         new CraftFoodRecoveryScenario();
         new DeathRecoveryScenario();
+        new FirstMutationScenario();
+        new ScaleScenario();
+        new IdentityOverflowScenario();
+        NeoForge.EVENT_BUS.addListener(IdentityGameTests::runtimeBound);
+        NeoForge.EVENT_BUS.addListener(IdentityGameTests::runtimeStopped);
     }
 
     private void register(RegisterCommandsEvent event) {

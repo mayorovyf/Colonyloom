@@ -1,0 +1,113 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import java.util.concurrent.TimeUnit
+
+// Keep this development-only run separate from the normal runClient and release configurations.
+def neoforgeProject = project(':colonyloom-neoforge')
+neoforgeProject.neoForge.runs {
+    integratedLifecycle {
+        client()
+        gameDirectory = neoforgeProject.file(providers.gradleProperty('colonyloomIntegratedRoot').getOrElse('runs/integrated-smoke'))
+        loadedMods = [neoforgeProject.neoForge.mods.colonyloom, neoforgeProject.neoForge.mods.colonyloom_tests]
+        programArguments.addAll('--username', 'IntegratedOwner', '--width', '1280', '--height', '720')
+    }
+}
+
+tasks.register('integratedSmoke') {
+    group = 'verification'
+    description = 'Runs the actual graphical-client A -> B -> A integrated Minecraft lifecycle acceptance in one JVM.'
+    dependsOn provider {
+        def run = neoforgeProject.tasks.named('runIntegratedLifecycle', JavaExec).get()
+        run.taskDependencies.getDependencies(run)
+    }
+    doLast {
+        def run = neoforgeProject.tasks.named('runIntegratedLifecycle', JavaExec).get()
+        def configured = providers.gradleProperty('colonyloomIntegratedRoot').orNull
+        if (!configured) throw new GradleException('Integrated smoke requires -PcolonyloomIntegratedRoot=<absolute, owner-created disposable directory>.')
+        def rootFile = file(configured)
+        if (!rootFile.isAbsolute()) throw new GradleException('Integrated lifecycle root must be an absolute path.')
+        def root = rootFile.toPath().toRealPath()
+        def markerName = 'colonyloom-integrated-lifecycle-owner-root'
+        def ownerMarker = root.resolve(markerName)
+        if (!java.nio.file.Files.isDirectory(root) || java.nio.file.Files.isSymbolicLink(root)
+                || !java.nio.file.Files.isRegularFile(ownerMarker) || java.nio.file.Files.isSymbolicLink(ownerMarker)) {
+            throw new GradleException('Refusing integrated root without an owner-created regular marker: ' + root)
+        }
+        def entries = root.toFile().listFiles()
+        if (entries == null || entries.any { it.name != markerName }) throw new GradleException('Owner-created lifecycle root must be empty except for its owner marker.')
+        def token = java.nio.file.Files.readString(ownerMarker).trim()
+        if (!(token ==~ /[A-Za-z0-9_-]{16,128}/)) throw new GradleException('Owner root marker must contain a unique 16-128 character token.')
+        def eula = file(providers.gradleProperty('colonyloomEulaFile').getOrElse('runs/server/eula.txt'))
+        if (!eula.isFile() || !eula.readLines().any { it.trim() == 'eula=true' }) throw new GradleException('Integrated smoke requires an already owner-accepted EULA; the runner never accepts it.')
+        def output = layout.buildDirectory.dir('reports/colonyloom/integrated-' + java.time.Instant.now().toEpochMilli()).get().asFile
+        if (!output.mkdirs()) throw new GradleException('Unable to create integrated lifecycle evidence directory: ' + output)
+        def stdout = new File(output, 'client.stdout.log'), stderr = new File(output, 'client.stderr.log')
+        def provenance = [source: colonyloomProvenance(), root: root.toString(), rootMarkerSha256: java.security.MessageDigest.getInstance('SHA-256').digest(ownerMarker.toFile().bytes).encodeHex().toString(),
+                          eulaSha256: java.security.MessageDigest.getInstance('SHA-256').digest(eula.bytes).encodeHex().toString(),
+                          java: System.getProperty('java.version'), javaHome: System.getProperty('java.home'),
+                          startedAt: java.time.Instant.now().toString(), mode: 'ACTUAL_GRAPHICAL_INTEGRATED_A_B_A']
+        colonyloomWriteManifest(output, provenance.source, 'ACTUAL_GRAPHICAL_INTEGRATED_A_B_A')
+        new File(output, 'provenance.json').text = JsonOutput.prettyPrint(JsonOutput.toJson(provenance))
+        java.nio.file.Files.createDirectories(root.resolve('saves'))
+        def argv = [run.javaLauncher.get().executablePath.asFile.absolutePath]
+        argv.addAll(run.allJvmArgs)
+        argv.addAll(['-Djava.awt.headless=false', '-Dcolonyloom.test.integratedRoot=' + root, '-Dcolonyloom.test.integratedToken=' + token])
+        def cp = run.classpath + run.classpathProvider
+        if (!cp.isEmpty()) argv.addAll(['-cp', cp.asPath])
+        argv.add(run.mainClass.get()); argv.addAll(run.args)
+        def builder = new ProcessBuilder(argv.collect { it.toString() }).directory(root.toFile())
+        run.environment.each { key, value -> builder.environment().put(key.toString(), value.toString()) }
+        run.environmentProperty.get().each { key, value -> builder.environment().put(key.toString(), value.toString()) }
+        builder.redirectOutput(stdout).redirectError(stderr)
+        def startedAtNanos = System.nanoTime()
+        def child = null
+        boolean passed = false
+        String failure = null
+        Map result = [:]
+        try {
+            child = builder.start()
+            boolean exited = child.waitFor(30, TimeUnit.MINUTES)
+            if (!exited) throw new GradleException('Integrated graphical client exceeded the 30-minute runner timeout.')
+            if (child.exitValue() != 0) throw new GradleException('Integrated graphical client exited with ' + child.exitValue() + '.')
+            def failureFile = root.resolve('failure.json')
+            def done = root.resolve('client-done.json')
+            if (java.nio.file.Files.exists(failureFile)) throw new GradleException('Integrated lifecycle client reported failure: ' + java.nio.file.Files.readString(failureFile))
+            if (!java.nio.file.Files.isRegularFile(done)) throw new GradleException('Integrated client exited without client-done.json.')
+            def clientResult = new JsonSlurper().parse(done.toFile())
+            if (clientResult.passed != true) throw new GradleException('Integrated lifecycle result is not PASS.')
+            ['a1-checkpoint.json', 'b-checkpoint.json', 'a2-checkpoint.json', 'observations.jsonl', 'a1-released.json', 'b-released.json', 'a2-released.json'].each { name ->
+                if (!java.nio.file.Files.isRegularFile(root.resolve(name))) throw new GradleException('Missing required lifecycle evidence ' + name)
+            }
+            def screenshot = root.resolve('screenshots/integrated-production-summary.png')
+            if (!java.nio.file.Files.isRegularFile(screenshot) || java.nio.file.Files.size(screenshot) == 0) throw new GradleException('Missing actual production UI framebuffer screenshot.')
+            if (!clientResult.a1.identity.inventory.equals(clientResult.a2.identity.inventory)) throw new GradleException('A1/A2 exact NPC inventory observations differ.')
+            if (!clientResult.a1.identity.citizen.equals(clientResult.a2.identity.citizen) || !clientResult.a1.identity.entity.equals(clientResult.a2.identity.entity)
+                    || !clientResult.a1.identity.colony.equals(clientResult.a2.identity.colony) || clientResult.a1.identity.epoch != clientResult.a2.identity.epoch) throw new GradleException('A1/A2 canonical identity/property differs.')
+            if (!clientResult.a1.clean || !clientResult.b.clean || !clientResult.a2.clean) throw new GradleException('A world lifecycle stop checkpoint is not clean.')
+            if (colonyloomProvenance() != provenance.source) throw new GradleException('Source/config/content changed during integrated lifecycle evidence collection.')
+            passed = true
+            result.client = clientResult
+            result.observations = java.nio.file.Files.readAllLines(root.resolve('observations.jsonl'))
+            result.screenshot = screenshot.toString()
+        } catch (Throwable problem) {
+            failure = problem.toString()
+            throw problem
+        } finally {
+            if (child != null && child.isAlive()) {
+                child.destroy()
+                if (!child.waitFor(15, TimeUnit.SECONDS)) child.destroyForcibly().waitFor(15, TimeUnit.SECONDS)
+            }
+            def log = root.resolve('logs/latest.log')
+            result.passed = passed
+            result.failure = failure
+            result.provenance = provenance
+            result.durationSeconds = (System.nanoTime() - startedAtNanos) / 1_000_000_000d
+            result.clientStdout = stdout.absolutePath
+            result.clientStderr = stderr.absolutePath
+            result.minecraftLog = java.nio.file.Files.isRegularFile(log) ? log.toString() : null
+            result.minecraftLogText = java.nio.file.Files.isRegularFile(log) ? java.nio.file.Files.readString(log) : ''
+            new File(output, 'report.json').text = JsonOutput.prettyPrint(JsonOutput.toJson(result))
+            logger.lifecycle('Actual graphical integrated lifecycle evidence (passed={}): {}', passed, output)
+        }
+    }
+}

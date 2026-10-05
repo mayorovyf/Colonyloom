@@ -25,13 +25,13 @@ public final class DeathGameTests {
         var pos=helper.absolutePos(new BlockPos(1,1,1)); entity.initializeIdentity(UUID.randomUUID(),1); entity.moveTo(pos.getX()+0.5,pos.getY(),pos.getZ()+0.5,0,0);
         entity.inventory().setItem(0,new ItemStack(Items.OAK_STAIRS,4)); entity.inventory().setItem(8,new ItemStack(Items.BREAD,3));
         if(!level.addFreshEntity(entity)) throw new IllegalStateException("Death fixture spawn refused");
-        int[] observed={-1}; entity.observeDeathInventory(count -> observed[0]=count);
+        boolean[] observed={false}; entity.observeDeathInventory(drops -> observed[0]=drops.size()==2 && drops.stream().allMatch(drop -> level.getEntity(drop.getUUID())==drop));
         boolean old=level.getGameRules().getBoolean(GameRules.RULE_DOMOBLOOT);
         try {
             level.getGameRules().getRule(GameRules.RULE_DOMOBLOOT).set(false,level.getServer());
             entity.hurt(level.damageSources().genericKill(),1000);
         } finally { level.getGameRules().getRule(GameRules.RULE_DOMOBLOOT).set(old,level.getServer()); }
-        helper.assertTrue(!entity.isAlive() && observed[0]==0,"Real death inventory observer did not see empty cargo");
+        helper.assertTrue(!entity.isAlive() && observed[0],"Real death inventory observer did not see both published native drops");
         int stairs=0,bread=0;
         for(var drop:level.getEntitiesOfClass(ItemEntity.class,entity.getBoundingBox().inflate(2))) {
             if(drop.getItem().is(Items.OAK_STAIRS)) stairs+=drop.getItem().getCount();

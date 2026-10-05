@@ -8,6 +8,7 @@ import io.github.kpuctajluk.colonyloom.core.chunk.ChunkKey;
 import io.github.kpuctajluk.colonyloom.core.colony.ColonyRuntime;
 import io.github.kpuctajluk.colonyloom.core.colony.Territory;
 import io.github.kpuctajluk.colonyloom.core.colony.WorldPosition;
+import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Budget;
 import io.github.kpuctajluk.colonyloom.core.navigation.NavigationService;
 import io.github.kpuctajluk.colonyloom.core.runtime.ServerRuntime;
 import io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane;
@@ -16,6 +17,9 @@ import io.github.kpuctajluk.colonyloom.core.supply.CoverageShare;
 import io.github.kpuctajluk.colonyloom.core.supply.Demand;
 import io.github.kpuctajluk.colonyloom.core.supply.ItemMatcher;
 import io.github.kpuctajluk.colonyloom.core.supply.RecipeDefinition;
+import io.github.kpuctajluk.colonyloom.core.supply.SupplyPlanner;
+import io.github.kpuctajluk.colonyloom.gameplay.production.ProcessDefinition;
+import io.github.kpuctajluk.colonyloom.gameplay.production.ProductionCatalog;
 import io.github.kpuctajluk.colonyloom.core.work.WorkOrder;
 import io.github.kpuctajluk.colonyloom.minecraft.content.ContentLoader;
 import io.github.kpuctajluk.colonyloom.minecraft.entity.CitizenEntity;
@@ -26,6 +30,7 @@ import io.github.kpuctajluk.colonyloom.minecraft.runtime.CitizenAdmissionService
 import io.github.kpuctajluk.colonyloom.minecraft.storage.NativeItemDescriptor;
 import io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService;
 import io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftDeliveryService;
+import io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftSupplyAccess;
 import io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor;
 import io.github.kpuctajluk.colonyloom.neoforge.NeoForgeChunkAccess;
 import io.github.kpuctajluk.colonyloom.neoforge.NeoForgeRecipeProtection;
@@ -74,6 +79,48 @@ public final class ProductionOutputRoutingGameTests {
         run(helper,4,0,2);
     }
 
+    @GameTest(template="identity_empty",batch="stage14_original_production_series",timeoutTicks=6000)
+    public static void originalSharedSeriesKeepsDirtyCursorAndCraftsAfterSecondBatch(GameTestHelper helper) {
+        runSeries(helper,false);
+    }
+
+    @GameTest(template="identity_empty",batch="stage14_delivery_pickup_continuation",timeoutTicks=6000)
+    public static void originalNativeKitsContinuePickupWithFourPaidSlotChecksPerTurn(GameTestHelper helper) {
+        runSeries(helper,true);
+    }
+
+    private static void runSeries(GameTestHelper helper,boolean partialPickup) {
+        var templateOrigin=helper.absolutePos(new BlockPos(1,1,1));
+        var origin=partialPickup?new BlockPos((templateOrigin.getX()>>4)<<4,templateOrigin.getY(),templateOrigin.getZ()):templateOrigin;
+        var access=new NeoForgeChunkAccess(helper.getLevel().getServer(),new TicketController(ResourceLocation.parse("colonyloom:runtime")));
+        UUID ticketOwner=UUID.randomUUID();var keys=new ArrayList<ChunkKey>();
+        String dimension=helper.getLevel().dimension().location().toString();
+        for(int x=(origin.getX()-6)>>4;x<=(origin.getX()+10)>>4;x++)for(int z=(origin.getZ()-6)>>4;z<=(origin.getZ()+10)>>4;z++) {
+            var key=new ChunkKey(dimension,x,z);keys.add(key);
+            if(!access.acquire(ticketOwner,key,ChunkDemandManager.Readiness.ENTITY_TICKING))throw new IllegalStateException("Series fixture ticket denied");
+        }
+        SeriesFixture[] fixture={null};boolean[] done={false};int[] ticks={0};
+        helper.onEachTick(() -> {
+            if(done[0])return;
+            try {
+                if(++ticks[0]>5960)throw new IllegalStateException("Original series timeout: "+(fixture[0]==null?"chunks":fixture[0].diagnostics()));
+                if(fixture[0]==null) {
+                    if(!keys.stream().allMatch(key -> access.ready(key,ChunkDemandManager.Readiness.ENTITY_TICKING)))return;
+                    fixture[0]=new SeriesFixture(helper,origin,access,partialPickup);
+                }
+                fixture[0].core.tick(fixture[0].core.serverTick()+1);
+                if(!fixture[0].observe())return;
+                done[0]=true;fixture[0].close();
+                for(var key:keys)access.release(ticketOwner,key,ChunkDemandManager.Readiness.ENTITY_TICKING);
+                helper.succeed();
+            } catch(RuntimeException|AssertionError failure) {
+                done[0]=true;if(fixture[0]!=null)fixture[0].close();
+                for(var key:keys)access.release(ticketOwner,key,ChunkDemandManager.Readiness.ENTITY_TICKING);
+                throw failure;
+            }
+        });
+    }
+
     private static void run(GameTestHelper helper,int outputCount,int initialStairs) {
         run(helper,outputCount,initialStairs,0);
     }
@@ -110,6 +157,318 @@ public final class ProductionOutputRoutingGameTests {
         });
     }
 
+    private static final class SeriesFixture implements AutoCloseable {
+        final GameTestHelper helper;
+        final ServerRuntime core;
+        final UUID colony=UUID.randomUUID(),checkpoint=UUID.randomUUID();
+        final StorageService storage;
+        final ChunkDemandManager chunks;
+        final CitizenAdmissionService admission;
+        final MinecraftDeliveryService delivery;
+        final MinecraftProductionService production;
+        final NavigationService navigation;
+        final SupplyPlanner planner;
+        final List<CitizenEntity> citizens=new ArrayList<>();
+        final List<UUID> originalDeliveries=new ArrayList<>(),sideDemands=new ArrayList<>();
+        final Container workshop,warehouse,receiver,returns;
+        final StockRegion sourceLogs,sourceStone;
+        final UUID stairOrder,plankOrder,stairIngredient,plankIngredient,root;
+        final Budget[] frozenBudgets={Budget.ASSIGNMENT_CANDIDATES,Budget.GRAPH_EXPANSIONS,Budget.NAVIGATION_STARTS,
+                Budget.BLUEPRINT_COMPARISONS,Budget.PHYSICAL_ACTIONS,Budget.STORAGE_SLOT_CHECKS,Budget.CHUNK_REQUESTS,
+                Budget.VIEW_ROWS,Budget.DIRTY_RESCAN_OBJECTS};
+        final int[] frozenQuanta={3,1,1,4,1,60,1,1,1};
+        boolean seeded,budgetDenied,budgetWake,deniedPortionObserved;
+        int admittedDeliveryTurns;
+        int paidCriticalTurns,paidNormalTurns;
+        long finishedAt=-1;
+        final boolean partialPickup;
+        boolean partialPickupObserved;
+        UUID stalePickupWork,stalePickupOrder;
+        StockRegion stalePickupSlot;
+        ItemStack stalePickupBefore;
+        int stalePickupSourceCount;
+        boolean stalePickupRejected;
+        int unrelatedChecks;
+        boolean lastSlotPrefixObserved;
+
+        SeriesFixture(GameTestHelper helper,BlockPos origin,NeoForgeChunkAccess access,boolean partialPickup) {
+            this.helper=helper;this.partialPickup=partialPickup;var level=helper.getLevel();var server=level.getServer();
+            for(int x=-6;x<=10;x++)for(int z=-6;z<=10;z++) {
+                var pos=origin.offset(x,0,z);level.setBlockAndUpdate(pos.below(),Blocks.STONE.defaultBlockState());
+                for(int y=0;y<3;y++)level.setBlockAndUpdate(pos.above(y),Blocks.AIR.defaultBlockState());
+            }
+            var workshopPos=origin;var warehousePos=origin.west(2);var receiverPos=origin.south(2);var returnPos=origin.east(2);
+            if(partialPickup)check((warehousePos.getX()>>4)!=(workshopPos.getX()>>4),"Original pickup fixture lost its distinct physical chunk centers");
+            for(var pos:List.of(workshopPos,warehousePos,receiverPos,returnPos))level.setBlockAndUpdate(pos,Blocks.BARREL.defaultBlockState());
+            level.setBlockAndUpdate(workshopPos.east(),Blocks.CRAFTING_TABLE.defaultBlockState());
+            workshop=(Container)level.getBlockEntity(workshopPos);warehouse=(Container)level.getBlockEntity(warehousePos);
+            receiver=(Container)level.getBlockEntity(receiverPos);returns=(Container)level.getBlockEntity(returnPos);
+            warehouse.setItem(0,new ItemStack(Items.OAK_LOG,7));warehouse.setItem(1,new ItemStack(Items.STONE,6));warehouse.setChanged();
+            core=ServerRuntime.start(Thread.currentThread());var content=ContentLoader.load(server.getResourceManager(),server.registryAccess());
+            core.configureCommands(() -> {},content.professions().values());
+            var limits=core.admission().limits();
+            for(int i=0;i<frozenBudgets.length;i++)limits=limits.withBudget(frozenBudgets[i],frozenQuanta[i]);
+            core.updateLimits(limits);
+            core.registry().addColony(new ColonyRuntime(colony,"Original series",new Territory(position(origin).dimension(),origin.getX()-16,origin.getZ()-16,origin.getX()+16,origin.getZ()+16),UUID.randomUUID(),Map.of(),1,1,false,null,false));
+            storage=new StorageService(server,core.registry(),core.budgets(),new NeoForgeStorageIdentity());
+            storage.register(colony,position(workshopPos),"workshop");var source=storage.register(colony,position(warehousePos),"warehouse");
+            storage.register(colony,position(receiverPos),"construction");storage.register(colony,position(returnPos),"return");
+            sourceLogs=source.slots().getFirst();sourceStone=source.slots().get(1);
+            var workplace=storage.registerWorkshop(colony,position(workshopPos.east()),position(workshopPos));
+            citizen(origin.east().south(),"colonyloom:carpenter",workplace.id());
+            citizen(origin.north(),"colonyloom:courier",null);
+            citizen(origin.west().south(),"colonyloom:courier",null);
+            if(partialPickup) {
+                // Only the last real courier/return slots can carry a native kit; the
+                // original inventories and incompatible property survive every pause.
+                for(int slot=0;slot<returns.getContainerSize()-1;slot++)returns.setItem(slot,new ItemStack(Items.COBBLESTONE,64));
+                returns.setChanged();
+                for(int courier=1;courier<citizens.size();courier++) {
+                    var inventory=citizens.get(courier).inventory();
+                    for(int slot=0;slot<inventory.getContainerSize()-1;slot++)inventory.setItem(slot,new ItemStack(Items.COBBLESTONE,64));
+                    inventory.setChanged();
+                }
+            }
+            chunks=new ChunkDemandManager(core.registry(),core.budgets(),access);admission=new CitizenAdmissionService(server,core,chunks);
+            var transfer=new StorageTransferExecutor(server,core.registry(),storage,(action,principal,from,to,amount) -> true,() -> checkpoint,null);
+            delivery=new MinecraftDeliveryService(server,core.registry(),storage,transfer,chunks);
+            production=new MinecraftProductionService(core.registry(),storage,new RecipeExecutor(server,core.registry(),storage,new NeoForgeRecipeProtection(server),() -> checkpoint,null),chunks);
+            NavigationService.GoalAuthority goals=(work,request) -> WorkOrder.DELIVERY.equals(work.typeId())?delivery.current(work,request):production.current(work,request);
+            navigation=new NavigationService(core.registry(),core.budgets(),chunks,new MinecraftNavigationBackend(server,core.registry(),chunks,goals),goals);
+            delivery.navigation(navigation);production.navigation(navigation);
+            var stairs=RecipeDefinition.create("colonyloom:series_oak_stairs",1,"colonyloom:carpenter","minecraft:crafting_table",List.of(new RecipeDefinition.Ingredient(new ItemMatcher("minecraft:oak_planks",null),6)),NativeItemDescriptor.describe(new ItemStack(Items.OAK_STAIRS),level.registryAccess()),4,40);
+            var planks=RecipeDefinition.create("colonyloom:series_oak_planks",1,"colonyloom:carpenter","minecraft:crafting_table",List.of(new RecipeDefinition.Ingredient(new ItemMatcher("minecraft:oak_log",null),1)),NativeItemDescriptor.describe(new ItemStack(Items.OAK_PLANKS),level.registryAccess()),4,20);
+            var supply=core.registry().supply();var consumer=supply.request(UUID.randomUUID(),colony,UUID.randomUUID(),new ItemMatcher("minecraft:oak_stairs",stairs.output()),16,Demand.GoalKind.CONSUMPTION,position(receiverPos),Lane.NORMAL,0,0);
+            root=consumer.id();var order=supply.promiseProduction(root,stairs,4);stairOrder=order.id();
+            var ingredient=supply.ingredientDemand(order,0,24,0);stairIngredient=ingredient.id();
+            order=supply.promiseProduction(stairIngredient,planks,6);plankOrder=order.id();plankIngredient=supply.ingredientDemand(order,0,6,0).id();
+            for(int i=0;i<6;i++)sideDemands.add(supply.request(UUID.randomUUID(),colony,UUID.randomUUID(),new ItemMatcher("minecraft:stone",null),1,Demand.GoalKind.DELIVERY,position(receiverPos),i<2?Lane.CRITICAL:Lane.NORMAL,0,0).id());
+            planner=new SupplyPlanner(core.registry(),supply,core.budgets());
+            planner.configure(new ProductionCatalog(core.registry(),Map.of(stairs.id(),new ProcessDefinition(stairs),planks.id(),new ProcessDefinition(planks))),new MinecraftSupplyAccess(core.registry(),storage));
+            core.scheduler().physicalExecutor(WorkOrder.DELIVERY,delivery);core.scheduler().physicalExecutor(WorkOrder.PRODUCTION,production);
+            core.scheduler().beforeWork(this::beforeWork);
+            core.scheduler().beforeStep(() -> {
+                if(partialPickup) {
+                    var work=executingWork(core);
+                    if(WorkOrder.DELIVERY.equals(work.typeId())&&work.stage().equals("pickup")) {
+                        // Ordinary unrelated native observations spend the first56 checks
+                        // of the unchanged sixty-check scheduler limit, not a quota override.
+                        while(core.budgets().used(Budget.STORAGE_SLOT_CHECKS)<56) {
+                            if(!core.budgets().tryConsume(Budget.STORAGE_SLOT_CHECKS,work.lane()))break;
+                            var slot=source.slots().get(2+unrelatedChecks++%(source.slots().size()-2));
+                            var observed=storage.readFresh(slot);
+                            if(observed.ready())core.registry().storage().index().observe(slot,observed.item(),observed.count(),core.serverTick());
+                            else core.registry().storage().index().unknown(slot);
+                        }
+                        var pickupOrder=supply.deliveryForWork(work.id());
+                        var pickupSource=pickupOrder==null?null:storage.locate(pickupOrder.source().storage());
+                        var pickupCitizen=work.assignee()==null?null:core.registry().citizen(work.assignee());
+                        var pickupEntity=pickupCitizen==null||pickupSource==null?null:storage.currentCitizen(pickupCitizen.citizenId(),pickupCitizen.bindingEpoch(),pickupSource.dimension());
+                        if(pickupEntity!=null&&pickupEntity.distanceToSqr(pickupSource.x()+0.5,pickupSource.y()+0.5,pickupSource.z()+0.5)<=9
+                                &&core.budgets().used(Budget.STORAGE_SLOT_CHECKS)==56) {
+                            partialPickupObserved=true;
+                        }
+                        if(stalePickupWork==null&&!stalePickupRejected) {
+                            var staleOrder=supply.deliveryForWork(work.id());
+                            if(staleOrder!=null&&staleOrder.source().equals(sourceLogs)) {
+                                var states=(Map<?,?>)fixtureField(delivery,"active");var state=states.get(work.id());
+                                if(state!=null) {
+                                    var selected=(StockRegion)fixtureField(state,"pickupDestinationSlot");
+                                    if(selected!=null) {
+                                        var nativeContainer=storage.currentContainer(selected);
+                                        check(nativeContainer!=null,"Paid pickup candidate lacks its original native inventory");
+                                        stalePickupWork=work.id();stalePickupOrder=staleOrder.id();stalePickupSlot=selected;
+                                        stalePickupBefore=nativeContainer.getItem(selected.slot()).copy();
+                                        stalePickupSourceCount=warehouse.getItem(sourceLogs.slot()).getCount();
+                                        nativeContainer.setItem(selected.slot(),new ItemStack(Items.COBBLESTONE,64));nativeContainer.setChanged();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                var current=supply.production(plankOrder);
+                if(!budgetDenied&&current.completedBatches()==2&&!current.batchStarted()&&current.workId()!=null&&!supply.completeProductionKit(plankOrder).isEmpty()) {
+                    var work=core.workBoard().work(current.workId());
+                    if((work.state()==WorkOrder.State.READY||work.state()==WorkOrder.State.WAITING)&&work.assignee()==null) {
+                        // Consume the real assignment quantum; the original scheduler
+                        // must produce its BUDGET wait, not a fixture-written wait state.
+                        for(int i=core.budgets().used(Budget.ASSIGNMENT_CANDIDATES);i<3;i++)
+                            if(!core.budgets().tryConsume(Budget.ASSIGNMENT_CANDIDATES,Lane.NORMAL))break;
+                    }
+                }
+            });
+        }
+
+        private void beforeWork(long tick) {
+            storage.tick(tick);var supply=core.registry().supply();
+            if(budgetDenied&&!budgetWake) {
+                var order=supply.production(plankOrder);var work=order.workId()==null?null:core.workBoard().work(order.workId());
+                if(work!=null&&work.state()==WorkOrder.State.WAITING&&work.assignee()==null&&work.waitingReason()==WorkOrder.Reason.BUDGET&&!supply.completeProductionKit(plankOrder).isEmpty()) {
+                    production.tick();budgetWake=work.state()==WorkOrder.State.READY;
+                }
+            }
+            if(!seeded) {
+                var stone=core.registry().storage().index().observation(sourceStone);
+                if(stone.ready()&&stone.count()==6) {
+                    for(var id:sideDemands)originalDeliveries.add(supply.coverStock(id,sourceStone,stone.item(),1,tick).id());
+                    seeded=true;
+                }
+            }
+            if(admittedDeliveryTurns<20) {
+                // An actual resident-domain cursor wins every dirty phase except delivery's
+                // eighteenth tick. SERVICE-only portions must not erase delivery's weighted
+                // CRITICAL/NORMAL debt, and denied scans must retain their original candidates.
+                if((tick&1)==0||(tick/2)%9!=7)chunks.tick(tick);
+                int before=core.budgets().used(Budget.DIRTY_RESCAN_OBJECTS);
+                int criticalBefore=core.budgets().used(Budget.DIRTY_RESCAN_OBJECTS,Lane.CRITICAL);
+                int normalBefore=core.budgets().used(Budget.DIRTY_RESCAN_OBJECTS,Lane.NORMAL);
+                delivery.tick(tick);
+                if(core.budgets().used(Budget.DIRTY_RESCAN_OBJECTS)>before) {
+                    admittedDeliveryTurns++;
+                    paidCriticalTurns+=core.budgets().used(Budget.DIRTY_RESCAN_OBJECTS,Lane.CRITICAL)-criticalBefore;
+                    paidNormalTurns+=core.budgets().used(Budget.DIRTY_RESCAN_OBJECTS,Lane.NORMAL)-normalBefore;
+                } else deniedPortionObserved=true;
+                admission.tick();navigation.tick(tick);return;
+            }
+            // Resume the real runtime's nine-consumer dirty rotation for native kit,
+            // navigation, repeated crafts and physical delivery after the cursor proof.
+            int first=(int)((tick/2)%9);
+            for(int offset=0;offset<9;offset++)switch((first+offset)%9) {
+                case 0 -> chunks.tick(tick);
+                case 1 -> admission.tick();
+                case 2 -> navigation.tick(tick);
+                case 3 -> core.registry().targetClaims().tick();
+                case 4 -> supply.reconcile(tick,core.budgets());
+                case 5 -> { }
+                case 6 -> planner.tick(tick);
+                case 7 -> {
+                    int before=core.budgets().used(Budget.DIRTY_RESCAN_OBJECTS);
+                    delivery.tick(tick);
+                    if(core.budgets().used(Budget.DIRTY_RESCAN_OBJECTS)>before)admittedDeliveryTurns++;
+                    else deniedPortionObserved=true;
+                }
+                case 8 -> {
+                    var order=supply.production(plankOrder);var work=order.workId()==null?null:core.workBoard().work(order.workId());
+                    boolean waiting=budgetDenied&&work!=null&&work.assignee()==null&&work.state()==WorkOrder.State.WAITING&&work.waitingReason()==WorkOrder.Reason.BUDGET&&!supply.completeProductionKit(plankOrder).isEmpty();
+                    production.tick();
+                    if(waiting&&work.state()==WorkOrder.State.READY)budgetWake=true;
+                }
+            }
+        }
+
+        private void citizen(BlockPos start,String profession,UUID workplace) {
+            var level=helper.getLevel();var entity=(CitizenEntity)BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.parse("colonyloom:citizen")).create(level);
+            if(entity==null)throw new IllegalStateException("Series citizen unavailable");
+            UUID id=UUID.randomUUID();entity.initializeIdentity(id,1);entity.moveTo(start.getX()+0.5,start.getY(),start.getZ()+0.5,0,0);
+            core.registry().addCitizen(new CitizenRecord(id,colony,entity.getUUID(),1,null,workplace,null,profession,Map.of(),Map.of("food",20),CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.READY,0,Map.of("food",1200L),position(start),1),record -> {
+                if(!level.addFreshEntity(entity))throw new IllegalStateException("Series citizen spawn refused");
+            });
+            core.bindings().observe(id,entity.getUUID(),1);entity.setQuarantined(false);citizens.add(entity);
+        }
+
+        boolean observe() {
+            var supply=core.registry().supply();
+            if(partialPickup) {
+                var states=(Map<?,?>)fixtureField(delivery,"active");
+                for(var state:states.values()) {
+                    var cargoSlot=(StockRegion)fixtureField(state,"pickupCargoSlot");
+                    if(cargoSlot!=null) {
+                        check(cargoSlot.slot()==CitizenEntity.INVENTORY_SIZE-1&&citizens.stream().skip(1).anyMatch(citizen ->
+                                citizen.citizenId().equals(cargoSlot.storage().identity())&&citizen.bindingEpoch()==cargoSlot.storage().bindingEpoch()),
+                                "Bounded pickup skipped its original last native cargo slot");
+                        lastSlotPrefixObserved=true;
+                    }
+                }
+                for(int courier=1;courier<citizens.size();courier++) {
+                    var inventory=citizens.get(courier).inventory();
+                    for(int slot=0;slot<inventory.getContainerSize()-1;slot++)
+                        check(inventory.getItem(slot).is(Items.COBBLESTONE)&&inventory.getItem(slot).getCount()==64,"Pickup changed original incompatible courier property");
+                }
+                for(int slot=0;slot<returns.getContainerSize()-1;slot++)
+                    check(returns.getItem(slot).is(Items.COBBLESTONE)&&returns.getItem(slot).getCount()==64,"Pickup changed original incompatible return property");
+            }
+            if(stalePickupWork!=null&&!stalePickupRejected) {
+                var work=core.workBoard().work(stalePickupWork);
+                if(work.state()==WorkOrder.State.WAITING&&work.waitingReason()==WorkOrder.Reason.CAPACITY) {
+                    check(!supply.hasCargo(stalePickupOrder)&&supply.delivery(stalePickupOrder).transferred()==0
+                            &&warehouse.getItem(sourceLogs.slot()).getCount()==stalePickupSourceCount,
+                            "A stale paid destination candidate authorized extraction before fresh capacity validation");
+                    var nativeContainer=storage.currentContainer(stalePickupSlot);
+                    check(nativeContainer!=null&&nativeContainer.getItem(stalePickupSlot.slot()).is(Items.COBBLESTONE)
+                            &&nativeContainer.getItem(stalePickupSlot.slot()).getCount()==64,"Stale target property changed during denied pickup");
+                    nativeContainer.setItem(stalePickupSlot.slot(),stalePickupBefore);nativeContainer.setChanged();stalePickupRejected=true;
+                }
+            }
+            for(int i=0;i<frozenBudgets.length;i++)check(core.budgets().used(frozenBudgets[i])<=frozenQuanta[i],"Series exceeded frozen "+frozenBudgets[i]);
+            check(core.budgets().limits().maxManagedNanos()==5_000_000L,"Series raised managed deadline");
+            for(var citizen:citizens)check(!citizen.isRemoved()&&core.bindings().activeEntity(citizen.citizenId()).orElseThrow().equals(citizen.getUUID()),"Series replaced an original native citizen");
+            check(supply.productionOrders().size()==2,"Series replaced or duplicated original production orders");
+            var planks=supply.production(plankOrder);var stairs=supply.production(stairOrder);
+            var originalWork=planks.workId()==null?null:core.workBoard().work(planks.workId());
+            if(originalWork!=null&&planks.completedBatches()==2&&originalWork.assignee()==null&&originalWork.state()==WorkOrder.State.WAITING&&originalWork.waitingReason()==WorkOrder.Reason.BUDGET)budgetDenied=true;
+            if(admittedDeliveryTurns>=20) {
+                check(seeded&&originalDeliveries.size()==6,"Series dirty proof lacks its six original reserved orders");
+                if(!originalDeliveries.stream().allMatch(id -> supply.delivery(id).workId()!=null))
+                    check(false,"Paid dirty cursor skipped an original reserved order across eighteen-tick rotation: "+deliveryDiagnostics());
+            }
+            if(!stairs.terminal()||supply.demand(root).snapshot().allocated()!=16||sideDemands.stream().anyMatch(id -> supply.demand(id).snapshot().fulfilled()!=1))return false;
+            check(seeded&&deniedPortionObserved&&admittedDeliveryTurns>=8,"Series did not exercise paid dirty rotation");
+            if(partialPickup)check(partialPickupObserved&&lastSlotPrefixObserved&&stalePickupRejected,
+                    "Series did not exercise last-slot continuation and fresh rejection across original chunk centers");
+            check(budgetDenied&&budgetWake,"Original complete third kit did not wake its real unassigned budget wait");
+            check(planks.terminal()&&planks.completedBatches()==6&&stairs.completedBatches()==4,"Original series did not commit every successive batch");
+            check(supply.demand(plankIngredient).snapshot().fulfilled()==6&&supply.demand(stairIngredient).snapshot().fulfilled()==24,"Native input obligations did not balance successive batches");
+            check(count(Items.OAK_LOG)==1&&count(Items.OAK_PLANKS)==0&&count(Items.OAK_STAIRS)==16&&count(Items.STONE)==6,"Successive native series broke whole-world material balance");
+            check(Fixture.countStairs(receiver)==16,"Series output skipped real physical delivery");
+            check(originalDeliveries.stream().allMatch(id -> supply.delivery(id).terminal()&&supply.delivery(id).transferred()==1),"Dirty rotation starved an original reserved delivery");
+            var effects=core.registry().effects().snapshots();
+            for(var order:List.of(planks,stairs)) {
+                var facts=effects.stream().filter(effect -> effect.craft()!=null&&effect.craft().productionId().equals(order.id())).toList();
+                check(facts.size()==order.completedBatches()&&facts.stream().allMatch(effect -> effect.state()==EffectRecord.State.OBSERVED&&effect.craft().complete()
+                        &&effect.workId().equals(order.workId())&&effect.bindingEpoch()==1&&effect.citizenId().equals(citizens.getFirst().citizenId())),"Series lacks exact original-worker native craft facts");
+                check(facts.stream().map(effect -> effect.craft().batchOrdinal()).distinct().count()==order.completedBatches(),"Series replayed a physical batch ordinal");
+            }
+            var logTransfers=effects.stream().filter(effect -> effect.transfer()!=null&&effect.itemId().equals("minecraft:oak_log")).toList();
+            check(logTransfers.stream().filter(effect -> effect.transfer().source().equals(sourceLogs)).mapToInt(effect -> effect.transfer().inserted()).sum()==6
+                    &&logTransfers.stream().filter(effect -> effect.transfer().destination().storage().equals(planks.workshopStorage())).mapToInt(effect -> effect.transfer().inserted()).sum()==6,"Series bypassed exact native pickup and delivery of six successive log kits");
+            check(effects.stream().filter(effect -> effect.transfer()!=null&&effect.itemId().equals("minecraft:oak_stairs")&&effect.transfer().source().storage().equals(stairs.workshopStorage())).mapToInt(effect -> effect.transfer().inserted()).sum()==16,"Series replayed or skipped real output pickup");
+            check(core.registry().storage().reservations().entries().isEmpty(),"Finished original series retained stock claims");
+            check(core.registry().storage().allocations().entries().stream().mapToLong(entry -> entry.count()).sum()==16,"Series allocations differ from physically delivered consumer stock");
+            if(finishedAt<0)finishedAt=core.serverTick();return core.serverTick()-finishedAt>=40;
+        }
+
+        private static WorkOrder executingWork(ServerRuntime core) {
+            try {
+                var executing=core.scheduler().getClass().getDeclaredField("executing");executing.setAccessible(true);
+                var node=executing.get(core.scheduler());var work=node.getClass().getDeclaredField("work");work.setAccessible(true);
+                return (WorkOrder)work.get(node);
+            } catch(ReflectiveOperationException failure) {throw new IllegalStateException("Native scheduler observation unavailable",failure);}
+        }
+        private static Object fixtureField(Object object,String name) {
+            try {var field=object.getClass().getDeclaredField(name);field.setAccessible(true);return field.get(object);}
+            catch(ReflectiveOperationException failure) {throw new IllegalStateException("Native pickup observation unavailable",failure);}
+        }
+
+        private int count(net.minecraft.world.item.Item item) {
+            int total=0;for(var container:List.of(workshop,warehouse,receiver,returns))for(int slot=0;slot<container.getContainerSize();slot++)if(container.getItem(slot).is(item))total+=container.getItem(slot).getCount();
+            for(var citizen:citizens)for(int slot=0;slot<citizen.inventory().getContainerSize();slot++)if(citizen.inventory().getItem(slot).is(item))total+=citizen.inventory().getItem(slot).getCount();return total;
+        }
+        private void check(boolean condition,String message) {helper.assertTrue(condition,message);}
+        private WorldPosition position(BlockPos pos) {return new WorldPosition(helper.getLevel().dimension().location().toString(),pos.getX(),pos.getY(),pos.getZ());}
+        private String deliveryDiagnostics() {
+            var supply=core.registry().supply();
+            return "paid="+paidCriticalTurns+":"+paidNormalTurns+" original="+originalDeliveries.stream().map(supply::delivery).toList();
+        }
+        String diagnostics() {
+            var supply=core.registry().supply();return "production="+supply.productionOrders()+" inputs="+supply.demand(plankIngredient).snapshot()+","+supply.demand(stairIngredient).snapshot()+" works="+core.workBoard().works().stream().map(work -> work.typeId()+":"+work.state()+":"+work.waitingReason()+":"+work.stage()).toList()+" turns="+admittedDeliveryTurns+" wake="+budgetDenied+":"+budgetWake+" delivery="+deliveryDiagnostics();
+        }
+        @Override public void close() {
+            planner.close();delivery.close();production.close();navigation.close();admission.close();chunks.close();
+            for(var citizen:citizens)citizen.remove(Entity.RemovalReason.DISCARDED);core.beginStopping();core.stop();
+        }
+    }
+
     private static final class Fixture implements AutoCloseable {
         final GameTestHelper helper;
         final ServerRuntime core;
@@ -127,7 +486,7 @@ public final class ProductionOutputRoutingGameTests {
         final int fallbackMode;
         final MinecraftDeliveryService delivery;
         final Container firstReceiver,alternativeReceiver;
-        final BlockPos firstReceiverPos;
+        final BlockPos firstReceiverPos,alternativeReceiverPos;
         CitizenEntity courier;
         UUID surplusId;
         boolean filled,capacityObserved,reopened,receiverFailureObserved,alternativeOpened;
@@ -139,7 +498,7 @@ public final class ProductionOutputRoutingGameTests {
         Fixture(GameTestHelper helper,BlockPos origin,NeoForgeChunkAccess access,int outputCount,int initialStairs,int fallbackMode) {
             this.helper=helper; this.outputCount=outputCount; this.initialStairs=initialStairs;this.fallbackMode=fallbackMode;
             var level=helper.getLevel(); var server=level.getServer();
-            for(int x=-2;x<=6;x++) for(int z=-2;z<=6;z++) {
+            for(int x=-4;x<=10;x++) for(int z=-4;z<=10;z++) {
                 var pos=origin.offset(x,0,z); level.setBlockAndUpdate(pos.below(),Blocks.STONE.defaultBlockState());
                 for(int y=0;y<3;y++) level.setBlockAndUpdate(pos.above(y),Blocks.AIR.defaultBlockState());
             }
@@ -160,14 +519,14 @@ public final class ProductionOutputRoutingGameTests {
             storage=new StorageService(server,core.registry(),core.budgets(),new NeoForgeStorageIdentity());
             var registration=storage.register(colony,position(barrelPos),"workshop");
             input=registration.slots().getFirst(); firstOutput=registration.slots().get(FIRST_OUTPUT); secondOutput=registration.slots().get(SECOND_OUTPUT);
-            firstReceiverPos=origin.south(2);var alternativePos=origin.east(5).south(3);
+            firstReceiverPos=origin.south(fallbackMode==2?6:2);alternativeReceiverPos=origin.east(5).south(3);
             if(fallbackMode!=0) {
                 level.setBlockAndUpdate(firstReceiverPos,Blocks.BARREL.defaultBlockState());
-                level.setBlockAndUpdate(alternativePos,Blocks.BARREL.defaultBlockState());
-                storage.register(colony,position(firstReceiverPos),"warehouse");storage.register(colony,position(alternativePos),"return");
+                level.setBlockAndUpdate(alternativeReceiverPos,Blocks.BARREL.defaultBlockState());
+                storage.register(colony,position(firstReceiverPos),"warehouse");storage.register(colony,position(alternativeReceiverPos),"return");
             }
             firstReceiver=fallbackMode==0?null:(Container)level.getBlockEntity(firstReceiverPos);
-            alternativeReceiver=fallbackMode==0?null:(Container)level.getBlockEntity(alternativePos);
+            alternativeReceiver=fallbackMode==0?null:(Container)level.getBlockEntity(alternativeReceiverPos);
             var workshop=storage.registerWorkshop(colony,position(tablePos),position(barrelPos));
             producer=(CitizenEntity)BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.parse("colonyloom:citizen")).create(level);
             if(producer==null) throw new IllegalStateException("Citizen unavailable");
@@ -275,11 +634,21 @@ public final class ProductionOutputRoutingGameTests {
             if(filled&&!reopened) {
                 check(supply.demand(surplusId).snapshot().covered()==4&&supply.demand(surplusId).snapshot().fulfilled()==0,"Full buffers lost actual surplus coverage");
                 check(countStairs(courier.inventory())==4,"Full buffers lost physical courier cargo");
-                capacityObserved|=orders.stream().filter(order -> order.workId()!=null).anyMatch(order -> core.workBoard().work(order.workId()).waitingReason()==WorkOrder.Reason.CAPACITY);
+                var blockedOrder=orders.stream().filter(order -> order.workId()!=null&&core.workBoard().work(order.workId()).waitingReason()==WorkOrder.Reason.CAPACITY).findFirst().orElse(null);
+                if(blockedOrder!=null) {
+                    capacityObserved=true;var buffer=delivery.waitingBuffer(blockedOrder.workId());
+                    check(buffer!=null&&buffer.position()!=null&&java.util.Set.of(position(firstReceiverPos),position(alternativeReceiverPos)).contains(buffer.position()),
+                            "Full native buffers did not expose an exact blocked physical receiver");
+                    check(courier.citizenId().equals(blockedOrder.citizenId())&&core.workBoard().work(blockedOrder.workId()).assignee().equals(courier.citizenId()),
+                            "Capacity wait released its only loaded courier for another pickup");
+                }
                 if(!capacityObserved||core.serverTick()-fullAt<20)return false;
                 firstReceiver.clearContent();firstReceiver.setChanged();reopened=true;
-                if(fallbackMode==2)for(int[] offset:new int[][]{{0,1},{1,0},{0,-1},{-1,0}}) {
-                    helper.getLevel().setBlockAndUpdate(firstReceiverPos.offset(offset[0],0,offset[1]),Blocks.STONE.defaultBlockState());
+                if(fallbackMode==2)for(int x=-2;x<=2;x++)for(int z=-2;z<=2;z++) {
+                    if(x==0&&z==0)continue;
+                    var blocked=firstReceiverPos.offset(x,0,z);
+                    helper.getLevel().setBlockAndUpdate(blocked,Blocks.STONE.defaultBlockState());
+                    helper.getLevel().setBlockAndUpdate(blocked.above(),Blocks.STONE.defaultBlockState());
                 }
             }
             receiverFailureObserved|=orders.stream().filter(order -> order.workId()!=null).anyMatch(order -> core.workBoard().work(order.workId()).waitingReason()==(fallbackMode==1?WorkOrder.Reason.PERMISSION_DENIED:WorkOrder.Reason.UNREACHABLE));

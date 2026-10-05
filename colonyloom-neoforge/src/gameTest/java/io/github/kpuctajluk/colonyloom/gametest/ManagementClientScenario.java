@@ -23,6 +23,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import javax.imageio.ImageIO;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -99,6 +100,11 @@ public final class ManagementClientScenario {
     private String completedScreenshot;
     private boolean screenshotRunning;
     private long fixtureViews;
+    private boolean completionPublished, calibrationSubscribed, calibrationReady;
+    private final List<UUID> calibrationViews = new ArrayList<>();
+    private final Map<UUID, Integer> calibrationInitialDeltas = new HashMap<>();
+    private UUID floodSubscription;
+    private long floodStarted;
 
     public ManagementClientScenario() {
         String property = System.getProperty("colonyloom.test.managementRoot", "");
@@ -122,10 +128,9 @@ public final class ManagementClientScenario {
                 role = owner ? "owner" : "viewer";
                 observation("actual-profile", true, name + " UUID=" + minecraft.getGameProfile().getId());
             }
-            require(++ticks <= TIMEOUT_TICKS, "Client timeout in phase " + phase);
+            require(++ticks <= (Boolean.getBoolean("colonyloom.test.managementCalibration") ? 48_000 : TIMEOUT_TICKS), "Client timeout in phase " + phase);
+            if (!visibleWindow(minecraft)) return;
             if (networkFailure != null) throw new IllegalStateException("Real network interceptor failed", networkFailure);
-            Path clock=root.resolve("server-game-time");
-            if(Files.isRegularFile(clock)) wire.serverGameTime=Long.parseLong(Files.readString(clock));
             if (minecraft.screen instanceof DisconnectedScreen && phase != 28) {
                 throw new IllegalStateException("Actual TCP connection closed in phase " + phase + ": " + minecraft.screen.getTitle().getString());
             }
@@ -515,7 +520,25 @@ public final class ManagementClientScenario {
                                 && client.page(guessed) == null, "Guessed unreadable colony leaked a page: " + denied);
                 observation("guessed-colony-no-data", true, "subscription=" + guessed + " colony=" + otherColony + " close=" + denied.closed);
                 client.unsubscribe(guessed);
-                signal("viewer-ready", "Four actual read-only tabs plus forbidden Build and guessed-colony denial observed");
+                floodStarted = wire.serverGameTime;
+                advance(151);
+            }
+            case 151 -> {
+                if (wire.serverGameTime - floodStarted < 20) return;
+                floodSubscription = UUID.randomUUID();
+                for (int index = 0; index < 100; index++) minecraft.getConnection().send(new ServerboundCustomPayloadPacket(
+                        new ManagementPayloads.Subscribe(new ManagementProtocol.Subscription(client.sessionId(), floodSubscription, otherColony, ViewType.SUMMARY, 0, true))));
+                floodStarted = wire.serverGameTime;
+                advance(152);
+            }
+            case 152 -> {
+                if (wire.serverGameTime - floodStarted < 40) return;
+                ReceivedView flood = received.get(floodSubscription);
+                require(flood != null && flood.rateLimitCloses > 0 && flood.closeCount <= ManagementProtocol.VIEW_CLOSES_PER_SECOND
+                                && flood.snapshots == 0 && flood.deltas == 0,
+                        "Actual repeated subscribe flood leaked data or unbounded close replies: " + flood);
+                observation("actual-subscribe-flood-bounded", true, "100 real TCP resync requests; closes=" + flood.closeCount + " rateLimits=" + flood.rateLimitCloses + " privatePages=0");
+                signal("viewer-ready", "Actual read-only tabs, forbidden Build, guessed-colony and subscribe-flood refusal observed");
                 advance(43);
             }
             case 43 -> {
@@ -807,8 +830,20 @@ public final class ManagementClientScenario {
                 view.mismatchBase = delta.baseRevision();
             }
         } else if (payload instanceof ManagementPayloads.ViewClosed closed) {
-            received.computeIfAbsent(closed.subscriptionId(), ignored -> new ReceivedView()).closed = closed.reason();
+            ReceivedView view = received.computeIfAbsent(closed.subscriptionId(), ignored -> new ReceivedView());
+            view.closed = closed.reason();
+            view.closeCount++;
+            if (closed.reason().equals("RATE_LIMIT")) view.rateLimitCloses++;
         }
+    }
+
+    private static boolean visibleWindow(Minecraft minecraft) {
+        long handle = minecraft.getWindow().getWindow();
+        if (org.lwjgl.glfw.GLFW.glfwGetWindowAttrib(handle, org.lwjgl.glfw.GLFW.GLFW_ICONIFIED) != 0) {
+            org.lwjgl.glfw.GLFW.glfwRestoreWindow(handle);
+            return false;
+        }
+        return minecraft.getWindow().getWidth() >= 640 && minecraft.getWindow().getHeight() >= 360;
     }
 
     private boolean screenshot(String tag) {
@@ -824,11 +859,26 @@ public final class ManagementClientScenario {
         requestedScreenshot = null;
         screenshotRunning = true;
         Minecraft minecraft = Minecraft.getInstance();
+        if (!visibleWindow(minecraft)) { requestedScreenshot = name; screenshotRunning = false; return; }
         Screenshot.grab(root.toFile(), name, minecraft.getMainRenderTarget(), message -> minecraft.execute(() -> {
             try {
                 Path path = root.resolve("screenshots").resolve(name);
                 require(Files.isRegularFile(path) && Files.size(path) > 0, "Actual graphical screenshot failed: " + message.getString());
-                observation("screenshot-" + name, true, root.relativize(path).toString());
+                var image = ImageIO.read(path.toFile());
+                require(image != null && image.getWidth() >= 640 && image.getHeight() >= 360,
+                        "Screenshot is not a usable rendered Minecraft image: " + path);
+                var colors = new java.util.HashSet<Integer>();
+                int samples = 0, nonblack = 0;
+                for (int y = 0; y < image.getHeight(); y += Math.max(1, image.getHeight() / 100)) {
+                    for (int x = 0; x < image.getWidth(); x += Math.max(1, image.getWidth() / 100)) {
+                        int rgb = image.getRGB(x, y) & 0xffffff;
+                        samples++;
+                        if (rgb != 0) nonblack++;
+                        if (colors.size() < 256) colors.add(rgb);
+                    }
+                }
+                require(colors.size() >= 16 && nonblack > samples / 10, "Actual Minecraft screenshot is black/unrendered");
+                observation("screenshot-" + name, true, root.relativize(path) + ";dimensions=" + image.getWidth() + "x" + image.getHeight());
                 completedScreenshot = name;
                 screenshotRunning = false;
             } catch (Throwable failure) { fail(failure); }
@@ -857,8 +907,39 @@ public final class ManagementClientScenario {
     }
 
     private void finish() throws IOException {
-        observation("scenario-complete", true, "Actual " + role + " graphical client completed all required network and widget observations");
-        signal(role + "-done", "Completed actual graphical scenario");
+        if (!completionPublished) {
+            observation("scenario-complete", true, "Actual " + role + " graphical client completed all required network and widget observations");
+            signal(role + "-done", "Completed actual graphical scenario");
+            completionPublished = true;
+        }
+        if (Boolean.getBoolean("colonyloom.test.managementCalibration")) {
+            if (!Files.isRegularFile(root.resolve("calibration-authority-ready"))) return;
+            if (!calibrationSubscribed) {
+                wire.suppressAckSubscription = null;
+                for (UUID subscription : client.subscriptions().keySet()) client.unsubscribe(subscription);
+                for (ViewType type : ViewType.values()) {
+                    UUID subscription = client.subscribe(colony, type, 0);
+                    require(subscription != null, "Calibration could not open actual production subscription");
+                    calibrationViews.add(subscription);
+                }
+                calibrationSubscribed = true;
+            }
+            if (!calibrationReady) {
+                for (UUID subscription : calibrationViews) if (client.page(subscription) == null) return;
+                for (UUID subscription : calibrationViews) calibrationInitialDeltas.put(subscription, received.get(subscription).deltas);
+                signal(role + "-calibration-ready", "Four actual authorized views with ordinary acknowledgments");
+                calibrationReady = true;
+            }
+            if (!Files.isRegularFile(root.resolve("calibration-done"))) return;
+            for (UUID subscription : calibrationViews) {
+                ReceivedView view = received.get(subscription);
+                require(client.page(subscription) != null && view != null && view.closed == null
+                                && view.deltas > calibrationInitialDeltas.get(subscription),
+                        "Calibration lost actual authorized updates for " + subscription);
+            }
+            observation("full-duration-view-calibration", true, "Actual client held four views throughout server measurement");
+            signal(role + "-calibration-finished", "Actual full-duration client measurement completed");
+        }
         stopped = true;
         Minecraft.getInstance().stop();
     }
@@ -884,6 +965,7 @@ public final class ManagementClientScenario {
         int snapshots;
         int deltas;
         int mismatches;
+        int closeCount, rateLimitCloses;
         long mismatchBase;
         long lastSnapshotRevision;
         String closed;
@@ -927,6 +1009,9 @@ public final class ManagementClientScenario {
         }
 
         private boolean accept(ChannelHandlerContext context, Object packet) {
+            if(packet instanceof net.minecraft.network.protocol.game.ClientboundSetTimePacket time)serverGameTime=time.getGameTime();
+            if(packet instanceof ClientboundCustomPayloadPacket custom
+                    &&custom.payload() instanceof net.neoforged.neoforge.network.payload.ClientboundCustomSetTimePayload time)serverGameTime=time.gameTime();
             if (packet instanceof ClientboundCustomPayloadPacket custom
                     && custom.payload() instanceof ManagementPayloads.ViewDelta delta
                     && dropNextDelta && delta.subscriptionId().equals(dropSubscription)) {
