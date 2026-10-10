@@ -31,6 +31,20 @@ cmd /c gradlew.bat :colonyloom-neoforge:managementSmoke --no-daemon --console=pl
 
 Required GameTest FAIL, авария без ожидаемого witness, незавершённая работа или отсутствие observations — FAIL. Прочитать итог runner и individual facts; exit=0 сам по себе не доказывает physical outcome.
 
+Navigation consumer regressions distinguish ready WAITING discovery from native MOVING polling. Pending-query cancellation, reentrant search/apply replacement, pre-entry position supersession and post-apply readiness loss must preserve exact request identity and release old movement/query/route capacity without releasing a successor's demand. Backend exceptions remain failures; cleanup exceptions are suppressed, never converted into a successful typed outcome.
+
+Chunk eviction plans share paid visits with pending admission discovery. A normal request blocked by unrelated critical capacity must not bury a feasible critical domain behind an entire eviction scan; normal blockade refusal, atomic all-ring admission and shared native ticket accounting remain enforced.
+
+Unpaced native GameTest setup prepares only the already-ticketed radius-two FULL halo with `getChunk(..., FULL, false)` before waiting for real block/entity ticking. This creates no extra UNKNOWN tickets and does not substitute loaded chunks for readiness. The original 63-route and cargo-safe food-return fixtures retain their total deadlines and physical assertions; failure diagnostics report native loaded/block/entity states before cleanup.
+
+Physical continuation regressions require exact captured work identity/revision, bidirectional original citizen assignment and binding epoch across synchronous callbacks. An executor-owned typed assigned WAITING transition retains navigation only; fresh RUNNING capture is required before transfer, craft, placement or food expense. A stale pre-effect continuation leaves native property unchanged; a stale post-effect continuation preserves exact/conservative AMBIGUOUS evidence and blocks recovery without compensation or replay. Construction MATERIALS/protection/conflict backoff keeps its existing deadline while waiting, rather than extending it on each scheduler turn.
+
+Cargo dependency loading is separate from executor authority: clean restore may release an unloaded courier's assignment while retaining UNKNOWN IN_TRANSIT coverage. Reconciliation can load only the original ALIVE citizen/epoch and owned cargo without conflicting assignment; it cannot move, extract, deposit or consume. `deliverySmoke` proves the same courier reloads and delivers the original 16 items exactly once without replacement extraction.
+
+Delivery CAPACITY preflight with no owned delivery or allocated citizen cargo releases the courier after exact navigation/load-domain cleanup; this lets that courier drain stock blocking the original recipient. Cargo-bearing waits retain the original worker. `deliverySmoke` requires one courier to move 64 blocking cobblestone before the original 20 planks progress, without quota/deadline relaxation or artificial inventory removal.
+
+Shutdown first detaches native citizen/admission callbacks, then closes physical owners and charged chunk domains while the core is still RUNNING. Legitimate cancellation bookkeeping completes before STOPPING closes the mutation gate and the verified clean checkpoint is written. Cleanup exceptions propagate; a secondary checkpoint failure cannot overwrite the first scale failure. Existing construction cancel/clean restart fixtures exercise the actual wrapper, not a copied shutdown order.
+
 `dedicatedSmoke` запускает production-only сервер, читает реальные metrics и наблюдает освобождение runtime. Затем отдельные marked disposable instances с missing DTO/clean marker, missing DTO/corrupt marker и corrupt DTO/clean marker проверяют startup refusal, отказ command и неизменность исходных bytes после нормального stop. Native suite дополнительно проверяет root migration/backup, late death veto и drop custody; recovery runner — настоящие interruption/restart boundaries.
 
 ## Integrated lifecycle and identity-history proofs
