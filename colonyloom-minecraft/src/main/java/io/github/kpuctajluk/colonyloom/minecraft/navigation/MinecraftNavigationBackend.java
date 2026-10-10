@@ -64,14 +64,15 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         final Guard guard;
         final GroundPathNavigation navigation;
         final BooleanSupplier validity;
+        final AABB bridgeBody;
         Motion stopped;
         Vec3 lastPosition;
         int stalled;
-        Moving(Request request,CitizenEntity entity,Guard guard,GroundPathNavigation navigation,BooleanSupplier validity) {
-            this.request=request; this.entity=entity; this.guard=guard; this.navigation=navigation; this.validity=validity; lastPosition=entity.position();
+        Moving(Request request,CitizenEntity entity,Guard guard,GroundPathNavigation navigation,BooleanSupplier validity,Vec3 bridgeStart) {
+            this.request=request; this.entity=entity; this.guard=guard; this.navigation=navigation; this.validity=validity; bridgeBody=bridgeStart==null ? null : entity.getBoundingBox(); lastPosition=entity.position();
         }
     }
-    private record GroundRoute(UUID requestId,UUID entityId,long epoch,long goalRevision,Path path,Guard guard) implements Route {
+    private record GroundRoute(UUID requestId,UUID entityId,long epoch,long goalRevision,Path path,Guard guard,Vec3 bridgeStart) implements Route {
         @Override public int nodeCount() { return path.getNodeCount(); }
     }
     public MinecraftNavigationBackend(MinecraftServer server,ColonyRegistry registry,ChunkDemandManager chunks) {
@@ -121,7 +122,7 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
                 if (!query.guard.allReady()) {
                     release(query); cancelledQueries++; return SearchOutcome.UNAVAILABLE;
                 }
-                if (!query.standable(query.startX,query.startY,query.startZ)
+                if (!query.admitStart()
                         || !query.standable(request.target().x(),request.target().y(),request.target().z())) {
                     release(query); exhaustedQueries++; return SearchOutcome.UNREACHABLE;
                 }
@@ -142,11 +143,12 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
             Path path=query.path();
             if (path==null) { release(query); exhaustedQueries++; return SearchOutcome.WORKING_SET_LIMIT; }
             Guard guard=query.guard;
-            boolean valid=validPath(path,guard,entity);
+            Vec3 bridgeStart=query.bridgeStart;
+            boolean valid=validPath(path,guard,entity,bridgeStart);
             release(query);
             if (!valid) { exhaustedQueries++; return SearchOutcome.UNAVAILABLE; }
             completedQueries++;
-            return new GroundRoute(request.id(),entity.getUUID(),request.epoch(),request.goalRevision(),path,guard);
+            return new GroundRoute(request.id(),entity.getUUID(),request.epoch(),request.goalRevision(),path,guard,bridgeStart);
         } catch (UnsafeSearch unavailable) {
             if (query!=null && query.request!=null) { release(query); cancelledQueries++; }
             return SearchOutcome.UNAVAILABLE;
@@ -167,7 +169,7 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         return null;
     }
     private void release(Query query) {
-        query.request=null; query.entity=null; query.guard=null; query.context=null;
+        query.request=null; query.entity=null; query.guard=null; query.context=null; query.bridgeStart=null;
         concurrentQueries--;
     }
     public Map<String,Object> diagnostics() {
@@ -185,18 +187,64 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         result.put("cancelledQueries",cancelledQueries); result.put("nodeLimitQueries",nodeLimitQueries);
         return result;
     }
-    private boolean validPath(Path path,Guard guard,CitizenEntity entity) {
+    /** On-demand native evidence; callers capture this only when a route regression fails. */
+    public Map<String,Object> diagnostics(UUID workId) {
+        owner(); Map<String,Object> result=new HashMap<>();
+        Moving current=moving.get(workId);
+        Query query=query(workId);
+        result.put("queryPending",query!=null);
+        if(current==null) { result.put("moving",false);return result; }
+        CitizenEntity entity=current.entity;
+        result.put("moving",true);result.put("request",current.request.id());
+        result.put("entity",entity.getUUID());result.put("position",entity.position());
+        result.put("target",current.request.target());result.put("entityTicks",entity.tickCount);
+        result.put("delta",entity.getDeltaMovement());result.put("onGround",entity.onGround());
+        result.put("horizontalCollision",entity.horizontalCollision);result.put("quarantined",entity.isQuarantined());
+        result.put("stopped",current.stopped==null ? "NONE" : current.stopped);
+        result.put("lastPolledPosition",current.lastPosition);result.put("stalledPolls",current.stalled);
+        result.put("navigationDone",current.navigation.isDone());result.put("navigationStuck",current.navigation.isStuck());
+        var control=entity.getMoveControl();result.put("controlHasWanted",control.hasWanted());
+        result.put("controlWanted",new Vec3(control.getWantedX(),control.getWantedY(),control.getWantedZ()));
+        boolean ready=current.guard.allReady();result.put("domainReady",ready);
+        Path path=current.navigation.getPath();
+        if(path!=null) {
+            result.put("nextNodeIndex",path.getNextNodeIndex());result.put("nodeCount",path.getNodeCount());
+            var nodes=new ArrayList<BlockPos>(path.getNodeCount());
+            for(int i=0;i<path.getNodeCount();i++)nodes.add(path.getNodePos(i));
+            result.put("nodes",nodes);
+            if(!path.isDone()) {
+                BlockPos next=path.getNextNodePos();result.put("nextNode",next);
+                AABB body=entity.getBoundingBox().move(next.getX()+0.5-entity.getX(),next.getY()-entity.getY(),next.getZ()+0.5-entity.getZ());
+                if(ready&&current.guard.box(body.inflate(1.0))) {
+                    result.put("nextCollisionFree",entity.level().noCollision(entity,body));
+                    result.put("nextTerrainSafe",pathValidation.safeNext(path,entity,current.guard,current.bridgeBody));
+                }
+            }
+        }
+        if(ready&&current.guard.box(entity.getBoundingBox().inflate(1.0))) {
+            BlockPos feet=entity.blockPosition();
+            result.put("support",current.guard.getBlockState(feet.below()).toString());
+            result.put("feet",current.guard.getBlockState(feet).toString());
+            result.put("head",current.guard.getBlockState(feet.above()).toString());
+        }
+        return result;
+    }
+    private boolean validPath(Path path,Guard guard,CitizenEntity entity,Vec3 bridgeStart) {
         if (!guard.allReady()) return false;
         Query terrain=pathValidation;
         terrain.entity=entity; terrain.guard=guard; terrain.context=CollisionContext.of(entity);
         try {
+            if (bridgeStart!=null && (entity.position().distanceToSqr(bridgeStart)>1.0E-8 || !terrain.supportedBody())) return false;
             for (int i=0;i<path.getNodeCount();i++) {
                 Node node=path.getNode(i);
-                if (!terrain.standable(node.x,node.y,node.z)) return false;
+                if (i==0 && bridgeStart!=null) {
+                    if (node.x!=Mth.floor(bridgeStart.x) || node.y!=Mth.floor(bridgeStart.y) || node.z!=Mth.floor(bridgeStart.z)) return false;
+                } else if (!terrain.standable(node.x,node.y,node.z)) return false;
                 if (i>0) {
                     Node previous=path.getNode(i-1);
                     if (Math.abs(previous.x-node.x)+Math.abs(previous.z-node.z)!=1 || Math.abs(previous.y-node.y)>1
-                            || !terrain.transition(previous.x,previous.y,previous.z,node.x,node.y,node.z)) return false;
+                            || !(i==1 && bridgeStart!=null ? terrain.bodyTransition(node.x,node.y,node.z)
+                                    : terrain.transition(previous.x,previous.y,previous.z,node.x,node.y,node.z))) return false;
                 }
             }
             return true;
@@ -208,14 +256,15 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         if (!(route instanceof GroundRoute ground) || entity==null || !request.id().equals(ground.requestId())
                 || !entity.getUUID().equals(ground.entityId()) || request.epoch()!=ground.epoch()
                 || request.goalRevision()!=ground.goalRevision() || !stillCurrent.getAsBoolean() || !ground.guard().allReady()
-                || !validPath(ground.path(),ground.guard(),entity)) return false;
+                || !validPath(ground.path(),ground.guard(),entity,ground.bridgeStart())) return false;
         Node start=ground.path().getNode(0);
         if (entity.blockPosition().getX()!=start.x || entity.blockPosition().getY()!=start.y || entity.blockPosition().getZ()!=start.z) return false;
-        pathValidation.departStart(ground.path(),entity,ground.guard());
+        if (ground.bridgeStart()!=null) ground.path().advance();
+        else pathValidation.departStart(ground.path(),entity,ground.guard());
         stop(request);
         GroundPathNavigation navigation=new ControlledNavigation(entity,entity.level());
         if (!navigation.moveTo(ground.path(),1.0)) return false;
-        Moving current=new Moving(request,entity,ground.guard(),navigation,stillCurrent);
+        Moving current=new Moving(request,entity,ground.guard(),navigation,stillCurrent,ground.bridgeStart());
         moving.put(request.workId(),current);
         entity.managedMovementGuard(() -> safetyCheck(current));
         return true;
@@ -242,7 +291,7 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         long collisionStart=System.nanoTime(); boolean collisionFree;
         try { collisionFree=entity.level().noCollision(entity,body); }
         finally { registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.COLLISION,System.nanoTime()-collisionStart); }
-        if (!collisionFree || !pathValidation.safeNext(path,entity,current.guard)) { stop(request); return Motion.OBSTRUCTED; }
+        if (!collisionFree || !pathValidation.safeNext(path,entity,current.guard,current.bridgeBody)) { stop(request); return Motion.OBSTRUCTED; }
         Vec3 position=entity.position();
         if (position.distanceToSqr(current.lastPosition)<0.0001) current.stalled++; else current.stalled=0;
         current.lastPosition=position;
@@ -274,7 +323,7 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         if (!current.guard.node(next.getX(),next.getY(),next.getZ(),entity.getBbWidth(),entity.getBbHeight()) || !current.guard.box(body.inflate(1))) {
             halt(current,Motion.UNAVAILABLE); return;
         }
-        if (!entity.level().noCollision(entity,body) || !pathValidation.safeNext(path,entity,current.guard)) { halt(current,Motion.OBSTRUCTED); return; }
+        if (!entity.level().noCollision(entity,body) || !pathValidation.safeNext(path,entity,current.guard,current.bridgeBody)) { halt(current,Motion.OBSTRUCTED); return; }
         // Native locomotion advances with the physical entity, not with scarce dirty/status polling.
         // Search portions and request/status reconciliation remain globally budgeted.
         current.navigation.tick();
@@ -302,15 +351,25 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         @Override protected double getGroundY(Vec3 target) { return target.y; }
         // Airborne block-coordinate advancement can skip a descending corner before its center.
         @Override protected boolean canUpdatePath() { return true; }
+        @Override protected void doStuckDetection(Vec3 position) {
+            // Exact-center cardinal legs need a fresh elapsed timer for each waypoint.
+            // Keep vanilla's speed/distance timeout and its independent no-progress check.
+            if(path!=null&&!path.isDone()&&!path.getNextNodePos().equals(timeoutCachedNode))timeoutTimer=0;
+            super.doStuckDetection(position);
+        }
         @Override protected void followThePath() {
             Node next=path.getNextNode();
-            // Cardinal search validates center-to-center transitions, not early diagonal turns beside containers.
+            // Search validates exact center-to-center transitions, including occupied corners.
             if (mob.distanceToSqr(next.x+0.5,next.y,next.z+0.5)<=0.01) {
                 path.advance();
                 if(!path.isDone()) {
                     Node following=path.getNextNode();
-                    if(following.x!=next.x && Math.abs(mob.getDeltaMovement().z)>0 || following.z!=next.z && Math.abs(mob.getDeltaMovement().x)>0)
-                        mob.setDeltaMovement(mob.getDeltaMovement().multiply(0,1,0));
+                    if(path.getNextNodeIndex()>1) {
+                        Node previous=path.getNode(path.getNextNodeIndex()-2);
+                        // A floating-point lateral residue is not a turn. Keep momentum on straight legs.
+                        if(following.x-next.x!=next.x-previous.x || following.z-next.z!=next.z-previous.z)
+                            mob.setDeltaMovement(mob.getDeltaMovement().multiply(0,1,0));
+                    }
                 }
             }
             doStuckDetection(getTempMobPos());
@@ -407,6 +466,7 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         CitizenEntity entity;
         Guard guard;
         CollisionContext context;
+        Vec3 bridgeStart;
         int startX,startY,startZ,blockX,blockY,blockZ;
         double minX,minY,minZ,maxX,maxY,maxZ;
         boolean intersects;
@@ -415,13 +475,52 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
         void start(Request request,CitizenEntity entity,Guard guard) {
             this.request=request; this.entity=entity; this.guard=guard; context=CollisionContext.of(entity);
             BlockPos start=entity.blockPosition(); startX=start.getX(); startY=start.getY(); startZ=start.getZ();
+            bridgeStart=null;
             concurrentQueries++; queryHighWater=Math.max(queryHighWater,concurrentQueries);
             search.begin(startX,startY,startZ,request.target().x(),request.target().y(),request.target().z());
         }
         boolean atStart() {
             BlockPos current=entity.blockPosition();
             return current.getX()==startX && current.getY()==startY && current.getZ()==startZ
-                    && Math.abs(entity.getY()-startY)<0.01;
+                    && Math.abs(entity.getY()-startY)<0.01
+                    && (bridgeStart==null || entity.position().distanceToSqr(bridgeStart)<=1.0E-8);
+        }
+        boolean admitStart() {
+            if (standable(startX,startY,startZ)) return true;
+            if (!supportedBody()) return false;
+            bridgeStart=entity.position();
+            return true;
+        }
+        // Only the physical root may overhang a neighbouring full, dry support face.
+        // Ordinary search nodes still require support directly below their centered body.
+        boolean supportedBody() {
+            return supportedBody(entity.getBoundingBox());
+        }
+        boolean supportedBody(AABB body) {
+            if (Math.abs(body.minY-Math.rint(body.minY))>1.0E-7 || !guard.box(body.inflate(1.0))
+                    || !clear(body.minX,body.minY,body.minZ,body.maxX,body.maxY,body.maxZ)
+                    || !guard.level.noCollision(entity,body)) return false;
+            int y=Mth.floor(body.minY)-1;
+            boolean supported=false;
+            for (int x=Mth.floor(body.minX);x<=Mth.floor(body.maxX-1.0E-7);x++)
+                for (int z=Mth.floor(body.minZ);z<=Mth.floor(body.maxZ-1.0E-7);z++) {
+                    position.set(x,y,z);
+                    BlockState support=guard.getBlockState(position);
+                    if (!support.getFluidState().isEmpty() || support.is(BlockTags.CLIMBABLE)) return false;
+                    if (!support.isFaceSturdy(guard,position,Direction.UP)) continue;
+                    VoxelShape shape=support.getCollisionShape(guard,position,context);
+                    if (!shape.isEmpty() && Math.abs(shape.max(Direction.Axis.Y)-1.0)<1.0E-7
+                            && Block.isFaceFull(shape,Direction.UP)) supported=true;
+                }
+            return supported;
+        }
+        boolean bodyTransition(int x,int y,int z) {
+            AABB body=entity.getBoundingBox();
+            double half=entity.getBbWidth()*0.5, height=entity.getBbHeight(), horizontalY=Math.max(body.minY,y);
+            if (y>body.minY && !clear(body.minX,body.minY,body.minZ,body.maxX,y+height,body.maxZ)) return false;
+            if (!clear(Math.min(body.minX,x+0.5-half),horizontalY,Math.min(body.minZ,z+0.5-half),
+                    Math.max(body.maxX,x+0.5+half),horizontalY+height,Math.max(body.maxZ,z+0.5+half))) return false;
+            return y>=body.minY || clear(x+0.5-half,y,z+0.5-half,x+0.5+half,body.minY+height,z+0.5+half);
         }
         @Override public boolean standable(int x,int y,int z) {
             double half=entity.getBbWidth()*0.5;
@@ -446,6 +545,7 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
             return blocked ? OCCUPANCY_COST : 0;
         }
         @Override public boolean transition(int fromX,int fromY,int fromZ,int x,int y,int z) {
+            if (bridgeStart!=null && fromX==startX && fromY==startY && fromZ==startZ) return bodyTransition(x,y,z);
             double half=entity.getBbWidth()*0.5, height=entity.getBbHeight();
             int horizontalY=Math.max(fromY,y);
             if (y>fromY && !clear(fromX+0.5-half,fromY,fromZ+0.5-half,fromX+0.5+half,y+height,fromZ+0.5+half)) return false;
@@ -474,11 +574,13 @@ public final class MinecraftNavigationBackend implements NavigationService.Backe
             }
             return true;
         }
-        boolean safeNext(Path path,CitizenEntity entity,Guard guard) {
+        boolean safeNext(Path path,CitizenEntity entity,Guard guard,AABB bridgeBody) {
             this.entity=entity; this.guard=guard; context=CollisionContext.of(entity);
             try {
                 Node next=path.getNextNode();
-                return standable(next.x,next.y,next.z);
+                if (!standable(next.x,next.y,next.z)) return false;
+                if (bridgeBody==null || path.getNextNodeIndex()!=1) return true;
+                return supportedBody(bridgeBody) && bodyTransition(next.x,next.y,next.z);
             } catch (UnsafeSearch unavailable) { return false; }
             finally { this.entity=null; this.guard=null; context=null; }
         }

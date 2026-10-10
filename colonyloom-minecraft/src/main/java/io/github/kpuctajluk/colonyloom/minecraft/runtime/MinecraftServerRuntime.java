@@ -265,14 +265,19 @@ public final class MinecraftServerRuntime {
 
     public void beginStopping(MinecraftServer eventServer) {
         requireBoundServer(eventServer);
-        runtime.beginStopping();
+        if (runtime.lifecycle() != ServerRuntime.Lifecycle.RUNNING) {
+            throw new IllegalStateException("Expected runtime lifecycle RUNNING, got " + runtime.lifecycle());
+        }
+        // Detach native admission callbacks before any owner withdraws charged coverage.
+        if (citizens != null) citizens.close();
         if (supplyPlanner != null) supplyPlanner.close();
         if (deliveryService != null) deliveryService.close();
         if (productionService != null) productionService.close();
         if (navigation != null) navigation.close();
         if (constructionService != null) constructionService.close();
-        if (citizens != null) citizens.close();
         if (chunks != null) chunks.close();
+        // Cancellation can finish durable bookkeeping; close the mutation gate only afterwards.
+        runtime.beginStopping();
         if (persistence.isAvailable()) persistence.checkpointAndClean();
     }
 

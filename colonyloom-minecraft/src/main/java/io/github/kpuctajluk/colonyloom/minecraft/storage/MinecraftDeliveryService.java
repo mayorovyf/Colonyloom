@@ -43,7 +43,10 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
     private static final class Active {
         LoadDomain loadDomain,retainedLoadDomain;
         WorldPosition waypoint;
-        long generation;
+        long generation,continuation,stepContinuation,stepRevision,stepEpoch,waitRevision=-1;
+        UUID stepCitizen;
+        WorkOrder.Reason waitReason;
+        String waitStage;
         int waypointCursor;
         final Map<UUID,Integer> slotCursors=new HashMap<>();
         final Set<UUID> unknownScans=new HashSet<>();
@@ -64,6 +67,11 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         int surplusBufferCursor;
         WorldPosition surplusPreferredDestination;
         WorkOrder.Reason surplusFailure=WorkOrder.Reason.CAPACITY;
+        UUID foodReturn;
+        long foodReturnRevision;
+        WorkOrder.Reason foodReturnFailure=WorkOrder.Reason.CAPACITY;
+        final Map<UUID,Long> rejectedFoodReturns=new HashMap<>();
+        boolean scanExhausted,cancelling,foodControl,executing;
     }
     private final MinecraftServer server;
     private final ColonyRegistry registry;
@@ -87,7 +95,44 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         registry.requireOwner(); return registry.workBoard().work(workId).waitingReason()==WorkOrder.Reason.CAPACITY?waitingBuffers.get(workId):null;
     }
     public boolean current(WorkOrder work,NavigationService.Request request) {
-        var state=active.get(work.id());return state!=null&&state.generation==request.goalRevision()&&request.target().equals(state.waypoint);
+        var state=active.get(work.id());return retained(work,state)&&request.citizenId().equals(state.stepCitizen)&&request.epoch()==state.stepEpoch
+                &&state.generation==request.goalRevision()&&request.target().equals(state.waypoint);
+    }
+    private boolean assigned(WorkOrder work,Active state) {
+        if(state==null||active.get(work.id())!=state||state.cancelling||state.continuation!=state.stepContinuation||state.stepCitizen==null)return false;
+        var citizen=registry.findCitizen(state.stepCitizen).orElse(null);
+        return registry.workBoard().findWork(work.id())==work&&!work.terminal()&&state.stepCitizen.equals(work.assignee())&&citizen!=null&&citizen.bindingEpoch()==state.stepEpoch&&citizen.colonyId().equals(work.colonyId())
+                &&work.id().equals(citizen.assignedWorkId())&&citizen.lifecycle()==CitizenRecord.Lifecycle.ALIVE
+                &&citizen.admission()==CitizenRecord.Admission.ACTIVE&&citizen.readiness()==CitizenRecord.Readiness.READY;
+    }
+    private boolean current(WorkOrder work,Active state) {
+        return assigned(work,state)&&work.revision()==state.stepRevision
+                &&(work.state()==WorkOrder.State.RUNNING||state.foodControl&&work.state()==WorkOrder.State.WAITING);
+    }
+    private boolean retained(WorkOrder work,Active state) {
+        return current(work,state)||assigned(work,state)&&work.state()==WorkOrder.State.WAITING&&work.revision()==state.waitRevision
+                &&work.waitingReason()==state.waitReason&&work.stage().equals(state.waitStage);
+    }
+    private void capture(WorkOrder work,CitizenRecord citizen,Active state,boolean foodControl) {
+        state.stepContinuation=state.continuation;state.stepRevision=work.revision();state.stepCitizen=citizen.citizenId();state.stepEpoch=citizen.bindingEpoch();
+        state.waitRevision=-1;state.waitReason=null;state.waitStage=null;state.foodControl=foodControl;
+    }
+    private boolean cargoControl(WorkOrder work,Active state) {
+        if(state==null||active.get(work.id())!=state||state.cancelling)return false;
+        var order=registry.supply().deliveryForWork(work.id());
+        if(order==null||order.terminal()||order.citizenId()==null||!registry.supply().hasCargo(order.id()))return false;
+        var citizen=registry.findCitizen(order.citizenId()).orElse(null);
+        // Loading reconciles already owned UNKNOWN cargo; restore/readiness withdrawal may
+        // have released its assignment. It grants neither movement nor transfer authority.
+        if(citizen==null||citizen.lifecycle()!=CitizenRecord.Lifecycle.ALIVE||work.terminal()
+                ||registry.workBoard().findWork(work.id())!=work||!citizen.colonyId().equals(work.colonyId())
+                ||work.assignee()!=null&&!order.citizenId().equals(work.assignee())
+                ||citizen.assignedWorkId()!=null&&!work.id().equals(citizen.assignedWorkId()))return false;
+        return registry.supply().orderShares(order.id()).stream().anyMatch(share -> share.stage()==CoverageShare.Stage.IN_TRANSIT&&share.slot()!=null
+                &&share.slot().storage().identity().equals(citizen.citizenId())&&share.slot().storage().bindingEpoch()==citizen.bindingEpoch());
+    }
+    private boolean domainControl(WorkOrder work,Active state,boolean dependency) {
+        return dependency?cargoControl(work,state):current(work,state);
     }
     public void tick(long tick) {
         registry.requireOwner();
@@ -158,61 +203,75 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         }
     }
     public void step(WorkOrder work,long tick) {
-        registry.requireOwner();var supply=registry.supply();var order=supply.deliveryForWork(work.id());
+        registry.requireOwner();var existing=active.get(work.id());if(existing!=null&&(existing.executing||existing.cancelling))return;
+        var supply=registry.supply();var order=supply.deliveryForWork(work.id());
         if(order==null) {fail(work,WorkOrder.Reason.CONTENT_UNAVAILABLE);return;}
         if(order.terminal()) {if(order.state()==DeliveryOrder.State.LOST)fail(work,WorkOrder.Reason.CARGO_LOST);else finish(work);return;}
-        var citizen=registry.citizen(work.assignee());
+        if(work.assignee()==null||work.state()!=WorkOrder.State.RUNNING)return;
+        var citizen=registry.findCitizen(work.assignee()).orElse(null);
+        if(citizen==null)return;
         if(supply.hasCargo(order.id())&&!citizen.citizenId().equals(order.citizenId())) {registry.workBoard().releaseAssignment(work.id());return;}
-        if(!citizen.citizenId().equals(order.citizenId())) {supply.assignDelivery(order.id(),citizen.citizenId(),work.id());order=supply.delivery(order.id());}
         var state=active.computeIfAbsent(work.id(),ignored -> new Active());
+        if(state.executing||state.cancelling)return;
+        state.executing=true;
+        try {
+        capture(work,citizen,state,false);
+        if(!current(work,state))return;
+        if(!citizen.citizenId().equals(order.citizenId())) {supply.assignDelivery(order.id(),citizen.citizenId(),work.id());order=supply.delivery(order.id());}
+        if(!current(work,state))return;
         waitingBuffers.remove(work.id());
         if(work.criticalService()&&work.subjectId()==null&&supply.hasCargo(order.id())&&!order.returnRequired()) {
-            supply.returnDelivery(order.id());order=supply.delivery(order.id());
+            supply.returnDelivery(order.id());order=supply.delivery(order.id());if(!current(work,state))return;
         }
         var shares=supply.orderShares(order.id());
         CoverageShare cargo=shares.stream().filter(value -> value.stage()==CoverageShare.Stage.IN_TRANSIT).findFirst().orElse(null);
         if(cargo!=null) {deliver(work,order,cargo,state,tick);return;}
         if(order.returnRequired()) {finish(work);return;}
         var source=shares.stream().filter(value -> value.stage()==CoverageShare.Stage.RESERVED_STOCK).findFirst().orElse(null);
-        if(source==null) {supply.returnDelivery(order.id());finish(work);return;}
+        if(source==null) {supply.returnDelivery(order.id());if(current(work,state))finish(work);return;}
         if(work.subjectId()!=null) {selfPickup(work,order,source,state,tick);return;}
         boolean surplus=supply.productionSurplus(order.ownerDemandId());
         var destination=surplus?surplusDestination(work,order,state):registration(order.colonyId(),order.destination());
+        if(!current(work,state))return;
         if(surplus&&destination==null)return;
-        if(surplus) {supply.routeProductionSurplus(order.ownerDemandId(),destination.address());order=supply.delivery(order.id());}
+        if(surplus) {supply.routeProductionSurplus(order.ownerDemandId(),destination.address());order=supply.delivery(order.id());if(!current(work,state))return;}
         var fallback=surplus?destination:returnBuffer(order.colonyId());
-        UUID currentOrder=order.id();
-        WorldPosition currentDestination=order.destination();
+        UUID currentOrder=order.id();WorldPosition currentDestination=order.destination();
         if(supply.deliveries().stream().anyMatch(other -> !other.id().equals(currentOrder)&&other.destination().equals(currentDestination)&&other.returnRequired()&&supply.hasCargo(other.id()))) {
             waitCapacity(work,destination,"destination","preflight-destination");return;
         }
         if(destination==null||fallback==null) {waitCapacity(work,destination==null?destination:fallback,destination==null?"destination":"return","preflight-destination");return;}
-        // Source, destination and return are one stable preflight domain, not a protected
-        // owner's incrementally expanding centers as its paid pickup prefix continues.
         prepareDomain(state,storage.locate(source.slot().storage()),destination.address(),fallback.address());
+        if(!current(work,state))return;
         String stage=work.stage();
         if(!stage.equals("preflight-return")&&!stage.equals("pickup")) {
-            if(!ready(work,state,destination.address())) {if(surplus&&unusableReceiver(work))advanceReturn(work,order,state,false);return;}
+            if(!ready(work,state,destination.address())) {if(retained(work,state)&&surplus&&unusableReceiver(work))advanceReturn(work,order,state,false);return;}
+            if(!current(work,state))return;
             var slot=findSlot(work,state,destination,order.item());
-            if(slot==null) {if(state.scanFinished) {waitCapacity(work,destination,"destination","preflight-destination");if(surplus)advanceReturn(work,order,state,false);}return;}
-            if(!move(work,state,destination.address(),"preflight-destination")) {if(surplus&&unusableReceiver(work))advanceReturn(work,order,state,false);return;}
-            waitFor(work,WorkOrder.Reason.BUDGET,"preflight-return");return;
+            if(!current(work,state))return;
+            if(slot==null) {if(state.scanFinished&&current(work,state)) {waitCapacity(work,destination,"destination","preflight-destination");if(retained(work,state)&&surplus)advanceReturn(work,order,state,false);}return;}
+            if(!move(work,state,destination.address(),"preflight-destination")) {if(retained(work,state)&&surplus&&unusableReceiver(work))advanceReturn(work,order,state,false);return;}
+            if(current(work,state))waitFor(work,WorkOrder.Reason.BUDGET,"preflight-return");return;
         }
         if(stage.equals("preflight-return")) {
-            if(!ready(work,state,fallback.address())) {if(surplus&&unusableReceiver(work))advanceReturn(work,order,state,false);return;}
+            if(!ready(work,state,fallback.address())) {if(retained(work,state)&&surplus&&unusableReceiver(work))advanceReturn(work,order,state,false);return;}
+            if(!current(work,state))return;
             var slot=findSlot(work,state,fallback,order.item());
-            if(slot==null) {if(state.scanFinished) {waitCapacity(work,fallback,"return","preflight-return");if(surplus)advanceReturn(work,order,state,false);}return;}
-            if(!move(work,state,fallback.address(),"preflight-return")) {if(surplus&&unusableReceiver(work))advanceReturn(work,order,state,false);return;}
-            waitFor(work,WorkOrder.Reason.BUDGET,"pickup");return;
+            if(!current(work,state))return;
+            if(slot==null) {if(state.scanFinished&&current(work,state)) {waitCapacity(work,fallback,"return","preflight-return");if(retained(work,state)&&surplus)advanceReturn(work,order,state,false);}return;}
+            if(!move(work,state,fallback.address(),"preflight-return")) {if(retained(work,state)&&surplus&&unusableReceiver(work))advanceReturn(work,order,state,false);return;}
+            if(current(work,state))waitFor(work,WorkOrder.Reason.BUDGET,"pickup");return;
         }
         var location=storage.locate(source.slot().storage());
-        if(location==null) {waitFor(work,WorkOrder.Reason.RECONCILING,"pickup");return;}
-        if(!ready(work,state,location)||!move(work,state,location,"pickup"))return;
+        if(location==null) {if(current(work,state))waitFor(work,WorkOrder.Reason.RECONCILING,"pickup");return;}
+        if(!ready(work,state,location)||!current(work,state)||!move(work,state,location,"pickup"))return;
+        if(!current(work,state))return;
         if(storage.currentCitizen(citizen.citizenId(),citizen.bindingEpoch(),location.dimension())==null) {waitFor(work,WorkOrder.Reason.RECONCILING,"pickup");return;}
         var inventory=registry.storage().registrations(work.colonyId()).stream().filter(value -> value.storages().stream().anyMatch(id ->
                 id.identity().equals(citizen.citizenId())&&id.bindingEpoch()==citizen.bindingEpoch())).findFirst().orElse(null);
         if(inventory==null)try {inventory=storage.registerCitizen(work.colonyId(),citizen.citizenId(),"return");}
-        catch(AdmissionLedger.AdmissionException full) {waitFor(work,admissionReason(full),"pickup");return;}
+        catch(AdmissionLedger.AdmissionException full) {if(current(work,state))waitFor(work,admissionReason(full),"pickup");return;}
+        if(!current(work,state))return;
         if(!source.id().equals(state.pickupSource)||!inventory.id().equals(state.pickupInventory)
                 ||inventory.revision()!=state.pickupInventoryRevision||!destination.id().equals(state.pickupDestination)
                 ||destination.revision()!=state.pickupDestinationRevision||!fallback.id().equals(state.pickupFallback)
@@ -241,8 +300,11 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         if(registry.budgets().limits().budget(Budget.STORAGE_SLOT_CHECKS)-registry.budgets().used(Budget.STORAGE_SLOT_CHECKS)<4)return;
         for(int checked=0;checked<3;checked++)if(!registry.budgets().tryConsume(Budget.STORAGE_SLOT_CHECKS,work.lane()))return;
         int cargoCapacity=storage.capacity(state.pickupCargoSlot,order.item());
+        if(!current(work,state))return;
         int destinationCapacity=storage.capacity(state.pickupDestinationSlot,order.item());
+        if(!current(work,state))return;
         int returnCapacity=storage.capacity(state.pickupReturnSlot,order.item());
+        if(!current(work,state))return;
         int maximum=(int)Math.min(source.quantity(),Math.min(cargoCapacity,Math.min(destinationCapacity,returnCapacity)));
         if(maximum<1) {
             state.clearPickup();
@@ -256,9 +318,11 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         var cargoSlot=state.pickupCargoSlot;
         try(var prepared=supply.preparePickup(source.id(),order.id(),cargoSlot,maximum,tick)) {
             execute(work,prepared,location,citizen.bindingEpoch());
+            if(!current(work,state))return;
             if(supply.hasCargo(order.id()))waitFor(work,WorkOrder.Reason.BUDGET,"cargo");
             state.clearPickup();
         } catch(AdmissionLedger.AdmissionException full) {waitFor(work,admissionReason(full),"pickup");}
+        } finally {state.executing=false;}
     }
     private void deliver(WorkOrder work,DeliveryOrder order,CoverageShare cargo,Active state,long tick) {
         var supply=registry.supply();boolean returning=order.returnRequired();
@@ -267,51 +331,59 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         var destination=surplus?surplusDestination(work,order,state):returning?(state.returnToSource?(original==null?null:registration(order.colonyId(),original)):returnBuffer(order.colonyId())):registration(order.colonyId(),order.destination());
         if(surplus&&destination==null)return;
         if(surplus) {supply.routeProductionSurplus(cargo.demandId(),destination.address());order=supply.delivery(order.id());}
+        if(!current(work,state))return;
         if(destination==null) {advanceReturn(work,order,state,returning);return;}
         prepareDomain(state,original,destination.address(),null);
+        if(!current(work,state))return;
         if(!ready(work,state,destination.address())) {
-            if(work.waitingReason()==WorkOrder.Reason.WORKING_SET_LIMIT)advanceReturn(work,order,state,returning);
+            if(retained(work,state)&&work.waitingReason()==WorkOrder.Reason.WORKING_SET_LIMIT)advanceReturn(work,order,state,returning);
             return;
         }
         var slot=findSlot(work,state,destination,order.item());
         if(slot==null) {if(state.scanFinished) {waitCapacity(work,destination,returning?(state.returnToSource?"source":"return"):"destination",returning?"returning":"cargo");advanceReturn(work,order,state,returning);}return;}
         if(!move(work,state,destination.address(),returning?"returning":"cargo")) {
-            if(work.waitingReason()==WorkOrder.Reason.UNREACHABLE||work.waitingReason()==WorkOrder.Reason.PERMISSION_DENIED||work.waitingReason()==WorkOrder.Reason.WORKING_SET_LIMIT)
+            if(retained(work,state)&&(work.waitingReason()==WorkOrder.Reason.UNREACHABLE||work.waitingReason()==WorkOrder.Reason.PERMISSION_DENIED||work.waitingReason()==WorkOrder.Reason.WORKING_SET_LIMIT))
                 advanceReturn(work,order,state,returning);
             return;
         }
         int maximum=(int)Math.min(cargo.quantity(),state.slotCapacity);
-        if(maximum<1) {waitFor(work,maximum<0?WorkOrder.Reason.RECONCILING:WorkOrder.Reason.CAPACITY,returning?"returning":"cargo");if(surplus&&maximum==0)advanceReturn(work,order,state,returning);return;}
-        if(!observeSource(work,cargo,tick))return;
+        if(maximum<1) {waitFor(work,maximum<0?WorkOrder.Reason.RECONCILING:WorkOrder.Reason.CAPACITY,returning?"returning":"cargo");if(retained(work,state)&&surplus&&maximum==0)advanceReturn(work,order,state,returning);return;}
+        if(!observeSource(work,cargo,tick)||!current(work,state))return;
         try(var prepared=returning?supply.prepareReturn(cargo.id(),slot,maximum,tick):supply.prepareTransfer(cargo.id(),slot,maximum,tick)) {
+            if(!current(work,state))return;
             execute(work,prepared,destination.address(),registry.citizen(work.assignee()).bindingEpoch());
-        } catch(AdmissionLedger.AdmissionException full) {waitFor(work,admissionReason(full),returning?"returning":"cargo");}
+        } catch(AdmissionLedger.AdmissionException full) {if(current(work,state))waitFor(work,admissionReason(full),returning?"returning":"cargo");}
+        if(!retained(work,state))return;
         if(work.waitingReason()==WorkOrder.Reason.PERMISSION_DENIED)advanceReturn(work,order,state,returning);
-        if(supply.delivery(order.id()).terminal())finish(work);
+        if(current(work,state)&&supply.delivery(order.id()).terminal())finish(work);
     }
     private void advanceReturn(WorkOrder work,DeliveryOrder order,Active state,boolean returning) {
+        if(!retained(work,state))return;
         var cargo=registry.supply().orderShares(order.id()).stream().filter(share -> share.stage()==CoverageShare.Stage.IN_TRANSIT).findFirst().orElse(null);
         if(registry.supply().productionSurplus(cargo==null?order.ownerDemandId():cargo.demandId())) {
             if(unusableReceiver(work))state.surplusFailure=work.waitingReason();
             state.clearPickup();
-            navigation.cancel(work.id());state.waypoint=null;state.requiredChunks.clear();state.slotCursors.clear();state.unknownScans.clear();
-            if(!registry.supply().hasCargo(order.id()))releaseLoadDomains(state);
+            navigation.cancel(work.id());if(!retained(work,state))return;state.waypoint=null;state.requiredChunks.clear();state.slotCursors.clear();state.unknownScans.clear();
+            if(!registry.supply().hasCargo(order.id())) {releaseLoadDomains(state);if(!retained(work,state))return;}
             state.surplusBufferCursor++;
             waitFor(work,state.surplusFailure,registry.supply().hasCargo(order.id())?"cargo":"preflight-destination");return;
         }
         if(!returning)registry.supply().returnDelivery(order.id());
         else state.returnToSource=!state.returnToSource;
         state.clearPickup();
-        navigation.cancel(work.id());state.waypoint=null;state.requiredChunks.clear();state.slotCursors.clear();state.unknownScans.clear();
-        if(!registry.supply().hasCargo(order.id()))releaseLoadDomains(state);
+        navigation.cancel(work.id());if(!retained(work,state))return;state.waypoint=null;state.requiredChunks.clear();state.slotCursors.clear();state.unknownScans.clear();
+        if(!registry.supply().hasCargo(order.id())) {releaseLoadDomains(state);if(!retained(work,state))return;}
         waitFor(work,WorkOrder.Reason.CAPACITY,"returning");
     }
     private void execute(WorkOrder work,SupplyRegistry.PreparedTransfer prepared,WorldPosition target,long epoch) {
+        var state=active.get(work.id());if(!current(work,state))return;
         var colony=registry.colony(work.colonyId());
         var context=new ActionContext(work.colonyId(),work.assignee(),ActionContext.Kind.STORAGE_TRANSFER,target,ActionContext.AuthorityMode.COLONY,null,colony.authorityRevision());
         long started=System.nanoTime();
-        var result=transfer.transfer(context,epoch,prepared.source(),prepared.destination(),prepared.item(),prepared.maximum(),prepared::commit);
-        registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.PHYSICAL_UNIT,System.nanoTime()-started);
+        StorageTransferExecutor.Result result;
+        try {result=transfer.transfer(context,epoch,prepared.source(),prepared.destination(),prepared.item(),prepared.maximum(),prepared::commit);}
+        finally {registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.PHYSICAL_UNIT,System.nanoTime()-started);}
+        if(!current(work,state))return;
         if(result.moved()==0||result.ambiguous())waitFor(work,result.reason()==WorkOrder.Reason.NONE?WorkOrder.Reason.RECONCILING:result.reason(),work.stage());
     }
     private void selfPickup(WorkOrder work,DeliveryOrder order,CoverageShare source,Active state,long tick) {
@@ -320,11 +392,12 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         var location=storage.locate(source.slot().storage());
         if(location==null) {waitFor(work,WorkOrder.Reason.RECONCILING,"pickup");return;}
         prepareDomain(state,location,null,null);
-        if(!ready(work,state,location)||!move(work,state,location,"pickup"))return;
+        if(!current(work,state)||!ready(work,state,location)||!current(work,state)||!move(work,state,location,"pickup"))return;
         var inventory=registry.storage().registrations(work.colonyId()).stream().filter(value -> value.storages().stream().anyMatch(id ->
                 id.identity().equals(citizen.citizenId())&&id.bindingEpoch()==citizen.bindingEpoch())).findFirst().orElse(null);
         try {if(inventory==null)inventory=storage.registerCitizen(work.colonyId(),citizen.citizenId(),"return");}
-        catch(AdmissionLedger.AdmissionException full) {waitFor(work,admissionReason(full),"pickup");return;}
+        catch(AdmissionLedger.AdmissionException full) {if(current(work,state))waitFor(work,admissionReason(full),"pickup");return;}
+        if(!current(work,state))return;
         var slot=findSlot(work,state,inventory,order.item());
         if(slot==null) {if(state.scanFinished)waitCapacity(work,inventory,"courier","pickup");return;}
         if(!observeSource(work,source,tick))return;
@@ -335,36 +408,68 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
     }
     /** Uses the current assignment until every owned physical cargo stack reaches safe registered storage. */
     public boolean requestFoodPreemption(CitizenRecord citizen) {
-        if(registry.workBoard().requestFoodPreemption(citizen.citizenId())) {
-            if(citizen.assignedWorkId()!=null)cancel(citizen.assignedWorkId());return true;
+        registry.requireOwner();var actual=registry.findCitizen(citizen.citizenId()).orElse(null);
+        if(actual==null||actual.lifecycle()!=CitizenRecord.Lifecycle.ALIVE||actual.admission()!=CitizenRecord.Admission.ACTIVE||actual.readiness()!=CitizenRecord.Readiness.READY)return false;
+        UUID oldWork=actual.assignedWorkId();long epoch=actual.bindingEpoch();
+        var existing=oldWork==null?null:active.get(oldWork);
+        if(existing!=null&&(existing.executing||existing.cancelling))return false;
+        if(registry.workBoard().requestFoodPreemption(actual.citizenId())) {
+            if(oldWork!=null&&registry.citizen(actual.citizenId()).assignedWorkId()==null)cancel(oldWork);
+            return true;
         }
-        var current=registry.citizen(citizen.citizenId());
-        if(current.assignedWorkId()==null)return false;
-        var work=registry.workBoard().work(current.assignedWorkId());
+        var current=registry.citizen(actual.citizenId());
+        if(oldWork==null||!oldWork.equals(current.assignedWorkId())||current.bindingEpoch()!=epoch)return false;
+        var work=registry.workBoard().work(oldWork);
+        if(work.terminal()||!current.citizenId().equals(work.assignee())||(work.state()!=WorkOrder.State.RUNNING&&work.state()!=WorkOrder.State.WAITING))return false;
         var order=registry.supply().deliveryForWork(work.id());
         if(order!=null&&registry.supply().hasCargo(order.id())) {
             if(!order.returnRequired())registry.supply().returnDelivery(order.id());
             return false; // The scheduler services the retained delivery assignment under its critical urgency.
         }
         var cargo=registry.supply().shares().stream().filter(share -> share.stage()==CoverageShare.Stage.ALLOCATED&&share.slot()!=null
-                &&share.slot().storage().identity().equals(citizen.citizenId())&&share.slot().storage().bindingEpoch()==citizen.bindingEpoch()).findFirst().orElse(null);
+                &&share.slot().storage().identity().equals(current.citizenId())&&share.slot().storage().bindingEpoch()==current.bindingEpoch()).findFirst().orElse(null);
         if(cargo==null)return registry.workBoard().requestFoodPreemption(citizen.citizenId());
-        var state=active.computeIfAbsent(work.id(),ignored -> new Active());var buffer=returnBuffer(work.colonyId());
-        if(buffer==null) {waitCapacity(work,null,"return","food-unload");return false;}
+        var state=active.computeIfAbsent(work.id(),ignored -> new Active());
+        if(state.executing||state.cancelling)return false;
+        state.executing=true;
+        try {
+        capture(work,current,state,true);
+        if(!current(work,state))return false;
+        var buffer=foodReturnBuffer(work,current,state);
+        if(buffer==null||!current(work,state))return false;
         prepareDomain(state,storage.locate(cargo.slot().storage()),buffer.address(),null);
-        if(!ready(work,state,buffer.address())||!move(work,state,buffer.address(),"food-unload"))return false;
+        if(!current(work,state)||!ready(work,state,buffer.address())) {
+            if(retained(work,state)&&unusableReceiver(work))rejectFoodReturn(work,state,buffer,work.waitingReason());
+            return false;
+        }
         var slot=findSlot(work,state,buffer,cargo.item());
-        if(slot==null) {if(state.scanFinished)waitCapacity(work,buffer,"return","food-unload");return false;}
+        if(slot==null) {
+            if(state.scanExhausted)rejectFoodReturn(work,state,buffer,state.scanFinished?WorkOrder.Reason.CAPACITY:WorkOrder.Reason.RECONCILING);
+            else waitFor(work,WorkOrder.Reason.BUDGET,"food-unload");
+            return false;
+        }
+        if(!move(work,state,buffer.address(),"food-unload")) {
+            var reason=state.waypoint==null?work.waitingReason():navigation.reason(work.id());
+            if(reason==WorkOrder.Reason.UNREACHABLE||reason==WorkOrder.Reason.PERMISSION_DENIED||reason==WorkOrder.Reason.WORKING_SET_LIMIT)rejectFoodReturn(work,state,buffer,reason);
+            return false;
+        }
         int maximum=(int)Math.min(cargo.quantity(),state.slotCapacity);
         if(maximum<1||!observeSource(work,cargo,Math.max(0,registry.budgets().tick())))return false;
         if(!registry.budgets().tryConsume(Budget.PHYSICAL_ACTIONS,work.lane())) {waitFor(work,WorkOrder.Reason.BUDGET,"food-unload");return false;}
         try(var prepared=registry.supply().prepareAllocationMove(cargo.id(),slot,maximum,Math.max(0,registry.budgets().tick()))) {
+            if(!current(work,state))return false;
             var colony=registry.colony(work.colonyId());
-            var context=new ActionContext(work.colonyId(),citizen.citizenId(),ActionContext.Kind.STORAGE_TRANSFER,buffer.address(),ActionContext.AuthorityMode.COLONY,null,colony.authorityRevision());
-            var result=transfer.transfer(context,citizen.bindingEpoch(),prepared.source(),prepared.destination(),prepared.item(),prepared.maximum(),prepared::commit);
-            if(result.moved()==0||result.ambiguous())waitFor(work,result.reason(),"food-unload");
+            var context=new ActionContext(work.colonyId(),current.citizenId(),ActionContext.Kind.STORAGE_TRANSFER,buffer.address(),ActionContext.AuthorityMode.COLONY,null,colony.authorityRevision());
+            var result=transfer.transfer(context,current.bindingEpoch(),prepared.source(),prepared.destination(),prepared.item(),prepared.maximum(),prepared::commit);
+            if(!current(work,state))return false;
+            if(result.moved()==0||result.ambiguous()) {
+                var reason=result.reason()==WorkOrder.Reason.NONE?WorkOrder.Reason.RECONCILING:result.reason();
+                waitFor(work,reason,"food-unload");
+                if(!result.ambiguous()&&(reason==WorkOrder.Reason.CAPACITY||reason==WorkOrder.Reason.PERMISSION_DENIED))rejectFoodReturn(work,state,buffer,reason);
+            }
         } catch(AdmissionLedger.AdmissionException full) {waitFor(work,admissionReason(full),"food-unload");}
         return false;
+        } finally {state.executing=false;}
     }
     private static WorkOrder.Reason admissionReason(AdmissionLedger.AdmissionException full) {
         return full.reason()==AdmissionLedger.Reason.CRITICAL_CAPACITY?WorkOrder.Reason.CRITICAL_CAPACITY:WorkOrder.Reason.STATE_LIMIT;
@@ -377,10 +482,71 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
     }
     private StorageRegistry.Registration registration(UUID colony,WorldPosition address) {return registry.storage().registrations(colony).stream().filter(value -> value.address().equals(address)||value.positions().contains(address)).findFirst().orElse(null);}
     private StorageRegistry.Registration returnBuffer(UUID colony) {return registry.storage().registrations(colony).stream().filter(value -> value.role().equals("return")&&value.storages().stream().allMatch(id -> id.bindingEpoch()==0)).min(Comparator.comparing(StorageRegistry.Registration::id)).orElse(null);}
+    private StorageRegistry.Registration foodReturnBuffer(WorkOrder work,CitizenRecord citizen,Active state) {
+        var entity=storage.currentCitizen(citizen.citizenId(),citizen.bindingEpoch(),citizen.lastKnownPosition().dimension());
+        if(entity==null) {waitFor(work,WorkOrder.Reason.RECONCILING,"food-unload");return null;}
+        var pos=entity.blockPosition();
+        var dimension=entity.level().dimension().location().toString();
+        StorageRegistry.Registration nearest=null;
+        double distance=Double.POSITIVE_INFINITY;
+        boolean registered=false,nearby=false;
+        var candidates=registry.storage().registrations(work.colonyId());
+        state.rejectedFoodReturns.entrySet().removeIf(rejected -> candidates.stream().noneMatch(candidate -> candidate.id().equals(rejected.getKey())&&candidate.revision()==rejected.getValue()));
+        for(var candidate:candidates) {
+            if(!candidate.role().equals("return")||candidate.storages().stream().anyMatch(id -> id.bindingEpoch()!=0))continue;
+            registered=true;
+            var target=candidate.address();
+            if(!dimension.equals(target.dimension()))continue;
+            boolean reachable=entity.distanceToSqr(target.x()+0.5,target.y()+0.5,target.z()+0.5)<=9;
+            for(int[] offset:OFFSETS) {
+                if(reachable)break;
+                reachable=navigationEnvelope(pos.getX(),pos.getY(),pos.getZ(),target.x()+offset[0],target.y(),target.z()+offset[1]);
+            }
+            if(!reachable)continue;
+            nearby=true;
+            if(Objects.equals(state.rejectedFoodReturns.get(candidate.id()),candidate.revision()))continue;
+            if(candidate.id().equals(state.foodReturn)&&candidate.revision()==state.foodReturnRevision)return candidate;
+            double next=entity.distanceToSqr(target.x()+0.5,target.y()+0.5,target.z()+0.5);
+            if(nearest==null||next<distance||next==distance&&candidate.id().compareTo(nearest.id())<0) {nearest=candidate;distance=next;}
+        }
+        clearFoodReturn(work,state);
+        if(!retained(work,state))return null;
+        if(nearest!=null) {state.foodReturn=nearest.id();state.foodReturnRevision=nearest.revision();return nearest;}
+        var reason=nearby?state.foodReturnFailure:registered?WorkOrder.Reason.WORKING_SET_LIMIT:WorkOrder.Reason.CAPACITY;
+        state.rejectedFoodReturns.clear();state.foodReturnFailure=WorkOrder.Reason.CAPACITY;
+        if(reason==WorkOrder.Reason.CAPACITY)waitCapacity(work,null,"return","food-unload");
+        else waitFor(work,reason,"food-unload");
+        return null;
+    }
+    private void rejectFoodReturn(WorkOrder work,Active state,StorageRegistry.Registration buffer,WorkOrder.Reason reason) {
+        if(!retained(work,state))return;
+        state.rejectedFoodReturns.put(buffer.id(),buffer.revision());state.foodReturnFailure=reason;
+        if(reason==WorkOrder.Reason.UNREACHABLE)state.waypointCursor=(state.waypointCursor+1)%OFFSETS.length;
+        clearFoodReturn(work,state);
+        if(!retained(work,state))return;
+        if(reason==WorkOrder.Reason.CAPACITY)waitCapacity(work,buffer,"return","food-unload");
+        else waitFor(work,reason,"food-unload");
+    }
+    private void clearFoodReturn(WorkOrder work,Active state) {
+        if(!retained(work,state))return;
+        if(state.foodReturn==null)return;
+        UUID foodReturn=state.foodReturn;
+        state.waypoint=null;state.foodReturn=null;state.pendingSlot=null;state.pendingRegistration=null;
+        state.slotCursors.remove(foodReturn);state.unknownScans.remove(foodReturn);
+        navigation.cancel(work.id());
+    }
+    private static boolean navigationEnvelope(int sx,int sy,int sz,int tx,int ty,int tz) {
+        long dx=(long)sx-tx,dy=(long)sy-ty,dz=(long)sz-tz;
+        if(Math.abs(dx)>64||Math.abs(dy)>64||Math.abs(dz)>64||dx*dx+dy*dy+dz*dz>4096)return false;
+        int minX=(Math.min(sx,tx)-2)>>4,maxX=(Math.max(sx,tx)+2)>>4;
+        int minZ=(Math.min(sz,tz)-2)>>4,maxZ=(Math.max(sz,tz)+2)>>4;
+        return (long)(maxX-minX+1)*(maxZ-minZ+1)<=81;
+    }
     private static boolean unusableReceiver(WorkOrder work) {
         return work.waitingReason()==WorkOrder.Reason.UNREACHABLE||work.waitingReason()==WorkOrder.Reason.PERMISSION_DENIED||work.waitingReason()==WorkOrder.Reason.WORKING_SET_LIMIT;
     }
     private StorageRegistry.Registration surplusDestination(WorkOrder work,DeliveryOrder order,Active state) {
+        if(!current(work,state))return null;
         if(state.surplusPreferredDestination==null)state.surplusPreferredDestination=order.destination();
         var candidates=registry.storage().registrations(order.colonyId()).stream()
                 .filter(r -> registry.supply().surplusBuffer(order.colonyId(),r,order.source().storage().dimension()))
@@ -389,11 +555,13 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         while(state.surplusBufferCursor<candidates.size()) {
             var candidate=candidates.get(state.surplusBufferCursor);
             prepareDomain(state,storage.locate(order.source().storage()),candidate.address(),null);
+            if(!current(work,state))return null;
             if(!ready(work,state,candidate.address())) {
-                if(!unusableReceiver(work))return null;
-                advanceReturn(work,order,state,order.returnRequired());continue;
+                if(!retained(work,state)||!unusableReceiver(work))return null;
+                advanceReturn(work,order,state,order.returnRequired());return null;
             }
             if(findSlot(work,state,candidate,order.item())!=null)return candidate;
+            if(!current(work,state))return null;
             if(!state.scanFinished)return null;
             waitingBuffers.put(work.id(),new WaitingBuffer("destination",candidate.address()));
             state.surplusBufferCursor++;
@@ -404,7 +572,8 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         return null;
     }
     private StockRegion findSlot(WorkOrder work,Active state,StorageRegistry.Registration registration,io.github.kpuctajluk.colonyloom.core.storage.ItemDescriptor item) {
-        int cursor=state.slotCursors.getOrDefault(registration.id(),0);state.scanFinished=false;
+        if(!current(work,state))return null;
+        int cursor=state.slotCursors.getOrDefault(registration.id(),0);state.scanFinished=false;state.scanExhausted=false;
         for(int checked=0;checked<16&&cursor<registration.slots().size();checked++) {
             var slot=registration.slots().get(cursor);
             boolean pending=registration.id().equals(state.pendingRegistration)&&slot.equals(state.pendingSlot);
@@ -413,29 +582,36 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
             else {
                 if(!registry.budgets().tryConsume(Budget.STORAGE_SLOT_CHECKS,work.lane())) {state.slotCursors.put(registration.id(),cursor);return null;}
                 capacity=storage.capacity(slot,item);
+                if(!current(work,state))return null;
                 if(capacity>0) {state.pendingSlot=slot;state.pendingRegistration=registration.id();state.pendingCapacity=capacity;}
             }
             if(capacity<0)state.unknownScans.add(registration.id());
             if(capacity>0) {
                 if(!registry.budgets().tryConsume(Budget.STORAGE_SLOT_CHECKS,work.lane())) {state.slotCursors.put(registration.id(),cursor);return null;}
-                var observed=storage.readFresh(slot);state.pendingSlot=null;state.pendingRegistration=null;
+                var observed=storage.readFresh(slot);
+                if(!current(work,state))return null;
+                state.pendingSlot=null;state.pendingRegistration=null;
                 if(!observed.ready())state.unknownScans.add(registration.id());
                 else {
                     registry.storage().index().observe(slot,observed.item(),observed.count(),Math.max(0,registry.budgets().tick()));
+                    if(!current(work,state))return null;
                     state.slotCapacity=capacity;
                     state.slotCursors.remove(registration.id());state.unknownScans.remove(registration.id());return slot;
                 }
             }
             cursor++;
         }
-        if(cursor>=registration.slots().size()) {state.slotCursors.remove(registration.id());state.scanFinished=!state.unknownScans.remove(registration.id());if(!state.scanFinished)waitFor(work,WorkOrder.Reason.RECONCILING,work.stage());}
+        if(cursor>=registration.slots().size()) {state.scanExhausted=true;state.slotCursors.remove(registration.id());state.scanFinished=!state.unknownScans.remove(registration.id());if(!state.scanFinished)waitFor(work,WorkOrder.Reason.RECONCILING,work.stage());}
         else state.slotCursors.put(registration.id(),cursor);return null;
     }
     private boolean observeSource(WorkOrder work,CoverageShare share,long tick) {
+        var state=active.get(work.id());if(!current(work,state))return false;
         if(!registry.budgets().tryConsume(Budget.STORAGE_SLOT_CHECKS,work.lane()))return false;
         var observed=storage.readFresh(share.slot());
+        if(!current(work,state))return false;
         if(!observed.ready()) {registry.storage().index().unknown(share.slot());waitFor(work,WorkOrder.Reason.RECONCILING,work.stage());return false;}
         registry.storage().index().observe(share.slot(),observed.item(),observed.count(),tick);
+        if(!current(work,state))return false;
         if(!share.item().equals(observed.item())||observed.count()<share.quantity()) {waitFor(work,WorkOrder.Reason.RECONCILING,work.stage());return false;}
         return true;
     }
@@ -451,52 +627,84 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
                 ||state.retainedLoadDomain!=null&&chunks.admitted(state.retainedLoadDomain.owner);
     }
     private void releaseLoadDomains(Active state) {
-        if(state.loadDomain!=null)chunks.release(state.loadDomain.owner);
-        if(state.retainedLoadDomain!=null)chunks.release(state.retainedLoadDomain.owner);
+        LoadDomain load=state.loadDomain,retained=state.retainedLoadDomain;
         state.loadDomain=null;state.retainedLoadDomain=null;
+        Throwable failure=null;
+        try {if(load!=null)chunks.release(load.owner);}
+        catch(RuntimeException|Error thrown) {failure=thrown;}
+        try {if(retained!=null)chunks.release(retained.owner);}
+        catch(RuntimeException|Error thrown) {if(failure==null)failure=thrown;else if(failure!=thrown)failure.addSuppressed(thrown);}
+        if(failure instanceof RuntimeException runtime)throw runtime;
+        if(failure instanceof Error error)throw error;
     }
     private LoadDomain requestLoadDomain(WorkOrder work,Active state,List<ChunkKey> centers,boolean dependency) {
+        if(!domainControl(work,state,dependency))return null;
         var domain=state.loadDomain;
         if(domain==null||!domain.matches(centers,work,dependency)) {
+            LoadDomain previous=domain;
             if(state.retainedLoadDomain!=null) {
                 // This desired successor has never authorized movement/effects. A changed
                 // target may rebuild it, but cannot replace or withdraw the retained owner.
-                if(domain!=null)chunks.release(domain.owner);
-                state.loadDomain=null;
-            } else if(domain!=null) {
-                if(chunks.admitted(domain.owner)) {
-                    state.retainedLoadDomain=domain;
+                if(state.loadDomain==previous)state.loadDomain=null;
+                if(previous!=null)chunks.release(previous.owner);
+                if(!domainControl(work,state,dependency))return previous;
+            } else if(previous!=null) {
+                if(chunks.admitted(previous.owner)) {
+                    state.loadDomain=null;
+                    state.retainedLoadDomain=previous;
                     var order=registry.supply().deliveryForWork(work.id());
-                    chunks.setProtection(domain.owner,true,order!=null&&registry.supply().hasCargo(order.id()),work.criticalService());
-                } else chunks.release(domain.owner);
-                state.loadDomain=null;
+                    chunks.setProtection(previous.owner,true,order!=null&&registry.supply().hasCargo(order.id()),work.criticalService());
+                    if(!domainControl(work,state,dependency))return previous;
+                } else {
+                    if(state.loadDomain==previous)state.loadDomain=null;
+                    chunks.release(previous.owner);
+                    if(!domainControl(work,state,dependency))return previous;
+                }
             }
-            domain=new LoadDomain(centers,work,dependency);
-            // Admission failure leaves the original charged, protected domain intact.
-            chunks.request(domain.owner,work.colonyId(),centers,ChunkDemandManager.Readiness.ENTITY_TICKING,domain.lane,domain.priority,dependency);
-            state.loadDomain=domain;
+            var successor=new LoadDomain(centers,work,dependency);
+            // Publish before the synchronous request: withdrawal may cancel this exact work inline.
+            state.loadDomain=successor;
+            try {chunks.request(successor.owner,work.colonyId(),centers,ChunkDemandManager.Readiness.ENTITY_TICKING,successor.lane,successor.priority,dependency);}
+            catch(AdmissionLedger.AdmissionException denied) {
+                if(state.loadDomain==successor)state.loadDomain=null;
+                try {chunks.release(successor.owner);}catch(RuntimeException|Error cleanup) {denied.addSuppressed(cleanup);}
+                throw denied;
+            }
+            if(!domainControl(work,state,dependency))return successor;
+            domain=successor;
         }
-        if(chunks.ready(domain.owner)&&state.retainedLoadDomain!=null) {
-            // Every successor includes the current courier center as well as its endpoints.
-            chunks.release(state.retainedLoadDomain.owner);state.retainedLoadDomain=null;
+        if(!domainControl(work,state,dependency))return domain;
+        boolean ready=chunks.admitted(domain.owner)&&chunks.ready(domain.owner);
+        if(!domainControl(work,state,dependency))return domain;
+        if(ready&&state.retainedLoadDomain!=null) {
+            var retained=state.retainedLoadDomain;
+            state.retainedLoadDomain=null;
+            chunks.release(retained.owner);
+            if(!domainControl(work,state,dependency))return domain;
         }
         return domain;
     }
     private boolean ready(WorkOrder work,Active state,WorldPosition location) {
+        if(!current(work,state))return false;
         var key=chunk(location);
-        // Borrow an actual admitted ticking center, never an incidental external load.
         if(chunks.admitted(key)&&chunks.ready(key,ChunkDemandManager.Readiness.ENTITY_TICKING)
                 &&(!admittedLoadDomain(state)||chunks.admitted(work.id())&&chunks.ready(work.id()))) {
-            releaseLoadDomains(state);return true;
+            releaseLoadDomains(state);return current(work,state);
         }
+        if(!current(work,state))return false;
         state.requiredChunks.add(key);
         state.requiredChunks.add(chunk(registry.citizen(work.assignee()).lastKnownPosition()));
         LoadDomain domain;
         try {domain=requestLoadDomain(work,state,List.copyOf(state.requiredChunks),false);}
-        catch(AdmissionLedger.AdmissionException full){waitFor(work,admissionReason(full),work.stage());return false;}
-        if(!chunks.ready(domain.owner)){waitFor(work,chunks.state(domain.owner)==ChunkDemandManager.State.BLOCKED?WorkOrder.Reason.WORKING_SET_LIMIT:WorkOrder.Reason.CHUNK_NOT_READY,work.stage());return false;}chunks.useful(domain.owner);return true;
+        catch(AdmissionLedger.AdmissionException full){if(current(work,state))waitFor(work,admissionReason(full),work.stage());return false;}
+        if(!current(work,state)||domain==null)return false;
+        boolean ready=chunks.admitted(domain.owner)&&chunks.ready(domain.owner);
+        if(!current(work,state))return false;
+        if(!ready) {waitFor(work,chunks.state(domain.owner)==ChunkDemandManager.State.BLOCKED?WorkOrder.Reason.WORKING_SET_LIMIT:WorkOrder.Reason.CHUNK_NOT_READY,work.stage());return false;}
+        chunks.useful(domain.owner);return current(work,state)&&chunks.admitted(domain.owner);
     }
     private boolean move(WorkOrder work,Active state,WorldPosition target,String stage) {
+        if(!current(work,state))return false;
         var level=server.getLevel(ResourceKey.create(Registries.DIMENSION,ResourceLocation.parse(target.dimension())));
         if(level==null){waitFor(work,WorkOrder.Reason.CHUNK_NOT_READY,stage);return false;}
         var citizen=registry.citizen(work.assignee());
@@ -505,23 +713,29 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
         // The transfer executor rechecks this same native reach, binding and authority before any expense.
         // Requiring a vacant adjacent goal even while already in reach strands dense food queues.
         if(entity.distanceToSqr(target.x()+0.5,target.y()+0.5,target.z()+0.5)<=9) {
-            navigation.cancel(work.id());state.waypoint=null;return true;
+            navigation.cancel(work.id());if(!current(work,state))return false;state.waypoint=null;return true;
         }
+        if(navigation.atTarget(work.id())) {navigation.cancel(work.id());if(!current(work,state))return false;state.waypoint=null;}
         if(state.waypoint!=null&&navigation.state(work.id())!=NavigationService.State.CANCELLED
                 &&state.waypoint.dimension().equals(target.dimension())&&state.waypoint.y()==target.y()
                 &&Math.abs(state.waypoint.x()-target.x())<=2&&Math.abs(state.waypoint.z()-target.z())<=2
                 &&navigation.reason(work.id())!=WorkOrder.Reason.UNREACHABLE) {
-            try {if(navigation.request(work.id(),work.colonyId(),citizen.citizenId(),citizen.bindingEpoch(),state.generation,state.waypoint,work.lane(),work.priority())==null){waitFor(work,WorkOrder.Reason.RECONCILING,stage);return false;}}
-            catch(AdmissionLedger.AdmissionException full){waitFor(work,admissionReason(full),stage);return false;}
-            if(navigation.state(work.id())==NavigationService.State.WAITING)waitFor(work,navigation.reason(work.id()),stage);
+            try {var request=navigation.request(work.id(),work.colonyId(),citizen.citizenId(),citizen.bindingEpoch(),state.generation,state.waypoint,work.lane(),work.priority());
+                if(!current(work,state))return false;
+                if(request==null) {waitFor(work,WorkOrder.Reason.RECONCILING,stage);return false;}}
+            catch(AdmissionLedger.AdmissionException full){if(current(work,state))waitFor(work,admissionReason(full),stage);return false;}
+            if(!current(work,state))return false;
+            if(navigation.state(work.id())==NavigationService.State.WAITING&&current(work,state))waitFor(work,navigation.reason(work.id()),stage);
             return false;
         }
         WorldPosition waypoint=null;
+        var start=entity.blockPosition();
         if(navigation.reason(work.id())==WorkOrder.Reason.UNREACHABLE)state.waypointCursor=(state.waypointCursor+1)%OFFSETS.length;
         for(int checked=0;checked<OFFSETS.length;checked++) {
             int candidate=(state.waypointCursor+checked)%OFFSETS.length;
             int[] offset=OFFSETS[candidate];
             var pos=new BlockPos(target.x()+offset[0],target.y(),target.z()+offset[1]);
+            if(!navigationEnvelope(start.getX(),start.getY(),start.getZ(),pos.getX(),pos.getY(),pos.getZ()))continue;
             if(level.getChunkSource().getChunkNow(pos.getX()>>4,pos.getZ()>>4)==null||!level.isPositionEntityTicking(pos))continue;
             if(level.getBlockState(pos).getCollisionShape(level,pos).isEmpty()&&level.getBlockState(pos.above()).getCollisionShape(level,pos.above()).isEmpty()
                     &&!level.getBlockState(pos.below()).getCollisionShape(level,pos.below()).isEmpty()&&level.getFluidState(pos).isEmpty()) {
@@ -534,33 +748,81 @@ public final class MinecraftDeliveryService implements SimulationScheduler.Physi
             }
         }
         if(waypoint==null){
-            navigation.cancel(work.id());state.waypoint=null;
+            navigation.cancel(work.id());if(!current(work,state))return false;state.waypoint=null;
             var order=registry.supply().deliveryForWork(work.id());
-            if(order!=null&&!registry.supply().hasCargo(order.id())) {releaseLoadDomains(state);state.requiredChunks.clear();}
-            waitFor(work,WorkOrder.Reason.UNREACHABLE,stage);return false;
+            if(order!=null&&!registry.supply().hasCargo(order.id())) {releaseLoadDomains(state);if(!current(work,state))return false;state.requiredChunks.clear();}
+            if(current(work,state))waitFor(work,WorkOrder.Reason.UNREACHABLE,stage);return false;
         }
-        if(!waypoint.equals(state.waypoint)) {navigation.cancel(work.id());state.waypoint=waypoint;state.generation++;}
-        try {if(navigation.request(work.id(),work.colonyId(),citizen.citizenId(),citizen.bindingEpoch(),state.generation,waypoint,work.lane(),work.priority())==null){waitFor(work,WorkOrder.Reason.RECONCILING,stage);return false;}}
-        catch(AdmissionLedger.AdmissionException full){waitFor(work,admissionReason(full),stage);return false;}
+        if(!waypoint.equals(state.waypoint)) {navigation.cancel(work.id());if(!current(work,state))return false;state.waypoint=waypoint;state.generation++;}
+        try {var request=navigation.request(work.id(),work.colonyId(),citizen.citizenId(),citizen.bindingEpoch(),state.generation,waypoint,work.lane(),work.priority());
+            if(!current(work,state))return false;
+            if(request==null) {waitFor(work,WorkOrder.Reason.RECONCILING,stage);return false;}}
+        catch(AdmissionLedger.AdmissionException full){if(current(work,state))waitFor(work,admissionReason(full),stage);return false;}
+        if(!current(work,state))return false;
         if(navigation.atTarget(work.id()))return true;
-        if(navigation.state(work.id())==NavigationService.State.WAITING)waitFor(work,navigation.reason(work.id()),stage);return false;
+        if(navigation.state(work.id())==NavigationService.State.WAITING&&current(work,state))waitFor(work,navigation.reason(work.id()),stage);return false;
     }
     private static final int[][] OFFSETS={{0,1},{1,0},{0,-1},{-1,0},{1,1},{1,-1},{-1,1},{-1,-1},
             {0,2},{2,0},{0,-2},{-2,0},{1,2},{2,1},{1,-2},{2,-1},{-1,2},{-2,1},{-1,-2},{-2,-1}};
     private void waitCapacity(WorkOrder work,StorageRegistry.Registration buffer,String role,String stage) {
+        if(!retained(work,active.get(work.id())))return;
         WorldPosition position=buffer==null?null:buffer.address();
-        waitingBuffers.put(work.id(),new WaitingBuffer(role,position));
         waitFor(work,WorkOrder.Reason.CAPACITY,stage);
+        if(registry.workBoard().findWork(work.id())==work&&!work.terminal()&&work.waitingReason()==WorkOrder.Reason.CAPACITY)
+            waitingBuffers.put(work.id(),new WaitingBuffer(role,position));
     }
     private void waitFor(WorkOrder work,WorkOrder.Reason reason,String stage) {
+        var state=active.get(work.id());
+        if(!retained(work,state))return;
+        var typed=reason==WorkOrder.Reason.NONE?WorkOrder.Reason.RECONCILING:reason;
         var order=registry.supply().deliveryForWork(work.id());
-        if(reason==WorkOrder.Reason.CAPACITY&&order!=null&&!registry.supply().hasCargo(order.id())) {
-            cancel(work.id());registry.workBoard().transition(work.id(),WorkOrder.State.WAITING,reason,stage);return;
+        if(typed==WorkOrder.Reason.CAPACITY&&order!=null&&!registry.supply().hasCargo(order.id())
+                &&!registry.supply().hasAllocatedCitizenCargo(state.stepCitizen,state.stepEpoch)) {
+            // A room-dependent pickup must not monopolize the courier needed to empty that room.
+            // Cargo and navigation waits retain their exact original worker; this path owns neither.
+            long revision=work.revision();var citizen=state.stepCitizen;
+            cancel(work.id());
+            if(registry.workBoard().findWork(work.id())==work&&!work.terminal()&&work.revision()==revision
+                    &&citizen.equals(work.assignee())&&work.id().equals(registry.citizen(citizen).assignedWorkId()))
+                registry.workBoard().transition(work.id(),WorkOrder.State.WAITING,typed,stage);
+            return;
         }
-        registry.workBoard().waitAssigned(work.id(),reason==WorkOrder.Reason.NONE?WorkOrder.Reason.RECONCILING:reason,stage);
+        long expected=work.state()==WorkOrder.State.WAITING&&work.waitingReason()==typed&&work.stage().equals(stage)?work.revision():Math.incrementExact(work.revision());
+        long continuation=state.stepContinuation,epoch=state.stepEpoch;var citizen=state.stepCitizen;
+        registry.workBoard().waitAssigned(work.id(),typed,stage);
+        if(state.stepContinuation==continuation&&state.stepCitizen==citizen&&state.stepEpoch==epoch&&assigned(work,state)
+                &&work.state()==WorkOrder.State.WAITING&&work.revision()==expected&&work.waitingReason()==typed&&work.stage().equals(stage)) {
+            state.waitRevision=expected;state.waitReason=typed;state.waitStage=stage;
+        }
     }
     private void finish(WorkOrder work) {waitingBuffers.remove(work.id());cancel(work.id());registry.workBoard().transition(work.id(),WorkOrder.State.COMPLETED,WorkOrder.Reason.NONE,"completed");}
     private void fail(WorkOrder work,WorkOrder.Reason reason) {waitingBuffers.remove(work.id());cancel(work.id());registry.workBoard().transition(work.id(),WorkOrder.State.FAILED,reason,"failed");}
-    @Override public void cancel(UUID workId) {if(navigation!=null)navigation.cancel(workId);var state=active.remove(workId);if(state!=null)releaseLoadDomains(state);}
-    @Override public void close() {for(var id:List.copyOf(active.keySet()))cancel(id);waitingBuffers.clear();}
+    @Override public void cancel(UUID workId) {
+        registry.requireOwner();var state=active.get(workId);
+        if(state!=null) {
+            if(state.cancelling)return;
+            state.cancelling=true;state.continuation++;state.stepCitizen=null;
+            state.waypoint=null;state.requiredChunks.clear();state.clearPickup();state.slotCursors.clear();state.unknownScans.clear();
+            active.remove(workId,state);
+        }
+        waitingBuffers.remove(workId);
+        Throwable failure=null;
+        try {if(navigation!=null)navigation.cancel(workId);}
+        catch(RuntimeException|Error thrown) {failure=thrown;}
+        try {if(state!=null)releaseLoadDomains(state);}
+        catch(RuntimeException|Error thrown) {if(failure==null)failure=thrown;else if(failure!=thrown)failure.addSuppressed(thrown);}
+        if(failure instanceof RuntimeException runtime)throw runtime;
+        if(failure instanceof Error error)throw error;
+    }
+    @Override public void close() {
+        Throwable failure=null;
+        try {
+            for(var id:List.copyOf(active.keySet())) {
+                try {cancel(id);}
+                catch(RuntimeException|Error thrown) {if(failure==null)failure=thrown;else if(failure!=thrown)failure.addSuppressed(thrown);}
+            }
+        } finally {waitingBuffers.clear();}
+        if(failure instanceof RuntimeException thrown)throw thrown;
+        if(failure instanceof Error thrown)throw thrown;
+    }
 }

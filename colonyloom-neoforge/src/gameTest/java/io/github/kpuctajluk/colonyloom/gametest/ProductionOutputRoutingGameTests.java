@@ -12,6 +12,8 @@ import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Budget;
 import io.github.kpuctajluk.colonyloom.core.navigation.NavigationService;
 import io.github.kpuctajluk.colonyloom.core.runtime.ServerRuntime;
 import io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane;
+import io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger;
+import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource;
 import io.github.kpuctajluk.colonyloom.core.storage.StockRegion;
 import io.github.kpuctajluk.colonyloom.core.supply.CoverageShare;
 import io.github.kpuctajluk.colonyloom.core.supply.Demand;
@@ -88,6 +90,23 @@ public final class ProductionOutputRoutingGameTests {
     public static void originalNativeKitsContinuePickupWithFourPaidSlotChecksPerTurn(GameTestHelper helper) {
         runSeries(helper,true);
     }
+    @GameTest(template="identity_empty",batch="stage14_production_navigation_admission",timeoutTicks=600)
+    public static void exhaustedNavigationAdmissionResumesSameOriginalNativeBatch(GameTestHelper helper) {
+        run(helper,4,62,0,ContinuationMode.ADMISSION);
+    }
+
+    @GameTest(template="identity_empty",batch="stage14_production_stale_before",timeoutTicks=600)
+    public static void synchronousDetachBeforeCraftPreservesOriginalNativeKit(GameTestHelper helper) {
+        run(helper,4,62,0,ContinuationMode.BEFORE_CRAFT);
+    }
+
+    @GameTest(template="identity_empty",batch="stage14_production_stale_after",timeoutTicks=600)
+    public static void synchronousDetachAfterCraftRetainsExactNativeRecoveryFact(GameTestHelper helper) {
+        run(helper,4,62,0,ContinuationMode.AFTER_CRAFT);
+    }
+
+    private enum ContinuationMode { NORMAL,ADMISSION,BEFORE_CRAFT,AFTER_CRAFT }
+
 
     private static void runSeries(GameTestHelper helper,boolean partialPickup) {
         var templateOrigin=helper.absolutePos(new BlockPos(1,1,1));
@@ -126,6 +145,10 @@ public final class ProductionOutputRoutingGameTests {
     }
 
     private static void run(GameTestHelper helper,int outputCount,int initialStairs,int fallbackMode) {
+        run(helper,outputCount,initialStairs,fallbackMode,ContinuationMode.NORMAL);
+    }
+
+    private static void run(GameTestHelper helper,int outputCount,int initialStairs,int fallbackMode,ContinuationMode mode) {
         var origin=helper.absolutePos(new BlockPos(1,1,1));
         var access=new NeoForgeChunkAccess(helper.getLevel().getServer(),new TicketController(ResourceLocation.parse("colonyloom:runtime")));
         UUID ticketOwner=UUID.randomUUID(); List<ChunkKey> keys=new ArrayList<>();
@@ -138,10 +161,10 @@ public final class ProductionOutputRoutingGameTests {
         helper.onEachTick(() -> {
             if(done[0]) return;
             try {
-                if(++ticks[0]>MAX_TICKS) throw new IllegalStateException("Output routing timeout: "+(fixture[0]==null?"chunks":fixture[0].diagnostics()));
+                if(++ticks[0]>MAX_TICKS) throw new IllegalStateException("Output routing timeout: "+(fixture[0]==null?"chunks "+keys.stream().map(key->key+" loaded="+access.ready(key,ChunkDemandManager.Readiness.LOADED)+" block="+access.ready(key,ChunkDemandManager.Readiness.BLOCK_TICKING)+" entity="+access.ready(key,ChunkDemandManager.Readiness.ENTITY_TICKING)).toList():fixture[0].diagnostics()));
                 if(fixture[0]==null) {
                     if(!keys.stream().allMatch(key -> access.ready(key,ChunkDemandManager.Readiness.ENTITY_TICKING))) return;
-                    fixture[0]=new Fixture(helper,origin,access,outputCount,initialStairs,fallbackMode);
+                    fixture[0]=new Fixture(helper,origin,access,outputCount,initialStairs,fallbackMode,mode);
                 }
                 fixture[0].core.tick(fixture[0].core.serverTick()+1);
                 if(!fixture[0].observe()) return;
@@ -494,9 +517,14 @@ public final class ProductionOutputRoutingGameTests {
         int vetoes;
         boolean allocated,begun;
         long startedActive,completedAt=-1;
+        final ContinuationMode mode;
+        AdmissionLedger.Lease navigationBlock;
+        UUID originalWork;
+        boolean navigationDenied,navigationReleased,detached;
+        long deniedRemaining;
 
-        Fixture(GameTestHelper helper,BlockPos origin,NeoForgeChunkAccess access,int outputCount,int initialStairs,int fallbackMode) {
-            this.helper=helper; this.outputCount=outputCount; this.initialStairs=initialStairs;this.fallbackMode=fallbackMode;
+        Fixture(GameTestHelper helper,BlockPos origin,NeoForgeChunkAccess access,int outputCount,int initialStairs,int fallbackMode,ContinuationMode mode) {
+            this.helper=helper; this.outputCount=outputCount; this.initialStairs=initialStairs;this.fallbackMode=fallbackMode;this.mode=mode;
             var level=helper.getLevel(); var server=level.getServer();
             for(int x=-4;x<=10;x++) for(int z=-4;z<=10;z++) {
                 var pos=origin.offset(x,0,z); level.setBlockAndUpdate(pos.below(),Blocks.STONE.defaultBlockState());
@@ -552,7 +580,14 @@ public final class ProductionOutputRoutingGameTests {
                 return true;
             },() -> checkpoint,null);
             delivery=new MinecraftDeliveryService(server,core.registry(),storage,transfer,chunks);
-            production=new MinecraftProductionService(core.registry(),storage,new RecipeExecutor(server,core.registry(),storage,new NeoForgeRecipeProtection(server),() -> checkpoint,null),chunks);
+            production=new MinecraftProductionService(core.registry(),storage,new RecipeExecutor(server,core.registry(),storage,new NeoForgeRecipeProtection(server),() -> checkpoint,(point,action) -> {
+                boolean boundary=mode==ContinuationMode.BEFORE_CRAFT&&point==RecipeExecutor.FaultPoint.BEFORE_EFFECT
+                        ||mode==ContinuationMode.AFTER_CRAFT&&point==RecipeExecutor.FaultPoint.AFTER_FACT_BEFORE_NOTIFY;
+                if(!boundary||detached)return;
+                var batch=supplyOrder();originalWork=batch.workId();
+                check(batch.batchStarted()&&batch.citizenId().equals(citizen)&&batch.completedBatches()==0,"Callback did not target the original begun batch");
+                core.workBoard().releaseAssignment(originalWork);detached=true;
+            }),chunks);
             NavigationService.GoalAuthority goals=(work,request) -> WorkOrder.DELIVERY.equals(work.typeId())?delivery.current(work,request):production.current(work,request);
             navigation=new NavigationService(core.registry(),core.budgets(),chunks,new MinecraftNavigationBackend(server,core.registry(),chunks,goals),goals);
             production.navigation(navigation);delivery.navigation(navigation);
@@ -574,10 +609,35 @@ public final class ProductionOutputRoutingGameTests {
                 production.tick();
                 if(fallbackMode!=0)delivery.tick(tick);
             });
+            core.scheduler().beforeStep(() -> {
+                if(mode!=ContinuationMode.ADMISSION||navigationBlock!=null||navigationReleased)return;
+                var batch=supplyOrder();if(!batch.batchStarted()||!begun)return;
+                var work=core.workBoard().work(batch.workId());
+                if(!citizen.equals(work.assignee()))return;
+                originalWork=work.id();deniedRemaining=batch.remainingActiveTicks();
+                navigation.cancel(originalWork);
+                int remaining=core.admission().limits().resource(Resource.CACHE_ENTRIES_PER_OWNER)
+                        -core.admission().used(originalWork,Resource.CACHE_ENTRIES_PER_OWNER);
+                navigationBlock=core.admission().reserve(originalWork,Lane.NORMAL,Map.of(Resource.CACHE_ENTRIES,remaining,Resource.CACHE_ENTRIES_PER_OWNER,remaining));
+            });
         }
 
         boolean observe() {
             var supply=core.registry().supply(); var order=supply.production(orderId);
+            if(mode==ContinuationMode.ADMISSION&&!navigationReleased&&originalWork!=null) {
+                var work=core.workBoard().work(originalWork);
+                if(work.state()!=WorkOrder.State.WAITING||work.waitingReason()!=WorkOrder.Reason.STATE_LIMIT)return false;
+                check(originalWork.equals(order.workId())&&citizen.equals(work.assignee())
+                        &&originalWork.equals(core.registry().citizen(citizen).assignedWorkId()),"Navigation denial lost the exact assigned producer");
+                check(order.batchStarted()&&citizen.equals(order.citizenId())&&order.completedBatches()==0&&order.batches()==1
+                        &&order.remainingActiveTicks()==deniedRemaining,"Navigation denial replaced or advanced its original begun batch");
+                check(barrel.getItem(0).is(Items.OAK_PLANKS)&&barrel.getItem(0).getCount()==6
+                        &&stairs(FIRST_OUTPUT)==initialStairs&&stairs(SECOND_OUTPUT)==initialStairs
+                        &&supply.completeProductionKit(orderId).size()==1,"Navigation denial expended or released the native allocated kit");
+                check(core.registry().effects().snapshots().isEmpty(),"Denied navigation published physical craft evidence");
+                navigationDenied=true;navigationBlock.close();navigationBlock=null;navigationReleased=true;return false;
+            }
+            if(detached)return assertDetached(order);
             if(order.batchStarted() && !begun) {
                 begun=true; startedActive=core.registry().citizen(citizen).activeTimeTicks();
                 check(order.remainingActiveTicks()==ACTIVE_TICKS && order.completedBatches()==0,"Batch did not begin on its real active-time clock");
@@ -596,6 +656,9 @@ public final class ProductionOutputRoutingGameTests {
             var supply=core.registry().supply(); var order=supply.production(orderId);
             check(begun && core.registry().citizen(citizen).activeTimeTicks()-startedActive>=ACTIVE_TICKS,"Production skipped the admitted chunk active-time duration");
             check(order.batches()==0 && order.completedBatches()==1 && core.workBoard().work(order.workId()).state()==WorkOrder.State.COMPLETED,"Physical batch did not commit once");
+            if(mode==ContinuationMode.ADMISSION)check(navigationDenied&&navigationReleased&&originalWork.equals(order.workId())
+                    &&producer.getUUID().equals(core.registry().citizen(citizen).entityId())&&producer.bindingEpoch()==1,
+                    "Capacity recovery replaced the original production work, batch or native embodiment");
             check(barrel.getItem(0).isEmpty() && stairs(FIRST_OUTPUT)==64 && stairs(SECOND_OUTPUT)==64,"Whole batch did not spend six physical planks and fill exactly 64+64 physical stairs");
             for(int slot=1;slot<barrel.getContainerSize();slot++) if(slot!=FIRST_OUTPUT && slot!=SECOND_OUTPUT) {
                 check(barrel.getItem(slot).is(Items.STONE) && barrel.getItem(slot).getCount()==64,"Production changed an incompatible full barrel slot");
@@ -619,6 +682,35 @@ public final class ProductionOutputRoutingGameTests {
             }) && core.registry().storage().reservations().entries().isEmpty(),"Committed output allocations differ from exact native portions or retain ingredient claims");
             check(core.registry().storage().index().observation(input).count()==0 && core.registry().storage().index().observation(firstOutput).count()==64 && core.registry().storage().index().observation(secondOutput).count()==64,"Committed stock index disagrees with real barrel");
         }
+        private io.github.kpuctajluk.colonyloom.core.production.ProductionOrder supplyOrder() {
+            return core.registry().supply().production(orderId);
+        }
+
+        private boolean assertDetached(io.github.kpuctajluk.colonyloom.core.production.ProductionOrder order) {
+            check(begun&&originalWork.equals(order.workId())&&order.batchStarted()&&order.completedBatches()==0&&order.batches()==1,
+                    "Stale callback committed or replaced the original production continuation");
+            check(core.registry().citizen(citizen).assignedWorkId()==null&&core.workBoard().work(originalWork).assignee()==null,
+                    "Stale craft republished its detached assignment");
+            var effects=core.registry().effects().snapshots();
+            if(mode==ContinuationMode.BEFORE_CRAFT) {
+                check(barrel.getItem(0).is(Items.OAK_PLANKS)&&barrel.getItem(0).getCount()==6
+                        &&stairs(FIRST_OUTPUT)==initialStairs&&stairs(SECOND_OUTPUT)==initialStairs&&effects.isEmpty(),
+                        "Before-effect stale authority expended native property or retained a fabricated effect");
+                check(core.registry().supply().demand(ingredientId).snapshot().allocated()==6,
+                        "Before-effect detach discarded the exact native kit allocation");
+            } else {
+                check(barrel.getItem(0).isEmpty()&&stairs(FIRST_OUTPUT)==64&&stairs(SECOND_OUTPUT)==64,
+                        "After-effect detach replayed or compensated native craft");
+                check(effects.size()==1&&effects.getFirst().state()==EffectRecord.State.AMBIGUOUS
+                        &&effects.getFirst().craft()!=null&&effects.getFirst().craft().complete()
+                        &&effects.getFirst().craft().productionId().equals(orderId)&&effects.getFirst().workId().equals(originalWork)
+                        &&effects.getFirst().craft().inputs().getFirst().beforeCount()==6
+                        &&effects.getFirst().craft().inputs().getFirst().afterCount()==0
+                        &&core.registry().colony(colony).recoveryBlocked(),"After-effect detach lost its exact native recovery fact");
+            }
+            return true;
+        }
+
 
         private boolean observeSurplus() {
             var supply=core.registry().supply();
@@ -688,6 +780,7 @@ public final class ProductionOutputRoutingGameTests {
             return "order="+order.state()+" remaining="+order.remainingActiveTicks()+" active="+core.registry().citizen(citizen).activeTimeTicks()+" work="+(work==null?"none":work.state()+":"+work.waitingReason()+" nav="+navigation.state(work.id()))+" native="+barrel.getItem(0)+","+barrel.getItem(FIRST_OUTPUT)+","+barrel.getItem(SECOND_OUTPUT)+surplus;
         }
         @Override public void close() {
+            if(navigationBlock!=null){navigationBlock.close();navigationBlock=null;}
             delivery.close();production.close(); navigation.close(); admission.close(); chunks.close();
             if(courier!=null)courier.remove(Entity.RemovalReason.DISCARDED);
             producer.remove(Entity.RemovalReason.DISCARDED); core.beginStopping(); core.stop();

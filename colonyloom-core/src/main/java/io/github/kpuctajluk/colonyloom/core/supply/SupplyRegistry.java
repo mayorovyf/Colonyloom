@@ -362,7 +362,7 @@ public final class SupplyRegistry {
     public ProductionOrder promiseProduction(UUID demandId, RecipeDefinition recipe, long batches) {
         var s = demand(demandId).snapshot(); long output = Math.multiplyExact(batches, recipe.outputCount()); Demand.quantity(output);
         long quantity = Math.min(output, s.deficit()); active(s, recipe.output(), quantity);
-        var workshop = selectWorkshop(s.colonyId(), recipe);
+        var workshop = selectWorkshop(s, recipe);
         var registration = registry.storage().registrations().stream().filter(r -> r.id().equals(workshop.registrationId())).findFirst().orElseThrow();
         if (registration.storages().size() != 1) throw new IllegalStateException("Production requires one canonical workshop barrel");
         for (var existing : List.copyOf(productions.values())) if (!existing.terminal() && existing.recipe().equals(recipe) && existing.colonyId().equals(s.colonyId()) && existing.workshopId()!=null && existing.workshopId().equals(workshop.id()) && !dependsOn(demandId, existing.id())) {
@@ -472,13 +472,29 @@ public final class SupplyRegistry {
         if (existing.snapshot().required() != required || !existing.snapshot().matcher().equals(ingredient.matcher())) throw new IllegalArgumentException("Ingredient quantity differs from pinned batch");
         return existing;
     }
-    private StorageRegistry.Workshop selectWorkshop(UUID colony, RecipeDefinition recipe) {
+    private StorageRegistry.Workshop selectWorkshop(Demand.Snapshot demand, RecipeDefinition recipe) {
         if (!recipe.equipmentId().equals("minecraft:crafting_table")) throw new IllegalStateException("Unsupported production equipment");
-        for (var citizen : registry.citizensView()) if (citizen.colonyId().equals(colony)
-                && citizen.lifecycle() == io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Lifecycle.ALIVE
-                && recipe.professionId().equals(citizen.professionId()) && citizen.workplaceId() != null) {
-            for (var workshop : registry.storage().workshops()) if (workshop.id().equals(citizen.workplaceId()) && workshop.colonyId().equals(colony)) return workshop;
+        StorageRegistry.Workshop selected = null;
+        long nearest = Long.MAX_VALUE;
+        var destination = demand.destination();
+        for (var workshop : registry.storage().workshops()) {
+            if (!workshop.colonyId().equals(demand.colonyId()) || !workshop.position().dimension().equals(destination.dimension())) continue;
+            boolean staffed = false;
+            for (var citizen : registry.citizensView()) {
+                if (citizen.colonyId().equals(demand.colonyId())
+                        && citizen.lifecycle() == io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Lifecycle.ALIVE
+                        && recipe.professionId().equals(citizen.professionId()) && workshop.id().equals(citizen.workplaceId())) {
+                    staffed = true; break;
+                }
+            }
+            if (!staffed) continue;
+            var position = workshop.position();
+            long distance = Math.abs((long)position.x() - destination.x()) + Math.abs((long)position.y() - destination.y()) + Math.abs((long)position.z() - destination.z());
+            if (selected == null || distance < nearest || distance == nearest && workshop.id().compareTo(selected.id()) < 0) {
+                selected = workshop; nearest = distance;
+            }
         }
+        if (selected != null) return selected;
         throw new IllegalStateException("No assigned producer workshop");
     }
     public ProductionOrder production(UUID id) { registry.requireOwner(); var order = productions.get(id); if (order == null) throw new IllegalArgumentException("Unknown production"); return order; }
@@ -498,7 +514,7 @@ public final class SupplyRegistry {
     public boolean pinProduction(UUID productionId) {
         var p = production(productionId); if (p.pinned()) return workshopAvailable(p); if (p.terminal()) return false;
         StorageRegistry.Workshop workshop;
-        try { workshop = selectWorkshop(p.colonyId(), p.recipe()); } catch (IllegalStateException unavailable) { return false; }
+        try { workshop = selectWorkshop(demand(p.ownerDemandId()).snapshot(), p.recipe()); } catch (IllegalStateException unavailable) { return false; }
         var registration = registry.storage().registrations().stream().filter(r -> r.id().equals(workshop.registrationId())).findFirst().orElseThrow();
         if (registration.storages().size() != 1) return false;
         var next = new ProductionOrder(p.id(), p.colonyId(), p.ownerDemandId(), p.recipe(), p.batches(), p.remainingActiveTicks(), Math.incrementExact(p.revision()), null, null, ProductionOrder.State.PLANNED, p.lane(), p.priority(), workshop.id(), workshop.position(), registration.storages().getFirst(), 0, false);

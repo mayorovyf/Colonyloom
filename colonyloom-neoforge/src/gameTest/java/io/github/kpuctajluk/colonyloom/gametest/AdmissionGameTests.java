@@ -500,6 +500,48 @@ public final class AdmissionGameTests {
         });
     }
     @GameTest(template="identity_empty",batch="stage04_admission",timeoutTicks=600)
+    public static void chargedCoverageWithdrawalPausesResidentBeforeSparseMaintenance(GameTestHelper helper) {
+        var level=helper.getLevel();var pos=helper.absolutePos(new BlockPos(1,1,1));
+        level.setBlockAndUpdate(pos.below(),Blocks.STONE.defaultBlockState());
+        level.setBlockAndUpdate(pos,Blocks.AIR.defaultBlockState());level.setBlockAndUpdate(pos.above(),Blocks.AIR.defaultBlockState());
+        var core=ServerRuntime.start(Thread.currentThread());core.configureCommands(() -> {},List.of());
+        var limits=core.admission().limits().withBudget(Budget.DIRTY_RESCAN_OBJECTS,1);core.updateLimits(limits);
+        UUID colony=UUID.randomUUID(),id=UUID.randomUUID();String dimension=level.dimension().location().toString();
+        core.registry().addColony(new ColonyRuntime(colony,"Withdrawal pause",new Territory(dimension,pos.getX()-16,pos.getZ()-16,pos.getX()+16,pos.getZ()+16),UUID.randomUUID(),Map.of(),1,1,false,null,false));
+        var entity=(CitizenEntity)BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.parse("colonyloom:citizen")).create(level);
+        if(entity==null)throw new IllegalStateException("Citizen unavailable");
+        entity.initializeIdentity(id,1);entity.moveTo(pos.getX()+0.5,pos.getY(),pos.getZ()+0.5,0,0);
+        entity.inventory().setItem(0,new ItemStack(Items.BREAD,3));
+        core.registry().addCitizen(new CitizenRecord(id,colony,entity.getUUID(),1,null,null,null,null,Map.of(),Map.of("food",20),CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.INACTIVE,CitizenRecord.Readiness.READY,0,Map.of("food",1200L),new WorldPosition(dimension,pos.getX(),pos.getY(),pos.getZ()),1),ignored -> {
+            if(!level.addFreshEntity(entity))throw new IllegalStateException("Spawn refused");
+        });
+        core.bindings().observe(id,entity.getUUID(),1);entity.setQuarantined(false);
+        var chunks=new ChunkDemandManager(core.registry(),core.budgets(),new NeoForgeChunkAccess(level.getServer(),new TicketController(ResourceLocation.parse("colonyloom:runtime"))));
+        var admission=new CitizenAdmissionService(level.getServer(),core,chunks);
+        core.scheduler().beforeWork(chunks::tick);
+        int[] phase={0};long[] pausedClock={0},pauseTick={0};
+        helper.onEachTick(() -> {
+            if(phase[0]==3)return;
+            if(phase[0]==1)pausedClock[0]=core.registry().citizen(id).activeTimeTicks();
+            core.tick(core.serverTick()+1);var record=core.registry().citizen(id);
+            if(phase[0]==0 && record.activeTimeTicks()>=3) {
+                pausedClock[0]=record.activeTimeTicks();
+                core.updateLimits(limits.withResource(Resource.LOADED_FOOTPRINT,1));chunks.limitsUpdated();phase[0]=1;
+            } else if(phase[0]==1 && !admission.coverage(id).admitted()) {
+                helper.assertTrue(record.admission()==CitizenRecord.Admission.INACTIVE,"Charged withdrawal left stale ACTIVE before sparse maintenance");
+                helper.assertTrue(admission.coverage(id).pending(),"Withdrawal lost resident readmission continuation");
+                helper.assertTrue(record.activeTimeTicks()==pausedClock[0],"Withdrawal advanced own clock without coverage");
+                pauseTick[0]=core.serverTick();phase[0]=2;
+            } else if(phase[0]==2) {
+                helper.assertTrue(record.admission()==CitizenRecord.Admission.INACTIVE && record.activeTimeTicks()==pausedClock[0],"Uncharged native ticks resumed resident or caught up own time");
+                helper.assertTrue(entity.getUUID().equals(record.entityId()) && entity.bindingEpoch()==1 && entity.inventory().getItem(0).getCount()==3,"Withdrawal changed identity or physical cargo");
+                if(core.serverTick()-pauseTick[0]<5)return;
+                admission.close();chunks.close();entity.remove(Entity.RemovalReason.DISCARDED);core.beginStopping();core.stop();phase[0]=3;helper.succeed();
+            }
+        });
+    }
+
+    @GameTest(template="identity_empty",batch="stage04_admission",timeoutTicks=600)
     public static void nativeReadyResidentWakesFoodWithoutSparseDirtyCursorOrCatchup(GameTestHelper helper) {
         var level=helper.getLevel();var pos=helper.absolutePos(new BlockPos(1,1,1));
         level.setBlockAndUpdate(pos.below(),Blocks.STONE.defaultBlockState());

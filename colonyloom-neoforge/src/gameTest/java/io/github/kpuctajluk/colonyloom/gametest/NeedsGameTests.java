@@ -57,6 +57,14 @@ public final class NeedsGameTests {
     public static void hungryResidentApproachesOccupiedSourceThroughRealTransferRadius(GameTestHelper helper){run(helper,true,null,false,false,2);}
     @GameTest(template="identity_empty",batch="stage11_carried_food",timeoutTicks=2200)
     public static void hungryResidentConsumesOwnBreadBeforeWarehouseWithoutTouchingOtherInventory(GameTestHelper helper){run(helper,true,null,false,false,0,true);}
+    @GameTest(template="identity_empty",batch="stage11_food_arrival_displacement",timeoutTicks=2200)
+    public static void hungryResidentDisplacedAfterArrivalResumesOriginalNativeFoodPickup(GameTestHelper helper){run(helper,true,null,false,false,3);}
+    @GameTest(template="identity_empty",batch="stage11_food_reassigned_before_expense",timeoutTicks=2200)
+    public static void sameFoodWorkReassignedToSameResidentBeforeExpensePreservesSuccessorAndBread(GameTestHelper helper){run(helper,true,null,false,false,0,true,AuthorityFault.REASSIGN_BEFORE_EXPENSE);}
+    @GameTest(template="identity_empty",batch="stage11_food_detached_after_fact",timeoutTicks=2200)
+    public static void detachedFoodAssignmentAfterNativeFactRetainsExactAmbiguousExpenseWithoutReplay(GameTestHelper helper){run(helper,true,null,false,false,0,true,AuthorityFault.DETACH_AFTER_FACT);}
+
+    private enum AuthorityFault { NONE, REASSIGN_BEFORE_EXPENSE, DETACH_AFTER_FACT }
 
     private static void run(GameTestHelper helper,boolean bread){run(helper,bread,null,false);}
     private static void run(GameTestHelper helper,boolean bread,FoodConsumptionExecutor.FaultPoint fault,boolean veto){run(helper,bread,fault,veto,false);}
@@ -65,6 +73,9 @@ public final class NeedsGameTests {
         run(helper,bread,fault,veto,cargo,crowded,false);
     }
     private static void run(GameTestHelper helper,boolean bread,FoodConsumptionExecutor.FaultPoint fault,boolean veto,boolean cargo,int crowded,boolean carried){
+        run(helper,bread,fault,veto,cargo,crowded,carried,AuthorityFault.NONE);
+    }
+    private static void run(GameTestHelper helper,boolean bread,FoodConsumptionExecutor.FaultPoint fault,boolean veto,boolean cargo,int crowded,boolean carried,AuthorityFault authorityFault){
         var origin=helper.absolutePos(new BlockPos(1,1,1));var access=new NeoForgeChunkAccess(helper.getLevel().getServer(),new TicketController(ResourceLocation.parse("colonyloom:runtime")));
         UUID ticketOwner=UUID.randomUUID();List<ChunkKey> keys=new ArrayList<>();String dimension=helper.getLevel().dimension().location().toString();
         for(int x=((origin.getX()-6)>>4)-1;x<=((origin.getX()+10)>>4)+1;x++)for(int z=((origin.getZ()-6)>>4)-1;z<=((origin.getZ()+8)>>4)+1;z++){var key=new ChunkKey(dimension,x,z);keys.add(key);if(!access.acquire(ticketOwner,key,ChunkDemandManager.Readiness.ENTITY_TICKING))throw new IllegalStateException("Needs fixture ticket denied");}
@@ -75,7 +86,7 @@ public final class NeedsGameTests {
                 for(var key:keys)for(int x=key.x()-2;x<=key.x()+2;x++)for(int z=key.z()-2;z<=key.z()+2;z++)
                     if(helper.getLevel().getChunkSource().getChunk(x,z,net.minecraft.world.level.chunk.status.ChunkStatus.FULL,false)==null)return;
                 if(!keys.stream().allMatch(key -> access.ready(key,ChunkDemandManager.Readiness.ENTITY_TICKING)))return;
-                fixture[0]=new Fixture(helper,origin,access,bread,fault,veto,cargo,crowded,carried);
+                fixture[0]=new Fixture(helper,origin,access,bread,fault,veto,cargo,crowded,carried,authorityFault);
             }
             fixture[0].core.tick(fixture[0].core.serverTick()+1);
             if(!fixture[0].observe())return;
@@ -91,18 +102,20 @@ public final class NeedsGameTests {
         final Container warehouse;final UUID hungry;final WorkOrder healthy;final boolean bread;boolean needsEnabled;long started=-1,observed=-1;UUID foodWork;
         final FoodConsumptionExecutor.FaultPoint fault;final boolean veto;boolean faultInjected;
         final boolean cargo;UUID cargoOrder,cargoWork;boolean criticalReturnObserved;Container blockedDestination;
-        final int crowded;final boolean carried;
-        Fixture(GameTestHelper helper,BlockPos origin,NeoForgeChunkAccess access,boolean bread,FoodConsumptionExecutor.FaultPoint fault,boolean veto,boolean cargo,int crowded,boolean carried){
-            this.helper=helper;this.bread=bread;this.fault=fault;this.veto=veto;this.cargo=cargo;this.crowded=crowded;this.carried=carried;var level=helper.getLevel();var server=level.getServer();
+        final int crowded;final boolean carried;boolean arrivalDisplaced;
+        final AuthorityFault authorityFault;boolean authorityInjected;WorkOrder authorityWork;long successorRevision,originalEpoch;UUID originalEntity;
+        EffectRecord nativeFoodFact;
+        Fixture(GameTestHelper helper,BlockPos origin,NeoForgeChunkAccess access,boolean bread,FoodConsumptionExecutor.FaultPoint fault,boolean veto,boolean cargo,int crowded,boolean carried,AuthorityFault authorityFault){
+            this.helper=helper;this.bread=bread;this.fault=fault;this.veto=veto;this.cargo=cargo;this.crowded=crowded;this.carried=carried;this.authorityFault=authorityFault;var level=helper.getLevel();var server=level.getServer();
             for(int x=-6;x<=10;x++)for(int z=-6;z<=8;z++){var pos=origin.offset(x,0,z);level.setBlockAndUpdate(pos.below(),Blocks.STONE.defaultBlockState());for(int y=0;y<3;y++)level.setBlockAndUpdate(pos.above(y),Blocks.AIR.defaultBlockState());}
             var warehousePos=origin.offset(-4,0,-4);level.setBlockAndUpdate(warehousePos,Blocks.BARREL.defaultBlockState());warehouse=(Container)level.getBlockEntity(warehousePos);if(bread)warehouse.setItem(0,new ItemStack(Items.BREAD,2));
             core=ServerRuntime.start(Thread.currentThread());var content=ContentLoader.load(server.getResourceManager(),server.registryAccess());core.configureCommands(() -> {},content.professions().values());
             var limits=SimulationLimits.development();var resources=new EnumMap<Resource,Integer>(Resource.class);resources.putAll(limits.resources());resources.put(Resource.WORKS,128);resources.put(Resource.DEMANDS,12);resources.put(Resource.GRAPH_NODES,12);core.updateLimits(new SimulationLimits(resources,limits.budgets(),100_000_000L));
             core.registry().addColony(new ColonyRuntime(colony,"Critical physical needs",new Territory(position(origin).dimension(),origin.getX()-16,origin.getZ()-16,origin.getX()+16,origin.getZ()+16),owner,Map.of(),1,1,false,null,false));
             storage=new StorageService(server,core.registry(),core.budgets(),new NeoForgeStorageIdentity());storage.register(colony,position(warehousePos),"warehouse");
-            hungry=citizen(crowded==1?warehousePos.offset(1,0,1):crowded==2?warehousePos.offset(5,0,0):origin.offset(-1,0,-1),cargo?"colonyloom:courier":"colonyloom:builder",cargo?20:bread?6:0);citizen(origin.offset(8,0,7),"colonyloom:carpenter",20);
+            hungry=citizen(crowded==1?warehousePos.offset(1,0,1):crowded>=2?warehousePos.offset(5,0,0):origin.offset(-1,0,-1),cargo?"colonyloom:courier":"colonyloom:builder",cargo?20:bread?6:0);citizen(origin.offset(8,0,7),"colonyloom:carpenter",20);
             if(carried){citizens.getFirst().inventory().setItem(8,new ItemStack(Items.BREAD,2));citizens.get(1).inventory().setItem(8,new ItemStack(Items.BREAD,3));}
-            if(crowded>0)for(int[] offset:new int[][]{{0,1},{1,0},{0,-1},{-1,0}})citizen(warehousePos.offset(offset[0],0,offset[1]),null,20);
+            if(crowded==1||crowded==2)for(int[] offset:new int[][]{{0,1},{1,0},{0,-1},{-1,0}})citizen(warehousePos.offset(offset[0],0,offset[1]),null,20);
             var controller=new ConstructionController(core.registry(),new MinecraftConstructionGeometry(server));var loaded=content.blueprints().get("colonyloom:test_four_stairs");
             var blueprint=BlueprintDefinition.create("colonyloom:needs_single_stair",1,List.of(loaded.blocks().getFirst()),loaded.markers());controller.definitions(Map.of(blueprint.id(),blueprint));core.commands().construction(controller);core.commands().delivery(new DeliveryController(core.registry(),new MinecraftDeliveryAccess(core.registry(),storage)));
             chunks=new ChunkDemandManager(core.registry(),core.budgets(),access);admission=new io.github.kpuctajluk.colonyloom.minecraft.runtime.CitizenAdmissionService(server,core,chunks);
@@ -111,10 +124,44 @@ public final class NeedsGameTests {
             delivery=new MinecraftDeliveryService(server,core.registry(),storage,transfer,chunks);
             NavigationService.GoalAuthority goals=(work,request) -> WorkOrder.DELIVERY.equals(work.typeId())||work.criticalService()?delivery.current(work,request):construction.current(work,request);
             navigation=new NavigationService(core.registry(),core.budgets(),chunks,new MinecraftNavigationBackend(server,core.registry(),chunks,goals),goals);construction.navigation(navigation);delivery.navigation(navigation);
-            var food=new MinecraftNeedsService(core.registry(),storage,delivery,new FoodConsumptionExecutor(server,core.registry(),storage,(context,principal,prepared) -> !veto,() -> checkpoint,(point,context) -> {if(point==fault&&!faultInjected){faultInjected=true;throw new IllegalStateException("food fixture fault "+point);}}));needs=new NeedsController(core.registry(),food);food.needs(needs);
+            var food=new MinecraftNeedsService(core.registry(),storage,delivery,new FoodConsumptionExecutor(server,core.registry(),storage,(context,principal,prepared) -> !veto,() -> checkpoint,(point,context) -> {
+                authorityFault(point);
+                if(point==fault&&!faultInjected){faultInjected=true;throw new IllegalStateException("food fixture fault "+point);}
+            }));needs=new NeedsController(core.registry(),food);food.needs(needs);
             planner=new SupplyPlanner(core.registry(),core.registry().supply(),core.budgets());planner.configure(new ProductionCatalog(core.registry(),Map.of()),new MinecraftSupplyAccess(core.registry(),storage));
-            core.scheduler().physicalExecutor(WorkOrder.CONSTRUCTION,construction);core.scheduler().physicalExecutor(WorkOrder.DELIVERY,delivery);core.scheduler().physicalExecutor(WorkOrder.FOOD,food);
+            core.scheduler().physicalExecutor(WorkOrder.CONSTRUCTION,construction);if(crowded!=3)core.scheduler().physicalExecutor(WorkOrder.DELIVERY,delivery);core.scheduler().physicalExecutor(WorkOrder.FOOD,food);
             core.scheduler().beforeWork(tick -> {chunks.tick(tick);admission.tick();if(needsEnabled)needs.tick(tick);navigation.tick(tick);storage.tick(tick);core.registry().targetClaims().tick();core.registry().supply().reconcile(tick,core.budgets());planner.tick(tick);delivery.tick(tick);});
+            if(crowded==3)core.scheduler().beforeStep(() -> {
+                if(arrivalDisplaced)return;
+                var pickup=core.registry().supply().deliveries().stream().filter(order -> order.workId()!=null
+                        &&hungry.equals(core.workBoard().work(order.workId()).assignee())&&!order.terminal()).findFirst().orElse(null);
+                if(pickup==null||!navigation.atTarget(pickup.workId()))return;
+                check(count(warehouse)==2&&count(citizens.getFirst().inventory())==0,"Displacement followed an expense rather than pending arrival");
+                var entity=citizens.getFirst();var displaced=warehousePos.offset((warehousePos.getX()&15)<8?5:-5,0,0);
+                entity.moveTo(displaced.getX()+0.5,displaced.getY(),displaced.getZ()+0.5,0,0);
+                entity.setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);arrivalDisplaced=true;
+                check(navigation.atTarget(pickup.workId()),"Physical displacement cancelled the retained arrival before exercising reuse");
+                System.out.println("COLONYLOOM_FOOD_DISPLACED work="+pickup.workId()+" native="+entity.position());
+            });
+            if(crowded==3)core.scheduler().physicalExecutor(WorkOrder.DELIVERY,new io.github.kpuctajluk.colonyloom.core.scheduler.SimulationScheduler.PhysicalExecutor() {
+                public void step(WorkOrder work,long tick) {
+                    if(!arrivalDisplaced&&navigation.state(work.id())==NavigationService.State.MOVING) {
+                        // This wrapper defers pickup until the native arrival poll. Preserve the
+                        // delivery owner's exact WAITING continuation rather than an external revision.
+                        try {
+                            var active=delivery.getClass().getDeclaredField("active");active.setAccessible(true);
+                            var state=((Map<?,?>)active.get(delivery)).get(work.id());
+                            var capture=delivery.getClass().getDeclaredMethod("capture",WorkOrder.class,CitizenRecord.class,state.getClass(),boolean.class);
+                            capture.setAccessible(true);capture.invoke(delivery,work,core.registry().citizen(work.assignee()),state,false);
+                            var pause=delivery.getClass().getDeclaredMethod("waitFor",WorkOrder.class,WorkOrder.Reason.class,String.class);
+                            pause.setAccessible(true);pause.invoke(delivery,work,WorkOrder.Reason.BUDGET,"pickup");
+                        } catch(ReflectiveOperationException failure) {throw new IllegalStateException("Missing scoped delivery pause",failure);}
+                        return;
+                    }
+                    delivery.step(work,tick);
+                }
+                public void cancel(UUID id){delivery.cancel(id);}
+            });
             var context=new ColonyCommands.CommandContext(owner,false,new ColonyCommands.PhysicalChecks(){public void validateTerritory(Territory territory){}public void validateCitizenPosition(ColonyRuntime colony,WorldPosition position){}public void validateRecovery(ColonyRuntime colony,List<CitizenRecord> records,List<io.github.kpuctajluk.colonyloom.core.citizen.BindingRegistry.Observation> observations){}});
             if(!cargo)for(int i=0;i<6;i++){
                 var target=origin.offset(2+(i%3)*3,0,-3+(i/3)*5);targets.add(target);var buffer=target.west();level.setBlockAndUpdate(buffer,Blocks.BARREL.defaultBlockState());storage.register(colony,position(buffer),"construction");
@@ -130,6 +177,48 @@ public final class NeedsGameTests {
                 core.commands().requestDelivery(context,UUID.randomUUID(),colony,position(warehousePos),position(destination),NativeItemDescriptor.describe(new ItemStack(Items.OAK_STAIRS),server.registryAccess()),3);
             }
         }
+        private void authorityFault(FoodConsumptionExecutor.FaultPoint point){
+            if(authorityInjected||authorityFault==AuthorityFault.NONE)return;
+            var boundary=authorityFault==AuthorityFault.REASSIGN_BEFORE_EXPENSE?FoodConsumptionExecutor.FaultPoint.BEFORE_EFFECT:FoodConsumptionExecutor.FaultPoint.AFTER_FACT_BEFORE_NOTIFY;
+            if(point!=boundary)return;
+            var citizen=core.registry().citizen(hungry);authorityWork=core.workBoard().work(citizen.assignedWorkId());
+            check(WorkOrder.FOOD.equals(authorityWork.typeId())&&authorityWork.state()==WorkOrder.State.RUNNING&&hungry.equals(authorityWork.assignee()),"Authority callback did not reach original running food work");
+            originalEpoch=citizen.bindingEpoch();originalEntity=citizen.entityId();long revision=authorityWork.revision();
+            var facts=core.registry().effects().snapshots().stream().filter(effect -> effect.kind()==io.github.kpuctajluk.colonyloom.core.action.ActionContext.Kind.FOOD_CONSUME).toList();
+            check(facts.size()==1,"Native boundary lacks exactly one food attempt");nativeFoodFact=facts.getFirst();
+            check(nativeFoodFact.workId().equals(authorityWork.id())&&nativeFoodFact.citizenId().equals(hungry)&&nativeFoodFact.bindingEpoch()==originalEpoch,"Food boundary belongs to another work or resident");
+            check(nativeFoodFact.countBefore()==2&&nativeFoodFact.countAfter()==(authorityFault==AuthorityFault.REASSIGN_BEFORE_EXPENSE?2:1),"Food boundary did not capture exact native bread counts");
+            check(citizens.getFirst().inventory().getItem(8).getCount()==nativeFoodFact.countAfter(),"Food fact disagrees with actual carried bread slot");
+            core.workBoard().releaseAssignment(authorityWork.id());
+            check(authorityWork.assignee()==null&&core.registry().citizen(hungry).assignedWorkId()==null,"Canonical detach retained assignment");
+            if(authorityFault==AuthorityFault.REASSIGN_BEFORE_EXPENSE){
+                core.workBoard().transition(authorityWork.id(),WorkOrder.State.READY,WorkOrder.Reason.NONE,"authority-successor");
+                check(core.workBoard().assign(authorityWork.id(),hungry),"Same resident could not reclaim same canonical food work");
+                core.workBoard().transition(authorityWork.id(),WorkOrder.State.RUNNING,WorkOrder.Reason.NONE,"authority-successor");
+            }
+            successorRevision=authorityWork.revision();check(successorRevision>revision,"Canonical authority mutation did not change work revision");authorityInjected=true;
+        }
+        private boolean observeAuthorityFault(){
+            if(!authorityInjected)return false;
+            var citizen=core.registry().citizen(hungry);
+            check(citizen.entityId().equals(originalEntity)&&citizen.bindingEpoch()==originalEpoch&&citizens.getFirst().getUUID().equals(originalEntity)&&citizens.getFirst().isAlive(),"Authority fault replaced or invalidated original native resident");
+            check(citizen.food()==6,"Stale food continuation granted nutrition");
+            check(count(warehouse)==2&&count(citizens.get(1).inventory())==3,"Stale food continuation spent another inventory's bread");
+            var facts=core.registry().effects().snapshots().stream().filter(effect -> effect.kind()==io.github.kpuctajluk.colonyloom.core.action.ActionContext.Kind.FOOD_CONSUME).toList();
+            if(authorityFault==AuthorityFault.REASSIGN_BEFORE_EXPENSE){
+                check(count(citizens.getFirst().inventory())==2&&totalBread()==7,"Pre-expense reassignment spent native bread");
+                check(facts.isEmpty()&&!core.registry().colony(colony).recoveryBlocked(),"Unchanged stale attempt retained effect or blocked recovery");
+                check(core.workBoard().work(authorityWork.id())==authorityWork&&authorityWork.revision()==successorRevision&&authorityWork.state()==WorkOrder.State.RUNNING&&hungry.equals(authorityWork.assignee())&&authorityWork.id().equals(citizen.assignedWorkId()),"Stale result changed successor's canonical assignment");
+                return true;
+            }
+            check(count(citizens.getFirst().inventory())==1&&totalBread()==6,"Detached native fact replayed or compensated bread");
+            check(core.registry().colony(colony).recoveryBlocked(),"Detached native fact did not block recovery");
+            check(facts.size()==1,"Detached native fact disappeared or replayed another effect");var retained=facts.getFirst();
+            check(retained.state()==EffectRecord.State.AMBIGUOUS&&retained.operationId().equals(nativeFoodFact.operationId())&&retained.workId().equals(authorityWork.id())&&retained.citizenId().equals(hungry)&&retained.bindingEpoch()==originalEpoch&&retained.countBefore()==2&&retained.countAfter()==1&&retained.food().equals(nativeFoodFact.food()),"Detached expense lost exact original ambiguous food fact");
+            check(retained.food().slot().storage().identity().equals(hungry)&&retained.food().slot().storage().bindingEpoch()==originalEpoch&&retained.food().slot().slot()==8&&retained.food().item().itemId().equals("minecraft:bread")&&retained.food().foodBefore()==6&&retained.food().foodAfter()==11,"Ambiguous fact changed native source or unpublished nutrition");
+            check(citizen.assignedWorkId()==null&&authorityWork.assignee()==null,"Detached stale result reattached food assignment");
+            if(observed<0){observed=core.serverTick();return false;}return core.serverTick()-observed>=100;
+        }
         private UUID citizen(BlockPos start,String profession,int food){var level=helper.getLevel();UUID id=UUID.randomUUID();var entity=(CitizenEntity)BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.parse("colonyloom:citizen")).create(level);if(entity==null)throw new IllegalStateException("Citizen unavailable");entity.initializeIdentity(id,1);entity.moveTo(start.getX()+0.5,start.getY(),start.getZ()+0.5,0,0);core.registry().addCitizen(new CitizenRecord(id,colony,entity.getUUID(),1,null,null,null,profession,Map.of(),Map.of("food",food),CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.READY,0,Map.of("food",1200L),position(start),1),record -> {if(!level.addFreshEntity(entity))throw new IllegalStateException("Spawn refused");});core.bindings().observe(id,entity.getUUID(),1);entity.setQuarantined(false);citizens.add(entity);return id;}
         boolean observe(){
             if(cargo&&!needsEnabled){
@@ -138,6 +227,7 @@ public final class NeedsGameTests {
             }
             if(!needsEnabled){if(core.registry().supply().demands().size()<6)return false;check(core.admission().used(Resource.DEMANDS,Lane.NORMAL)==core.admission().limits().resource(Resource.DEMANDS)/2,"Normal colony construction demands not saturated");check(core.admission().used(Resource.GRAPH_NODES,Lane.NORMAL)==core.admission().limits().resource(Resource.GRAPH_NODES)/2,"Normal colony construction graph nodes not saturated");check(core.admission().used(Resource.WORKS,Lane.NORMAL)==core.admission().limits().resource(Resource.WORKS)/2,"Normal colony work records not saturated");needsEnabled=true;started=core.serverTick();return false;}
             var citizen=core.registry().citizen(hungry);for(var work:core.workBoard().works())if(WorkOrder.FOOD.equals(work.typeId())&&hungry.equals(work.subjectId()))foodWork=work.id();
+            if(authorityFault!=AuthorityFault.NONE)return observeAuthorityFault();
             if(cargo&&core.registry().supply().hasCargo(cargoOrder)){
                 check(cargoWork.equals(citizen.assignedWorkId()),"Hungry loaded courier lost cargo-bound assignment before safe unload");
                 if(core.workBoard().work(cargoWork).criticalService())criticalReturnObserved=true;
@@ -161,6 +251,7 @@ public final class NeedsGameTests {
                     check(core.registry().effects().snapshots().stream().filter(effect -> effect.kind()==io.github.kpuctajluk.colonyloom.core.action.ActionContext.Kind.FOOD_CONSUME&&hungry.equals(effect.citizenId())).count()==1,"Carried meal lacks one native expense witness");
                 }
                 if(crowded>0) {
+                    if(crowded==3)check(arrivalDisplaced,"Food regression never displaced the original arrived resident");
                     var pickup=core.registry().supply().deliveries().stream().filter(order -> order.workId()!=null&&hungry.equals(core.workBoard().work(order.workId()).subjectId())).findFirst().orElseThrow();
                     check(pickup.terminal()&&core.workBoard().work(pickup.workId()).state()==WorkOrder.State.COMPLETED,"Crowded pickup did not publish a real terminal transfer");
                     check(navigation.state(pickup.workId())==NavigationService.State.CANCELLED&&!chunks.admitted(pickup.workId()),"Completed food retained its route/domain");

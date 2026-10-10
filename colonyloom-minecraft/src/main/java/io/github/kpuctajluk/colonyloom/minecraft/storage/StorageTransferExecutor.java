@@ -76,6 +76,7 @@ public final class StorageTransferExecutor {
         int sourceBefore=current.sourceCount(), destinationBefore=current.destinationCount();
         var citizen=registry.citizen(context.citizenId());
         WorkOrder work=citizen.assignedWorkId()==null?null:registry.workBoard().work(citizen.assignedWorkId());
+        long workRevision=work==null?0:work.revision();
         var fact=new EffectRecord.Transfer(source,destination,item,sourceBefore,sourceBefore,destinationBefore,destinationBefore,current.amount(),0,0,0);
         var effect=new EffectRecord(UUID.randomUUID(),context.colonyId(),work==null?null:work.id(),context.citizenId(),epoch,
                 ActionContext.Kind.STORAGE_TRANSFER,context.target(),"native_inventory",item.itemId(),sourceBefore,sourceBefore,EffectRecord.State.PREPARED,0,fact,null,null,null);
@@ -89,14 +90,14 @@ public final class StorageTransferExecutor {
             // Evidence admission/dirty marker and test observers cannot grant stale authority.
             reason=guard(context,epoch,source,destination);
             Preflight finalState=reason==WorkOrder.Reason.NONE?preflight(context,epoch,source,destination,item,maximum):null;
-            if (reason!=WorkOrder.Reason.NONE || !same(current,finalState) || !assignmentCurrent(citizen,work)) {
+            if (reason!=WorkOrder.Reason.NONE || !same(current,finalState) || !assignmentCurrent(citizen,work,workRevision)) {
                 registry.effects().discardUnchanged(effect.operationId());
                 return denied(reason==WorkOrder.Reason.NONE?WorkOrder.Reason.TARGET_CONFLICT:reason);
             }
             boolean allowed=protection==null || protection.allow(context,current.principal(),source,destination,current.amount());
             reason=guard(context,epoch,source,destination);
             finalState=reason==WorkOrder.Reason.NONE?preflight(context,epoch,source,destination,item,maximum):null;
-            if (reason!=WorkOrder.Reason.NONE || !same(current,finalState) || !assignmentCurrent(citizen,work)) {
+            if (reason!=WorkOrder.Reason.NONE || !same(current,finalState) || !assignmentCurrent(citizen,work,workRevision)) {
                 registry.effects().discardUnchanged(effect.operationId());
                 return denied(reason==WorkOrder.Reason.NONE?WorkOrder.Reason.TARGET_CONFLICT:reason);
             }
@@ -144,13 +145,17 @@ public final class StorageTransferExecutor {
                 throw new IllegalStateException("Native transfer counters are not conserved");
             effect=effect.observedTransfer(fact,false); registry.effects().update(effect);
             observe(FaultPoint.AFTER_FACT_BEFORE_NOTIFY,context);
-            if (guard(context,epoch,source,destination)!=WorkOrder.Reason.NONE || !assignmentCurrent(citizen,work)
+            if (guard(context,epoch,source,destination)!=WorkOrder.Reason.NONE || !assignmentCurrent(citizen,work,workRevision)
                     || storage.currentContainer(source)!=current.source() || storage.currentContainer(destination)!=current.destination()
                     || exactCount(current.source(),source.slot(),item)!=sourceAfter
                     || exactCount(current.destination(),destination.slot(),item)!=destinationAfter)
                 throw new IllegalStateException("Native transfer fact became stale before publication");
             // Destination is known before the prepared claim moves; source loss reconciles afterwards.
             registry.storage().index().observe(destination,destinationAfter==0?null:item,destinationAfter,storage.observationTick());
+            if (guard(context,epoch,source,destination)!=WorkOrder.Reason.NONE || !assignmentCurrent(citizen,work,workRevision)
+                    || storage.currentContainer(source)!=current.source() || storage.currentContainer(destination)!=current.destination()
+                    || exactCount(current.source(),source.slot(),item)!=sourceAfter || exactCount(current.destination(),destination.slot(),item)!=destinationAfter)
+                throw new IllegalStateException("Native transfer fact lost authority during stock reconciliation");
             if (inserted>0) commit.apply(inserted);
             registry.storage().index().observe(source,sourceAfter==0?null:item,sourceAfter,storage.observationTick());
             return new Result(inserted,inserted==0?WorkOrder.Reason.CAPACITY:WorkOrder.Reason.NONE,false);
@@ -168,10 +173,9 @@ public final class StorageTransferExecutor {
             return new Result(inserted,WorkOrder.Reason.RECOVERY_AMBIGUOUS,true);
         }
     }
-    private boolean assignmentCurrent(io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord before,WorkOrder work) {
+    private boolean assignmentCurrent(io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord before,WorkOrder work,long revision) {
         var citizen=registry.citizen(before.citizenId());
-        return Objects.equals(citizen.assignedWorkId(),before.assignedWorkId())
-                &&(work==null||!work.terminal()&&citizen.citizenId().equals(work.assignee()));
+        return citizen.equals(before)&&(work==null||!work.terminal()&&work.revision()==revision&&citizen.citizenId().equals(work.assignee()));
     }
     private Preflight preflight(ActionContext context,long epoch,StockRegion source,StockRegion destination,ItemDescriptor item,int maximum) {
         CitizenEntity courier=storage.currentCitizen(context.citizenId(),epoch,source.storage().dimension());

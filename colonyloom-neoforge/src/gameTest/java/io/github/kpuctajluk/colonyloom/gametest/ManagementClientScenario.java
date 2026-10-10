@@ -79,6 +79,8 @@ public final class ManagementClientScenario {
     private UUID colony;
     private UUID citizen;
     private UUID otherColony;
+    private long managerAuthorityRevision, managerCitizenRevision, managerColonyRevision;
+    private long managerOperationSequence, managerRestoreSequence, managerMemberSequence, managerOwnerSequence, managerStaleSequence, managerViewerSequence;
     private UUID guessed;
     private UUID probe;
     private UUID buildWork;
@@ -148,10 +150,11 @@ public final class ManagementClientScenario {
                 colony = UUID.fromString(fixture.get("colony").getAsString());
                 citizen = UUID.fromString(fixture.get("citizen").getAsString());
                 otherColony = UUID.fromString(fixture.get("otherColony").getAsString());
+                managerAuthorityRevision = fixture.get("managerAuthorityRevision").getAsLong();
                 require(!owner ? minecraft.player.getUUID().toString().equals(fixture.get("viewer").getAsString()) : true,
                         "Offline server identity does not match fixture viewer");
                 minecraft.getConnection().sendCommand(owner ? "colonyloom ui" : "colonyloom ui " + colony);
-                advance(owner ? 2 : 10);
+                advance(owner ? 2 : 200);
             } else if (owner) owner(minecraft);
             else viewer(minecraft);
         } catch (Throwable failure) {
@@ -489,10 +492,125 @@ public final class ManagementClientScenario {
     private void viewer(Minecraft minecraft) throws IOException {
         switch (phase) {
             case 10 -> {
-                if (!acquireScreen() || page(ViewType.SUMMARY) == null) return;
+                if (!Files.isRegularFile(root.resolve("viewer-role-barrier")) || !acquireScreen() || page(ViewType.SUMMARY) == null) return;
                 require(page(ViewType.SUMMARY).rank().equals("viewer"), "Actual fixture page is not VIEWER");
                 tabIndex = 0;
                 advance(11);
+            }
+            case 200 -> {
+                if (!acquireScreen() || page(ViewType.SUMMARY) == null || !page(ViewType.SUMMARY).rank().equals("manager") || ticks - phaseTick < 3) return;
+                require(page(ViewType.SUMMARY).authorityRevision() == managerAuthorityRevision, "Manager SUMMARY lacks exact setup authority");
+                managerColonyRevision = colonyRevision();
+                require(!button("member").active && !button("owner").active, "MANAGER rendered OWNER-only controls must be disabled");
+                if (!screenshot("manager-summary-permissions")) return;
+                observation("manager-summary-permissions", true, "Actual SUMMARY rank=manager; MEMBER and OWNER widgets rendered disabled");
+                press("tab.citizens");
+                advance(201);
+            }
+            case 201 -> {
+                Row row = citizenRow();
+                if (row == null || ticks - phaseTick < 3) return;
+                require(page(ViewType.CITIZENS).rank().equals("manager") && row.name().equals("colonyloom:builder"), "Original builder not visible to manager");
+                select(row, ViewType.CITIZENS);
+                require(button("profession").active && button("workplace").active, "MANAGER operational citizen controls disabled");
+                if (!screenshot("manager-operational-permissions")) return;
+                managerCitizenRevision = row.revision();
+                press("profession"); choose("colonyloom:carpenter");
+                advance(210);
+            }
+            case 210 -> {
+                if (!screenshot("manager-profession-form")) return;
+                managerOperationSequence = client.nextSequence();
+                managerRequest("manager-operation", managerOperationSequence, managerCitizenRevision);
+                advance(211);
+            }
+            case 211 -> {
+                if (!Files.isRegularFile(root.resolve("manager-operation-ready"))) return;
+                press("submit"); advance(202);
+            }
+            case 202 -> {
+                if (!accepted(managerOperationSequence) || !freshCitizen()) return;
+                require(citizenRow().name().equals("colonyloom:carpenter") && results.get(managerOperationSequence).getFirst().objectId().equals(citizen), "Manager profession action did not update original citizen row");
+                if (!screenshot("manager-profession-accepted")) return;
+                observation("manager-profession-accepted", true, "Actual widget command=" + wire.lastCommand + " result=" + results.get(managerOperationSequence).getFirst() + " row=" + citizenRow());
+                managerCitizenRevision = citizenRow().revision();
+                select(citizenRow(), ViewType.CITIZENS); press("profession"); choose("colonyloom:builder");
+                managerRestoreSequence = client.nextSequence();
+                managerRequest("manager-restore", managerRestoreSequence, managerCitizenRevision);
+                advance(212);
+            }
+            case 212 -> {
+                if (!Files.isRegularFile(root.resolve("manager-restore-ready"))) return;
+                press("submit"); advance(203);
+            }
+            case 203 -> {
+                if (!accepted(managerRestoreSequence) || !freshCitizen()) return;
+                require(citizenRow().name().equals("colonyloom:builder") && results.get(managerRestoreSequence).getFirst().objectId().equals(citizen), "Manager did not restore original builder");
+                observation("manager-profession-restored", true, "Actual authorized restore=" + wire.lastCommand + " result=" + results.get(managerRestoreSequence).getFirst() + " row=" + citizenRow());
+                press("tab.summary"); advance(204);
+            }
+            case 204 -> {
+                if (page(ViewType.SUMMARY) == null || colonyRevision() != managerColonyRevision + 2 || ticks - phaseTick < 3) return;
+                managerColonyRevision = colonyRevision();
+                managerMemberSequence = client.nextSequence();
+                require(client.command(colony, managerColonyRevision, new ManagementProtocol.SetMember(minecraft.player.getUUID(), "none")), "Real typed manager SetMember probe was not sent");
+                advance(208);
+            }
+            case 208 -> {
+                if (!denied(managerMemberSequence)) return;
+                observation("manager-set-member-denied", true, "Actual typed command=" + wire.lastCommand + " result=" + results.get(managerMemberSequence).getFirst());
+                managerOwnerSequence = client.nextSequence();
+                require(client.command(colony, colonyRevision(), new ManagementProtocol.SetOwner(minecraft.player.getUUID())), "Real typed manager SetOwner probe was not sent");
+                advance(209);
+            }
+            case 209 -> {
+                if (!denied(managerOwnerSequence)) return;
+                if (!screenshot("manager-owner-command-denied")) return;
+                observation("manager-set-owner-denied", true, "Actual typed command=" + wire.lastCommand + " result=" + results.get(managerOwnerSequence).getFirst());
+                signal("manager-proof-done", "Rendered manager SUMMARY/citizen permissions; widget profession and restore accepted; real typed SetMember/SetOwner ACCESS_DENIED");
+                advance(206);
+            }
+            case 206 -> {
+                if (!Files.isRegularFile(root.resolve("manager-demoted")) || page(ViewType.SUMMARY) == null || !page(ViewType.SUMMARY).rank().equals("viewer") || ticks - phaseTick < 3) return;
+                JsonObject demoted = JsonParser.parseString(Files.readString(root.resolve("manager-demoted"))).getAsJsonObject();
+                require(page(ViewType.SUMMARY).authorityRevision() == demoted.get("authorityRevision").getAsLong()
+                                && page(ViewType.SUMMARY).authorityRevision() > managerAuthorityRevision && colonyRevision() == demoted.get("colonyRevision").getAsLong(),
+                        "Demotion did not deliver actual new authority SUMMARY snapshot/delta");
+                readOnly(ViewType.SUMMARY);
+                if (!screenshot("viewer-after-manager-demotion")) return;
+                managerStaleSequence = client.nextSequence();
+                require(client.command(colony, managerColonyRevision, new ManagementProtocol.Build("colonyloom:stair_strip", new WorldPosition("minecraft:overworld", 8, 64, 8), 0)), "Old manager-revision command was not sent after demotion");
+                advance(214);
+            }
+            case 214 -> {
+                if (client.pending() || !results.containsKey(managerStaleSequence)) return;
+                Result result = results.get(managerStaleSequence).getFirst();
+                require(result.status() == ManagementProtocol.Status.STALE && result.reason().equals("STALE"), "Demoted old-revision command was not STALE: " + result);
+                observation("demoted-manager-stale-revision", true, "Actual old-revision command=" + wire.lastCommand + " result=" + result);
+                press("tab.citizens"); advance(215);
+            }
+            case 215 -> {
+                Row row = citizenRow();
+                if (row == null || !page(ViewType.CITIZENS).rank().equals("viewer") || ticks - phaseTick < 3) return;
+                require(row.name().equals("colonyloom:builder"), "Demotion changed restored citizen profession");
+                select(row, ViewType.CITIZENS); readOnly(ViewType.CITIZENS);
+                managerViewerSequence = client.nextSequence();
+                require(client.command(colony, row.revision(), new ManagementProtocol.AssignProfession(citizen, "colonyloom:carpenter")), "Fresh viewer operational command was not sent");
+                advance(207);
+            }
+            case 207 -> {
+                if (!denied(managerViewerSequence)) return;
+                readOnly(ViewType.CITIZENS);
+                require(citizenRow() != null && citizenRow().name().equals("colonyloom:builder"), "Denied fresh viewer mutation changed original citizen");
+                if (!screenshot("viewer-fresh-operational-denied")) return;
+                observation("demoted-viewer-fresh-command-denied", true, "Actual fresh revision command=" + wire.lastCommand + " result=" + results.get(managerViewerSequence).getFirst() + " unchanged row=" + citizenRow());
+                press("tab.summary"); advance(216);
+            }
+            case 216 -> {
+                if (page(ViewType.SUMMARY) == null || ticks - phaseTick < 3) return;
+                readOnly(ViewType.SUMMARY);
+                signal("viewer-role-ready", "Actual post-demotion viewer SUMMARY/citizen pages and disabled widgets; old-revision STALE and fresh-revision ACCESS_DENIED");
+                advance(10);
             }
             case 11 -> {
                 if (!tabs(true)) return;
@@ -721,6 +839,22 @@ public final class ManagementClientScenario {
                     + " currentPageCitizenRevision=" + (row == null ? "no-page" : row.revision()));
             throw new IllegalStateException("Normal UI command rejected: " + result);
         }
+        return true;
+    }
+
+    private void managerRequest(String name, long sequence, long revision) throws IOException {
+        JsonObject request = new JsonObject();
+        request.addProperty("sessionId", client.sessionId().toString());
+        request.addProperty("sequence", sequence);
+        request.addProperty("revision", revision);
+        atomicSignal(name + "-request", request);
+    }
+
+    private boolean denied(long sequence) {
+        if (client.pending() || !results.containsKey(sequence)) return false;
+        Result result = results.get(sequence).getFirst();
+        require(result.status() == ManagementProtocol.Status.REJECTED && result.reason().equals("ACCESS_DENIED"),
+                "Actual typed forbidden command was not ACCESS_DENIED: " + result);
         return true;
     }
 

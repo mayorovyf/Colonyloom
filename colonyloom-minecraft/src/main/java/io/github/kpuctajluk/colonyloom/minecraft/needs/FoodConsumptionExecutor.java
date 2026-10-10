@@ -41,7 +41,8 @@ public final class FoodConsumptionExecutor {
     private void observe(FaultPoint point,ActionContext context) { if(observer!=null)observer.observe(point,context); }
     public Result consume(WorkOrder work,CoverageShare share,NeedsController needs) {
         if(!server.isSameThread())throw new IllegalStateException("Food consumption requires server thread");
-        registry.requireOwner();var citizen=registry.citizen(work.assignee());var colony=registry.colony(work.colonyId());
+        registry.requireOwner();if(work.assignee()==null||work.state()!=WorkOrder.State.RUNNING)return denied(WorkOrder.Reason.WORKER);var citizen=registry.findCitizen(work.assignee()).orElse(null);if(citizen==null)return denied(WorkOrder.Reason.WORKER);var colony=registry.colony(work.colonyId());
+        long revision=work.revision();
         var entity=storage.currentCitizen(citizen.citizenId(),citizen.bindingEpoch(),share.slot().storage().dimension());
         if(entity==null)return denied(WorkOrder.Reason.CHUNK_NOT_READY);
         var pos=entity.blockPosition();var target=new WorldPosition(share.slot().storage().dimension(),pos.getX(),pos.getY(),pos.getZ());
@@ -63,11 +64,11 @@ public final class FoodConsumptionExecutor {
             try {
                 observe(FaultPoint.BEFORE_EFFECT,context);
                 reason=recheck(context,work,share,citizen,entity,inventory,stack,before,prepared);
-                if(reason!=WorkOrder.Reason.NONE) {registry.effects().discardUnchanged(effect.operationId());return denied(reason);}
+                if(reason!=WorkOrder.Reason.NONE||work.revision()!=revision) {registry.effects().discardUnchanged(effect.operationId());return denied(reason==WorkOrder.Reason.NONE?WorkOrder.Reason.WORKER:reason);}
                 boolean allowed=protection==null||protection.allow(context,colony.ownerId(),fact);
                 reason=recheck(context,work,share,citizen,entity,inventory,stack,before,prepared);
-                if(reason!=WorkOrder.Reason.NONE||!allowed) {
-                    registry.effects().discardUnchanged(effect.operationId());return denied(allowed?reason:WorkOrder.Reason.PERMISSION_DENIED);
+                if(reason!=WorkOrder.Reason.NONE||!allowed||work.revision()!=revision) {
+                    registry.effects().discardUnchanged(effect.operationId());return denied(!allowed?WorkOrder.Reason.PERMISSION_DENIED:reason==WorkOrder.Reason.NONE?WorkOrder.Reason.WORKER:reason);
                 }
                 stack.shrink(1);if(stack.isEmpty())inventory.setItem(share.slot().slot(),ItemStack.EMPTY);inventory.setChanged();
                 observe(FaultPoint.AFTER_SOURCE_CHANGE,context);
@@ -76,7 +77,7 @@ public final class FoodConsumptionExecutor {
                 var observed=new EffectRecord.Food(fact.slot(),fact.item(),fact.shareId(),fact.demandId(),fact.foodBefore(),Math.min(20,fact.foodBefore()+5),fact.timerBefore(),fact.timerBefore());
                 effect=effect.observedFood(observed,after,false);registry.effects().update(effect);
                 observe(FaultPoint.AFTER_FACT_BEFORE_NOTIFY,context);
-                if(guard(context,work,share,citizen,entity)!=WorkOrder.Reason.NONE||storage.currentContainer(share.slot())!=inventory
+                if(work.revision()!=revision||guard(context,work,share,citizen,entity)!=WorkOrder.Reason.NONE||storage.currentContainer(share.slot())!=inventory
                         ||exactCount(inventory,share)!=after||!prepared.unchanged())throw new IllegalStateException("Food fact became stale before publication");
                 prepared.commit(1);needs.consumed(work.id());
                 registry.storage().index().observe(share.slot(),after==0?null:share.item(),after,storage.observationTick());

@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -61,6 +62,7 @@ import net.neoforged.neoforge.event.tick.ServerTickEvent;
 @Mod(value = "colonyloom_tests", dist = Dist.CLIENT)
 public final class IntegratedLifecycleScenario {
     private static final Gson JSON = new Gson();
+    private static final Object RECORD_IO = new Object();
     private static final String ROOT_MARKER = "colonyloom-integrated-lifecycle-owner-root";
     private static final String WORLD_MARKER = "colonyloom-test-world";
     private static final String OWNER = "IntegratedOwner";
@@ -530,8 +532,10 @@ public final class IntegratedLifecycleScenario {
     private boolean serverEvent(String name, String expected) throws IOException { Path file = root.resolve(name); return Files.isRegularFile(file) && jsonFile(name).get("event").getAsString().equals(expected); }
     private JsonObject serverState(String name) throws IOException { return jsonFile(name); }
     private JsonObject jsonFile(String name) throws IOException {
-        Path file = root.resolve(name); require(Files.isRegularFile(file) && Files.size(file) <= 1024 * 1024, "Missing/oversized lifecycle record " + name);
-        return JSON.fromJson(Files.readString(file, StandardCharsets.UTF_8), JsonObject.class);
+        synchronized (RECORD_IO) {
+            Path file = root.resolve(name); require(Files.isRegularFile(file) && Files.size(file) <= 1024 * 1024, "Missing/oversized lifecycle record " + name);
+            return JSON.fromJson(Files.readString(file, StandardCharsets.UTF_8), JsonObject.class);
+        }
     }
     private static boolean contains(List<net.minecraft.world.item.ItemStack> items, net.minecraft.world.item.Item item, int count) { return items.stream().anyMatch(stack -> stack.is(item) && stack.getCount() == count); }
     private static CompoundTag inventoryData(MinecraftServer server, CitizenEntity citizen) {
@@ -570,7 +574,17 @@ public final class IntegratedLifecycleScenario {
         try { synchronized (this) { Files.writeString(root.resolve("observations.jsonl"), object("check", name, "passed", passed, "detail", detail).toString() + "\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND); } }
         catch (IOException failure) { throw new IllegalStateException("Cannot write lifecycle evidence", failure); }
     }
-    private static void writeJson(Path path, JsonObject value) throws IOException { Files.writeString(path, value.toString() + "\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE); }
+    private static void writeJson(Path path, JsonObject value) throws IOException {
+        synchronized (RECORD_IO) {
+            Path temporary = Files.createTempFile(path.getParent(), "colonyloom-integrated-", ".tmp");
+            try {
+                Files.writeString(temporary, value.toString() + "\n", StandardCharsets.UTF_8, StandardOpenOption.WRITE);
+                Files.move(temporary, path, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } finally {
+                Files.deleteIfExists(temporary);
+            }
+        }
+    }
     private static void writeText(Path path, String value) throws IOException { Files.writeString(path, value + "\n", StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE); }
     private static UUID uuidField(String text, String field) { java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(?:^|\\s)" + field + "=([0-9a-fA-F-]{36})(?:\\s|$)").matcher(text); return matcher.find() ? UUID.fromString(matcher.group(1)) : null; }
     private static long longField(String text, String field) { java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("(?:^|\\s)" + field + "=([0-9]+)(?:\\s|$)").matcher(text); if (!matcher.find()) throw new IllegalStateException("Missing " + field + " in accepted command output: " + text); return Long.parseLong(matcher.group(1)); }

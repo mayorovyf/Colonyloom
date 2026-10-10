@@ -178,6 +178,32 @@ final class SupplyPlannerTest {
         assertEquals(0, normal.deficit()); assertEquals(0, normal.snapshot().fulfilled());
     }
 
+    @Test void independentRecipientsUseTheirAssignedLocalWorkshopAndShareOnlyWithinIt() {
+        Fixture f = new Fixture(8,128);
+        var remoteStorage = new StorageId("minecraft:overworld",id(410),0);
+        var remoteAddress = new WorldPosition("minecraft:overworld",24,64,0);
+        var registration = f.registry.storage().register(COLONY,remoteAddress,"workshop",List.of(remoteStorage),List.of(new StockRegion(remoteStorage,0)),List.of(remoteAddress));
+        var remoteWorkshop = f.registry.storage().registerWorkshop(COLONY,new WorldPosition("minecraft:overworld",25,64,0),registration.id());
+        f.registry.addCitizen(new io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord(id(411),COLONY,id(412),1,null,remoteWorkshop.id(),null,"colonyloom:carpenter",Map.of(),Map.of("food",20),io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Lifecycle.ALIVE,io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Admission.ACTIVE,io.github.kpuctajluk.colonyloom.core.citizen.CitizenRecord.Readiness.READY,0,Map.of("food",1200L),remoteAddress,0),proposed->{});
+        var process = recipe("a","a","raw");
+        var local = f.goal(10,"a");
+        var remote = f.supply.request(id(11),COLONY,OWNER,matcher("a"),1,Demand.GoalKind.CONSUMPTION,remoteAddress,Lane.NORMAL,10,0);
+        var localOrder = f.supply.promiseProduction(local.id(),process,1);
+        var remoteOrder = f.supply.promiseProduction(remote.id(),process,1);
+        assertEquals(remoteWorkshop.id(),remoteOrder.workshopId());
+        assertNotEquals(localOrder.id(),remoteOrder.id());
+        assertNotEquals(localOrder.workshopId(),remoteOrder.workshopId());
+        var nextRemote = f.supply.request(id(12),COLONY,OWNER,matcher("a"),1,Demand.GoalKind.CONSUMPTION,remoteAddress,Lane.NORMAL,10,0);
+        assertEquals(remoteOrder.id(),f.supply.promiseProduction(nextRemote.id(),process,1).id());
+        assertEquals(1,local.snapshot().covered());
+        assertEquals(1,remote.snapshot().covered());
+        assertEquals(1,nextRemote.snapshot().covered());
+        f.supply.cancel(remote.id());
+        assertEquals(0,remote.snapshot().covered());
+        assertEquals(1,nextRemote.snapshot().covered());
+        assertEquals(1,local.snapshot().covered());
+    }
+
     @Test void actualPlannerNeverHoldsXForMissingYAndCompetingCompleteKitAdvances() {
         Fixture f = new Fixture(8, 128); Demand blocked = f.goal(10, "a"), ready = f.goal(11, "b");
         var missing = RecipeDefinition.create("colonyloom:a", 1, "colonyloom:carpenter", "minecraft:crafting_table",

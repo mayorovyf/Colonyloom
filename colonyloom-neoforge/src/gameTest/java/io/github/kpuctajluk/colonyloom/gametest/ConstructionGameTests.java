@@ -82,6 +82,16 @@ public final class ConstructionGameTests {
     public static void cancellationAfterTwoRetainsBlocksAndRemainingMaterials(GameTestHelper helper) { run(helper,true); }
     @GameTest(template="identity_empty",batch="stage05_construction",timeoutTicks=600)
     public static void cancellationDuringPhysicalEffectBlocksStaleCursorCommit(GameTestHelper helper) { run(helper,false,true); }
+    @GameTest(template="identity_empty",batch="stage05_construction_detach",timeoutTicks=600)
+    public static void detachedBuilderBeforePlacementKeepsNativeProperty(GameTestHelper helper) { authorityFault(helper,AuthorityFault.DETACH); }
+    @GameTest(template="identity_empty",batch="stage05_construction_reassign",timeoutTicks=600)
+    public static void reassignedBuilderBeforePlacementRejectsOldStep(GameTestHelper helper) { authorityFault(helper,AuthorityFault.REASSIGN); }
+    @GameTest(template="identity_empty",batch="stage05_construction_epoch",timeoutTicks=600)
+    public static void changedBuilderEpochBeforePlacementKeepsNativeProperty(GameTestHelper helper) { authorityFault(helper,AuthorityFault.EPOCH); }
+    @GameTest(template="identity_empty",batch="stage05_construction_fact_detach",timeoutTicks=600)
+    public static void detachedBuilderAfterPlacementFactRetainsRecoveryEvidence(GameTestHelper helper) { authorityFault(helper,AuthorityFault.AFTER_FACT_DETACH); }
+    @GameTest(template="identity_empty",batch="stage05_construction_native_epoch",timeoutTicks=600)
+    public static void changedBuilderEpochAfterNativePlacementRetainsUnknownEvidence(GameTestHelper helper) { authorityFault(helper,AuthorityFault.AFTER_NATIVE_EPOCH); }
     @GameTest(template="identity_empty",batch="stage06_construction",timeoutTicks=600)
     public static void approachingFromTargetSideReachesClearPlacementWaypoint(GameTestHelper helper) { run(helper,false,false,true); }
     @GameTest(template="identity_empty",batch="stage10_construction_retirement",timeoutTicks=600)
@@ -118,7 +128,146 @@ public final class ConstructionGameTests {
     public static void pausedPickupRejectsChangedNativeLastSlotProperty(GameTestHelper helper) {
         run(helper,false,false,false,false,true,true,true,ScanPause.PROPERTY_CHANGED);
     }
+    @GameTest(template="identity_empty",batch="stage14_construction_food_return",timeoutTicks=1000)
+    public static void foodPreemptionReturnsNativeAllocationNearbyInsteadOfFarUuidReceiver(GameTestHelper helper) {
+        foodReturnPreemption(helper,false);
+    }
+    @GameTest(template="identity_empty",batch="stage14_construction_food_return_changes",timeoutTicks=1000)
+    public static void foodPreemptionKeepsCargoAcrossFullRemovedAndVetoedReturns(GameTestHelper helper) {
+        foodReturnPreemption(helper,true);
+    }
+    private static void foodReturnPreemption(GameTestHelper helper,boolean unavailable) {
+        var level=helper.getLevel();var origin=helper.absolutePos(new BlockPos(1,1,1)).above(24);
+        String dim=level.dimension().location().toString();
+        var access=new NeoForgeChunkAccess(level.getServer(),new TicketController(ResourceLocation.parse("colonyloom:runtime")));
+        UUID ticket=UUID.randomUUID();var keys=new java.util.ArrayList<io.github.kpuctajluk.colonyloom.core.chunk.ChunkKey>();
+        Runnable[] closeServices={() -> {}};boolean[] done={false};
+        Runnable[] exercise={null};
+        Runnable cleanup=() -> {
+            if(done[0])return;done[0]=true;closeServices[0].run();
+            for(var key:keys)access.release(ticket,key,ChunkDemandManager.Readiness.ENTITY_TICKING);
+        };
+        helper.testInfo.addListener(new net.minecraft.gametest.framework.GameTestListener() {
+            public void testStructureLoaded(net.minecraft.gametest.framework.GameTestInfo test) {}
+            public void testPassed(net.minecraft.gametest.framework.GameTestInfo test,net.minecraft.gametest.framework.GameTestRunner runner) {cleanup.run();}
+            public void testFailed(net.minecraft.gametest.framework.GameTestInfo test,net.minecraft.gametest.framework.GameTestRunner runner) {
+                var readiness=new java.util.ArrayList<String>();
+                var missingHalo=new java.util.HashSet<String>();
+                for(var key:keys) {
+                    readiness.add(key.x()+","+key.z()+":loaded="+access.ready(key,ChunkDemandManager.Readiness.LOADED)
+                            +",blockTicking="+access.ready(key,ChunkDemandManager.Readiness.BLOCK_TICKING)
+                            +",entityTicking="+access.ready(key,ChunkDemandManager.Readiness.ENTITY_TICKING));
+                    for(int x=key.x()-2;x<=key.x()+2;x++)for(int z=key.z()-2;z<=key.z()+2;z++)
+                        if(level.getChunkSource().getChunkNow(x,z)==null)missingHalo.add(x+","+z);
+                }
+                System.out.println("COLONYLOOM_FOOD_RETURN_FAILURE unavailable="+unavailable+" exerciseInitialized="+(exercise[0]!=null)
+                        +" nativeReadiness="+readiness+" missingLoadedFullHalo="+missingHalo);
+                cleanup.run();
+            }
+            public void testAddedForRerun(net.minecraft.gametest.framework.GameTestInfo original,net.minecraft.gametest.framework.GameTestInfo rerun,net.minecraft.gametest.framework.GameTestRunner runner) {}
+        });
+        for(int x=(origin.getX()-16)>>4;x<=(origin.getX()+38)>>4;x++)for(int z=(origin.getZ()-3)>>4;z<=(origin.getZ()+63)>>4;z++) {
+            var key=new io.github.kpuctajluk.colonyloom.core.chunk.ChunkKey(dim,x,z);keys.add(key);
+            if(!access.acquire(ticket,key,ChunkDemandManager.Readiness.ENTITY_TICKING))throw new IllegalStateException("Food return fixture ticket denied");
+        }
+        helper.onEachTick(() -> {
+            if(done[0])return;
+            if(exercise[0]!=null) {exercise[0].run();return;}
+            // Pump only the existing tickets' FULL halo before asking for native entity ticking.
+            // Unpaced GameTest ticks can otherwise exhaust setup while cold generation is pending.
+            for(var key:keys)for(int x=key.x()-2;x<=key.x()+2;x++)for(int z=key.z()-2;z<=key.z()+2;z++)
+                if(level.getChunkSource().getChunk(x,z,net.minecraft.world.level.chunk.status.ChunkStatus.FULL,false)==null)return;
+            if(!keys.stream().allMatch(key -> access.ready(key,ChunkDemandManager.Readiness.ENTITY_TICKING)))return;
+            for(int x=-16;x<=38;x++)for(int z=-3;z<=63;z++) {
+                var feet=origin.offset(x,0,z);level.setBlockAndUpdate(feet.below(),Blocks.STONE.defaultBlockState());
+                for(int y=0;y<3;y++)level.setBlockAndUpdate(feet.above(y),Blocks.AIR.defaultBlockState());
+            }
+            var registry=new ColonyRegistry(() -> {if(!level.getServer().isSameThread())throw new IllegalStateException("Food return fixture owner");});
+            registry.budgets().beginTick(0);
+            UUID colony=UUID.randomUUID(),citizen=UUID.randomUUID(),owner=UUID.randomUUID();
+            registry.addColony(new ColonyRuntime(colony,"Cargo-safe food return",new Territory(dim,origin.getX()-16,origin.getZ()-3,origin.getX()+38,origin.getZ()+63),owner,Map.of(),1,1,false,null,false));
+            var entity=(CitizenEntity)BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.parse("colonyloom:citizen")).create(level);
+            closeServices[0]=() -> {if(entity!=null)entity.remove(Entity.RemovalReason.DISCARDED);};
+            if(entity==null)throw new IllegalStateException("Food return citizen unavailable");
+            entity.initializeIdentity(citizen,1);entity.moveTo(origin.getX()+0.5,origin.getY(),origin.getZ()+0.5,0,0);
+            entity.inventory().setItem(0,new ItemStack(Items.OAK_STAIRS,4));
+            registry.addCitizen(new CitizenRecord(citizen,colony,entity.getUUID(),1,null,null,null,"colonyloom:builder",Map.of(),Map.of("food",20),CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.READY,0,Map.of(),position(dim,origin),1),record -> {
+                if(!level.addFreshEntity(entity))throw new IllegalStateException("Food return spawn refused");
+            });
+            registry.bindings().observe(citizen,entity.getUUID(),1);entity.setQuarantined(false);
+            var storage=new io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService(level.getServer(),registry,registry.budgets(),new io.github.kpuctajluk.colonyloom.neoforge.NeoForgeStorageIdentity());
+            var far=origin.offset(35,0,59);var near=unavailable?origin.offset(12,0,0):origin.offset(-13,0,59);
+            var full=origin.offset(4,0,0);var removed=origin.offset(6,0,0);var vetoed=origin.offset(8,0,0);
+            var registrations=new java.util.ArrayList<io.github.kpuctajluk.colonyloom.core.storage.StorageRegistry.Registration>();
+            for(var target:unavailable?java.util.List.of(far,near,full,removed,vetoed):java.util.List.of(far,near)) {
+                level.setBlockAndUpdate(target,Blocks.BARREL.defaultBlockState());
+                var registered=storage.register(colony,position(dim,target),"return");
+                // Native storage identities stay real; explicit registration IDs make UUID ordering deterministic.
+                UUID id=target.equals(far)?new UUID(Long.MIN_VALUE,0):new UUID(0,registrations.size()+1);
+                registrations.add(new io.github.kpuctajluk.colonyloom.core.storage.StorageRegistry.Registration(id,colony,registered.address(),registered.role(),registered.storages(),registered.slots(),registered.revision(),registered.positions()));
+            }
+            var snapshot=new io.github.kpuctajluk.colonyloom.core.storage.StorageSnapshot(registrations,java.util.List.of(),java.util.List.of(),java.util.List.of(),java.util.List.of());
+            try(var restored=registry.storage().prepareRestore(snapshot,registry.admission(),registry.colonies())) {restored.commit();}
+            var inventory=storage.registerCitizen(colony,citizen,"construction");var source=inventory.slots().getFirst();
+            var item=io.github.kpuctajluk.colonyloom.minecraft.storage.NativeItemDescriptor.describe(entity.inventory().getItem(0),level.registryAccess());
+            registry.storage().index().observe(source,item,4,0);
+            var work=registry.workBoard().createConstruction(UUID.randomUUID(),colony,position(dim,origin.south()),0,Lane.NORMAL);
+            registry.workBoard().transition(work.id(),WorkOrder.State.READY,WorkOrder.Reason.NONE,"construction");
+            helper.assertTrue(registry.workBoard().assign(work.id(),citizen),"Cargo-bearing builder assignment refused");
+            registry.workBoard().waitAssigned(work.id(),WorkOrder.Reason.BUDGET,"construction");
+            registry.updateCitizen(registry.citizen(citizen).withFood(0));
+            var demand=registry.supply().request(UUID.randomUUID(),colony,work.id(),new io.github.kpuctajluk.colonyloom.core.supply.ItemMatcher(item.itemId(),item),4,io.github.kpuctajluk.colonyloom.core.supply.Demand.GoalKind.CONSUMPTION,work.target(),Lane.NORMAL,0,0);
+            var share=registry.supply().allocateStock(demand.id(),source,item,4,0);
+            if(unavailable)for(int slot=0;slot<27;slot++)((net.minecraft.world.Container)level.getBlockEntity(full)).setItem(slot,new ItemStack(Items.COBBLESTONE,64));
+            int[] vetoes={0};
+            var transfer=new io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor(level.getServer(),registry,storage,(context,principal,from,to,amount) -> {
+                if(unavailable&&context.target().equals(position(dim,vetoed))) {vetoes[0]++;return false;}return true;
+            },() -> new UUID(1,2),null);
+            var chunks=new ChunkDemandManager(registry,registry.budgets(),access);
+            var delivery=new io.github.kpuctajluk.colonyloom.minecraft.storage.MinecraftDeliveryService(level.getServer(),registry,storage,transfer,chunks);
+            var backend=new MinecraftNavigationBackend(level.getServer(),registry,chunks,delivery);
+            WorldPosition[] requested={null};
+            var navigation=new NavigationService(registry,registry.budgets(),chunks,new NavigationService.Backend() {
+                public WorldPosition position(NavigationService.Request request) {requested[0]=request.target();return backend.position(request);}
+                public NavigationService.SearchResult search(NavigationService.Request request,java.util.List<io.github.kpuctajluk.colonyloom.core.chunk.ChunkKey> region) {return backend.search(request,region);}
+                public boolean apply(NavigationService.Request request,NavigationService.Route route,java.util.function.BooleanSupplier current) {return backend.apply(request,route,current);}
+                public NavigationService.Motion poll(NavigationService.Request request) {return backend.poll(request);}
+                public void stop(NavigationService.Request request) {backend.stop(request);}
+            },delivery);delivery.navigation(navigation);
+            closeServices[0]=() -> {navigation.close();delivery.close();chunks.close();entity.remove(Entity.RemovalReason.DISCARDED);};
+            long[] tick={0};boolean[] removedDuringRoute={false},walked={false},capacityWait={false},permissionWait={false};
+            exercise[0]=() -> {
+                registry.budgets().beginTick(++tick[0]);chunks.tick(tick[0]);navigation.tick(tick[0]);
+                boolean released=delivery.requestFoodPreemption(registry.citizen(citizen));
+                if(work.waitingReason()==WorkOrder.Reason.CAPACITY)capacityWait[0]=true;
+                if(work.waitingReason()==WorkOrder.Reason.PERMISSION_DENIED)permissionWait[0]=true;
+                if(entity.distanceToSqr(origin.getX()+0.5,origin.getY(),origin.getZ()+0.5)>4)walked[0]=true;
+                if(unavailable&&!removedDuringRoute[0]&&requested[0]!=null&&Math.abs(requested[0].x()-removed.getX())<=2&&Math.abs(requested[0].z()-removed.getZ())<=2) {
+                    var obsolete=registrations.stream().filter(r -> r.address().equals(position(dim,removed))).findFirst().orElseThrow();
+                    registry.storage().register(colony,obsolete.address(),"warehouse",obsolete.storages(),obsolete.slots(),obsolete.positions());
+                    level.setBlockAndUpdate(removed,Blocks.AIR.defaultBlockState());removedDuringRoute[0]=true;
+                }
+                helper.assertTrue(work.waitingReason()!=WorkOrder.Reason.WORKING_SET_LIMIT,"Unload selected a far UUID-ranked return outside the unchanged route envelope");
+                var held=registry.supply().demandShares(demand.id());
+                helper.assertTrue(held.stream().allMatch(s -> s.stage()==io.github.kpuctajluk.colonyloom.core.supply.CoverageShare.Stage.ALLOCATED)&&held.stream().mapToLong(s -> s.quantity()).sum()==4&&demand.snapshot().allocated()==4&&demand.snapshot().fulfilled()==0,"Food preemption released or spent construction ownership");
+                int deposited=((net.minecraft.world.Container)level.getBlockEntity(near)).getItem(0).getCount();
+                helper.assertTrue(entity.inventory().getItem(0).getCount()+deposited==4&&((net.minecraft.world.Container)level.getBlockEntity(far)).isEmpty(),"Unload lost cargo or used arbitrary far return");
+                if(!released) {helper.assertTrue(work.id().equals(registry.citizen(citizen).assignedWorkId()),"Food preemption released cargo-bearing builder");return;}
+                helper.assertTrue(walked[0]&&deposited==4&&entity.inventory().isEmpty(),"Native builder did not walk and unload four real materials");
+                if(unavailable)helper.assertTrue(capacityWait[0]&&permissionWait[0]&&removedDuringRoute[0]&&vetoes[0]>0,"Unavailable receiver regression did not exercise typed full wait, removal and authority veto");
+                helper.assertTrue(held.size()==1&&held.getFirst().id().equals(share.id())&&held.getFirst().slot().storage().bindingEpoch()==0,"Allocation identity/custody was not preserved in registered storage");
+                var food=registry.workBoard().createFood(UUID.randomUUID(),citizen);registry.workBoard().transition(food.id(),WorkOrder.State.READY,WorkOrder.Reason.NONE,"food");
+                helper.assertTrue(registry.workBoard().assign(food.id(),citizen),"Safely unloaded citizen did not become available for food");
+                cleanup.run();
+                helper.succeed();
+            };
+        });
+    }
     private enum ScanPause { NONE,CARRIED,PICKUP,SOURCE_CHANGED,PROPERTY_CHANGED }
+    private enum AuthorityFault { NONE,DETACH,REASSIGN,EPOCH,AFTER_FACT_DETACH,AFTER_NATIVE_EPOCH }
+    private static void authorityFault(GameTestHelper helper,AuthorityFault fault) {
+        run(helper,false,false,false,false,false,false,false,ScanPause.NONE,0,fault);
+    }
     private static void run(GameTestHelper helper,boolean cancel) {
         run(helper,cancel,false);
     }
@@ -141,6 +290,9 @@ public final class ConstructionGameTests {
         run(helper,cancel,staleCommit,approachAcrossTarget,retire,lowQuota,buffered,suspended,scanPause,0);
     }
     private static void run(GameTestHelper helper,boolean cancel,boolean staleCommit,boolean approachAcrossTarget,boolean retire,boolean lowQuota,boolean buffered,boolean suspended,ScanPause scanPause,int rotation) {
+        run(helper,cancel,staleCommit,approachAcrossTarget,retire,lowQuota,buffered,suspended,scanPause,rotation,AuthorityFault.NONE);
+    }
+    private static void run(GameTestHelper helper,boolean cancel,boolean staleCommit,boolean approachAcrossTarget,boolean retire,boolean lowQuota,boolean buffered,boolean suspended,ScanPause scanPause,int rotation,AuthorityFault authorityFault) {
         var level=helper.getLevel();
         // Keep the same X/Z footprint and charged chunk domain; only unrelated native collisions change.
         var origin=helper.absolutePos(new BlockPos(1,1,1)).above(suspended?16:0);
@@ -179,8 +331,28 @@ public final class ConstructionGameTests {
             controller.definitions(Map.of(definition.id(),definition));blueprintId=definition.id();
         }
         var chunks=new ChunkDemandManager(core.registry(),core.budgets(),new NeoForgeChunkAccess(level.getServer(),new TicketController(ResourceLocation.parse("colonyloom:runtime"))));
+        boolean[] authorityChanged={false};
+        UUID[] faultWork={null};
         var placement=new BlockPlacementExecutor(level.getServer(),core.registry(),new NeoForgeItemInteraction(id -> id.equals(owner)?new GameProfile(owner,"ConstructionFixture"):null),(point,context) -> {
             if(staleCommit && point==BlockPlacementExecutor.FaultPoint.BEFORE_EFFECT_COMMIT) core.workBoard().cancel(core.registry().citizen(citizen).assignedWorkId());
+            if(authorityFault==AuthorityFault.NONE||authorityChanged[0])return;
+            var boundary=authorityFault==AuthorityFault.AFTER_FACT_DETACH?BlockPlacementExecutor.FaultPoint.AFTER_FACT_BEFORE_NOTIFY
+                    :authorityFault==AuthorityFault.AFTER_NATIVE_EPOCH?BlockPlacementExecutor.FaultPoint.AFTER_BLOCK_CHANGE
+                    :BlockPlacementExecutor.FaultPoint.BEFORE_BLOCK_CHANGE;
+            if(point!=boundary)return;
+            var record=core.registry().citizen(citizen);
+            var assigned=core.workBoard().work(record.assignedWorkId());faultWork[0]=assigned.id();
+            authorityChanged[0]=true;
+            if(authorityFault==AuthorityFault.EPOCH||authorityFault==AuthorityFault.AFTER_NATIVE_EPOCH)
+                core.registry().updateCitizen(record.withBinding(record.entityId(),record.bindingEpoch()+1));
+            else {
+                core.workBoard().releaseAssignment(assigned.id());
+                if(authorityFault==AuthorityFault.REASSIGN) {
+                    core.workBoard().transition(assigned.id(),WorkOrder.State.READY,WorkOrder.Reason.NONE,"construction");
+                    helper.assertTrue(core.workBoard().assign(assigned.id(),citizen),"Callback could not canonically reassign original builder");
+                    core.workBoard().transition(assigned.id(),WorkOrder.State.RUNNING,WorkOrder.Reason.NONE,"construction");
+                }
+            }
         });
         var storage=new io.github.kpuctajluk.colonyloom.minecraft.storage.StorageService(level.getServer(),core.registry(),core.budgets(),new io.github.kpuctajluk.colonyloom.neoforge.NeoForgeStorageIdentity());
         var transfer=new io.github.kpuctajluk.colonyloom.minecraft.storage.StorageTransferExecutor(level.getServer(),core.registry(),storage,(context,principal,source,destination,amount) -> true,() -> new UUID(1,2),null);
@@ -286,6 +458,21 @@ public final class ConstructionGameTests {
             if(phase[0]==2) return;
             int priorCursor=core.registry().construction().site(work.id()).cursor();
             core.tick(core.serverTick()+1); var site=core.registry().construction().site(work.id());
+            if(authorityChanged[0]) {
+                boolean changedNative=authorityFault==AuthorityFault.AFTER_FACT_DETACH||authorityFault==AuthorityFault.AFTER_NATIVE_EPOCH;
+                helper.assertTrue(work.id().equals(faultWork[0])&&site.cursor()==0&&site.consumed()==0,"Old captured step published construction progress");
+                helper.assertTrue(changedNative?level.getBlockState(origin).is(Blocks.OAK_STAIRS):level.getBlockState(origin).isAir(),"Authority boundary changed unexpected native block property");
+                helper.assertTrue(entity.inventory().getItem(0).getCount()==(changedNative?3:4),"Authority boundary spent or compensated native material");
+                if(changedNative) {
+                    var facts=core.registry().effects().snapshots();
+                    helper.assertTrue(facts.size()==1&&facts.getFirst().workId().equals(work.id())&&facts.getFirst().citizenId().equals(citizen)
+                            &&facts.getFirst().bindingEpoch()==1&&facts.getFirst().state()==io.github.kpuctajluk.colonyloom.core.action.EffectRecord.State.AMBIGUOUS
+                            &&core.registry().colony(colony).recoveryBlocked(),"After-effect authority loss discarded original recovery fact");
+                    if(authorityFault==AuthorityFault.AFTER_FACT_DETACH)helper.assertTrue(facts.getFirst().countAfter()==3,"Exact observed material fact was overwritten after detach");
+                } else helper.assertTrue(core.registry().effects().snapshots().isEmpty()&&!core.registry().colony(colony).recoveryBlocked(),"Proven unchanged stale step retained effect or demanded recovery");
+                if(authorityFault==AuthorityFault.REASSIGN)helper.assertTrue(citizen.equals(work.assignee())&&work.id().equals(core.registry().citizen(citizen).assignedWorkId()),"Stale guard cancelled successor assignment");
+                phase[0]=2;navigation.close();service.close();chunks.close();entity.remove(Entity.RemovalReason.DISCARDED);core.beginStopping();core.stop();helper.succeed();return;
+            }
             if(scanPause==ScanPause.SOURCE_CHANGED&&changedScanGuard[0]) {
                 var supply=core.registry().supply();
                 var demand=supply.demands().stream().filter(value -> value.snapshot().ownerId().equals(work.id())).findFirst().orElseThrow();

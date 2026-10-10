@@ -78,22 +78,21 @@ public final class NavigationService implements AutoCloseable {
         final Request request;
         final long created;
         final AdmissionLedger.Lease lease;
-        AdmissionLedger.Lease routeLease;
-        final List<ChunkKey> region;
-        final Bucket[] buckets;
-        final long[] revisions;
+        AdmissionLedger.Lease routeLease, domainLease;
+        List<ChunkKey> region = List.of();
+        Bucket[] buckets = new Bucket[0];
+        long[] revisions = new long[0];
         Entry previous, next, lanePrevious, laneNext;
         long polledTick=Long.MIN_VALUE;
         long searchedTick=Long.MIN_VALUE, startOrder;
         State state = State.WAITING;
         Reason reason = Reason.CHUNK_NOT_READY;
-        boolean queued, deferred, capacityWaiting, domainReleased;
+        boolean queued, deferred, capacityWaiting, domainReleased,cancelling,backendOwned,backendCall,stopPending,releasePending;
         int failures;
         long retryAt;
         BooleanSupplier validity;
-        Entry(Request request, long created, AdmissionLedger.Lease lease, List<ChunkKey> region) {
-            this.request=request; this.created=created; this.lease=lease; this.region=region;
-            buckets=new Bucket[region.size()]; revisions=new long[region.size()];
+        Entry(Request request, long created, AdmissionLedger.Lease lease) {
+            this.request=request; this.created=created; this.lease=lease;
         }
     }
     public NavigationService(ColonyRegistry registry, GlobalWorkBudgets budgets, ChunkDemandManager chunks, Backend backend) {
@@ -110,8 +109,9 @@ public final class NavigationService implements AutoCloseable {
             Request current=existing.request;
             if (current.colonyId().equals(colonyId) && current.citizenId().equals(citizenId) && current.epoch()==epoch
                     && current.goalRevision()==goalRevision && current.target().equals(target) && current.lane()==lane && current.priority()==priority) {
-                if (authoritative(current)) return current.id();
-                cancel(workId); return null;
+                if(authoritative(current)&&requests.get(workId)==existing)return current.id();
+                if(requests.get(workId)==existing)cancel(workId);
+                return null;
             }
         }
         return request(new Request(UUID.randomUUID(),workId,colonyId,citizenId,epoch,goalRevision,target,lane,priority));
@@ -119,31 +119,32 @@ public final class NavigationService implements AutoCloseable {
     public UUID request(Request request) {
         registry.requireOwner();
         Entry old=requests.get(request.workId());
-        if (!authoritative(request)) { if (old!=null) cancel(request.workId()); return null; }
-        if (old!=null && sameGoal(old.request,request)) return old.request.id();
+        if (!authoritative(request)) { if (old!=null && requests.get(request.workId())==old) cancel(request.workId()); return null; }
+        if(requests.get(request.workId())!=old)return null;
+        if(old!=null&&sameGoal(old.request,request))return old.request.id();
         WorldPosition start=backend.position(request);
-        if (start==null) start=registry.citizen(request.citizenId()).lastKnownPosition();
+        if(!authoritative(request)||requests.get(request.workId())!=old)return null;
+        if(start==null)start=registry.citizen(request.citizenId()).lastKnownPosition();
         List<ChunkKey> region=region(start,request.target());
-        if (old!=null) cancel(request.workId());
-        AdmissionLedger.Lease lease=registry.admission().reserve(request.workId(),request.lane(),
-                Map.of(Resource.CACHE_ENTRIES,1+region.size()*2,Resource.CACHE_ENTRIES_PER_OWNER,1+region.size()*2));
-        try {
-            if (!region.isEmpty()) chunks.request(request.workId(),request.colonyId(),region,ChunkDemandManager.Readiness.ENTITY_TICKING,
-                    request.lane(),request.priority(),true);
-        } catch (RuntimeException failure) { lease.close(); chunks.release(request.workId()); throw failure; }
-        Entry entry=new Entry(request,now,lease,region);
-        entry.validity=() -> valid(entry);
-        for (int i=0;i<region.size();i++) {
-            Bucket bucket=index.computeIfAbsent(region.get(i), ignored -> new Bucket());
-            bucket.references++; entry.buckets[i]=bucket; entry.revisions[i]=bucket.revision;
-        }
+        if(old!=null)cancel(request.workId());
+        if(!authoritative(request)||requests.containsKey(request.workId()))return null;
+        AdmissionLedger.Lease lease=registry.admission().reserve(request.workId(),request.lane(),Map.of(Resource.CACHE_ENTRIES,1,Resource.CACHE_ENTRIES_PER_OWNER,1));
+        Entry entry=new Entry(request,now,lease);entry.validity=() -> valid(entry)&&authoritative(request)
+                &&chunks.admitted(request.workId())&&chunks.ready(request.workId())&&valid(entry)&&authoritative(request);
         requests.put(request.workId(),entry);
-        if (head==null) { head=entry; entry.next=entry; entry.previous=entry; }
-        else { entry.previous=head.previous; entry.next=head; head.previous.next=entry; head.previous=entry; }
-        int lane=request.lane().ordinal(); Entry laneHead=laneHeads[lane];
-        if (laneHead==null) { laneHeads[lane]=entry; laneCursors[lane]=entry; entry.laneNext=entry; entry.lanePrevious=entry; }
-        else { entry.lanePrevious=laneHead.lanePrevious; entry.laneNext=laneHead; laneHead.lanePrevious.laneNext=entry; laneHead.lanePrevious=entry; }
-        if (region.isEmpty()) entry.reason=Reason.WORKING_SET_LIMIT;
+        if(head==null){head=entry;entry.next=entry;entry.previous=entry;}
+        else{entry.previous=head.previous;entry.next=head;head.previous.next=entry;head.previous=entry;}
+        int lane=request.lane().ordinal();Entry laneHead=laneHeads[lane];
+        if(laneHead==null){laneHeads[lane]=entry;laneCursors[lane]=entry;entry.laneNext=entry;entry.lanePrevious=entry;}
+        else{entry.lanePrevious=laneHead.lanePrevious;entry.laneNext=laneHead;laneHead.lanePrevious.laneNext=entry;laneHead.lanePrevious=entry;}
+        try{admitDomain(entry,region);}
+        catch(RuntimeException|Error failure) {
+            try {if(current(entry))cancel(request.workId());}
+            catch(RuntimeException|Error cleanup) {failure.addSuppressed(cleanup);}
+            throw failure;
+        }
+        if(!owned(entry))return null;
+        if(region.isEmpty())entry.reason=Reason.WORKING_SET_LIMIT;
         return request.id();
     }
     private static boolean sameGoal(Request a,Request b) {
@@ -163,8 +164,13 @@ public final class NavigationService implements AutoCloseable {
         return List.copyOf(keys);
     }
     private boolean rebuildDisplacedDomain(Entry entry) {
-        WorldPosition position=backend.position(entry.request);
-        if (position==null) return false;
+        WorldPosition position;
+        Throwable failure=null;entry.backendCall=true;
+        try {position=backend.position(entry.request);}
+        catch(RuntimeException|Error thrown) {failure=thrown;throw thrown;}
+        finally {finishBackendCall(entry,failure);}
+        if(!owned(entry))return true;
+        if(position==null)return false;
         WorldPosition target=entry.request.target();
         long dx=(long)position.x()-target.x(),dy=(long)position.y()-target.y(),dz=(long)position.z()-target.z();
         int minX=(Math.min(position.x(),target.x())-2)>>4,maxX=(Math.max(position.x(),target.x())+2)>>4;
@@ -173,9 +179,50 @@ public final class NavigationService implements AutoCloseable {
                 && Math.abs(dz)<=64 && dx*dx+dy*dy+dz*dz<=4096 && (long)(maxX-minX+1)*(maxZ-minZ+1)<=81;
         if (bounded ? !entry.region.isEmpty() && entry.region.getFirst().x()==minX && entry.region.getFirst().z()==minZ
                 && entry.region.getLast().x()==maxX && entry.region.getLast().z()==maxZ : entry.region.isEmpty()) return false;
-        Request request=entry.request;
-        cancel(request.workId());request(request);
+        // A ready charged envelope still covers an inward displacement; replacing it would
+        // discard a valid grant and force the same continuation through admission again.
+        if(bounded&&!entry.region.isEmpty()&&!entry.domainReleased&&chunks.admitted(entry.request.workId())&&chunks.ready(entry.request.workId())
+                &&entry.region.getFirst().x()<=minX&&entry.region.getFirst().z()<=minZ
+                &&entry.region.getLast().x()>=maxX&&entry.region.getLast().z()>=maxZ)return false;
+        stop(entry);
+        if(!owned(entry))return true;
+        releaseDomain(entry);
+        if(!owned(entry))return true;
+        try { admitDomain(entry,region(position,target)); }
+        catch (AdmissionLedger.AdmissionException denied) {
+            if(current(entry))entry.reason=denied.reason()==AdmissionLedger.Reason.CRITICAL_CAPACITY?Reason.CRITICAL_CAPACITY:Reason.STATE_LIMIT;
+        }
         return true;
+    }
+    private void admitDomain(Entry entry,List<ChunkKey> region) {
+        if (region.isEmpty()) { entry.reason=Reason.WORKING_SET_LIMIT; return; }
+        entry.domainLease=registry.admission().reserve(entry.request.workId(),entry.request.lane(),
+                Map.of(Resource.CACHE_ENTRIES,region.size()*2,Resource.CACHE_ENTRIES_PER_OWNER,region.size()*2));
+        entry.region=region;entry.buckets=new Bucket[region.size()];entry.revisions=new long[region.size()];
+        for (int i=0;i<region.size();i++) {
+            Bucket bucket=index.computeIfAbsent(region.get(i), ignored -> new Bucket());
+            bucket.references++;entry.buckets[i]=bucket;entry.revisions[i]=bucket.revision;
+        }
+        entry.domainReleased=true;
+        try {
+            chunks.request(entry.request.workId(),entry.request.colonyId(),region,ChunkDemandManager.Readiness.ENTITY_TICKING,
+                    entry.request.lane(),entry.request.priority(),true);
+            if(!owned(entry))return;
+            entry.domainReleased=false;entry.reason=Reason.CHUNK_NOT_READY;
+        } catch (AdmissionLedger.AdmissionException denied) {
+            if(current(entry))entry.reason=denied.reason()==AdmissionLedger.Reason.CRITICAL_CAPACITY?Reason.CRITICAL_CAPACITY:Reason.STATE_LIMIT;
+            else return;
+        }
+    }
+    private void releaseDomain(Entry entry) {
+        List<ChunkKey> region=entry.region;Bucket[] buckets=entry.buckets;AdmissionLedger.Lease lease=entry.domainLease;
+        entry.domainReleased=true;entry.region=List.of();entry.buckets=new Bucket[0];entry.revisions=new long[0];entry.domainLease=null;
+        boolean releasedCurrent=requests.get(entry.request.workId())==entry;
+        try {if(releasedCurrent)chunks.release(entry.request.workId());}
+        finally {
+            for(int i=0;i<region.size();i++)if(--buckets[i].references==0)index.remove(region.get(i),buckets[i]);
+            if(lease!=null)lease.close();
+        }
     }
     private boolean authoritative(Request request) {
         CitizenRecord citizen=registry.findCitizen(request.citizenId()).orElse(null);
@@ -230,101 +277,140 @@ public final class NavigationService implements AutoCloseable {
     }
     /** One paid request continuation; only a ready waiting request proceeds to a search. */
     private boolean poll(Entry entry) {
-        if (entry.state==State.ARRIVED) return false;
-        if (!authoritative(entry.request)) { cancel(entry.request.workId()); return false; }
+        if(!current(entry)||entry.state==State.ARRIVED)return false;
+        if(!authoritative(entry.request)) {cancel(entry.request.workId());return false;}
         refreshRevisions(entry);
-        // Waiting/backoff owns no motion; displacement invalidates its old search domain too.
-        if (entry.state==State.WAITING && rebuildDisplacedDomain(entry)) return false;
-        if (entry.region.isEmpty()) return false;
+        if(!current(entry))return false;
+        if(entry.state==State.WAITING&&rebuildDisplacedDomain(entry))return false;
+        if(!current(entry)||entry.region.isEmpty())return false;
         if(entry.domainReleased) {
             if(now<entry.retryAt)return false;
             try {
                 chunks.request(entry.request.workId(),entry.request.colonyId(),entry.region,ChunkDemandManager.Readiness.ENTITY_TICKING,
                         entry.request.lane(),entry.request.priority(),true);
+                if(!owned(entry))return false;
                 entry.domainReleased=false;
             } catch(AdmissionLedger.AdmissionException denied) {
-                entry.reason=denied.reason()==AdmissionLedger.Reason.CRITICAL_CAPACITY?Reason.CRITICAL_CAPACITY:Reason.STATE_LIMIT;return false;
+                if(current(entry))entry.reason=denied.reason()==AdmissionLedger.Reason.CRITICAL_CAPACITY?Reason.CRITICAL_CAPACITY:Reason.STATE_LIMIT;
+                return false;
             }
         }
-        if (!chunks.admitted(entry.request.workId()) || !chunks.ready(entry.request.workId())) {
-            stop(entry);
-            entry.reason=chunks.state(entry.request.workId())==ChunkDemandManager.State.BLOCKED
-                    ? Reason.WORKING_SET_LIMIT : Reason.CHUNK_NOT_READY; return false;
+        if(!current(entry))return false;
+        if(!chunks.admitted(entry.request.workId())||!chunks.ready(entry.request.workId())) {
+            stop(entry);if(!current(entry))return false;
+            entry.reason=chunks.state(entry.request.workId())==ChunkDemandManager.State.BLOCKED?Reason.WORKING_SET_LIMIT:Reason.CHUNK_NOT_READY;
+            return false;
         }
-        if (entry.state!=State.MOVING) return now>=entry.retryAt && entry.searchedTick!=now;
-        long pollStart=System.nanoTime();
-        Motion motion;
-        try { motion=backend.poll(entry.request); }
-        finally { registry.metrics().record(Timer.NAVIGATION_POLL,System.nanoTime()-pollStart); }
-        if (motion==Motion.ARRIVED) {
-            stop(entry); entry.state=State.ARRIVED; entry.reason=Reason.NONE; chunks.release(entry.request.workId());
-            removePollEntry(entry);
-        } else if (motion==Motion.OBSTRUCTED) retry(entry,Reason.RECONCILING);
-        else if (motion==Motion.UNAVAILABLE) {
-            stop(entry); entry.reason=Reason.RECONCILING;
-            rebuildDisplacedDomain(entry);
+        if(!owned(entry))return false;
+        if(entry.state==State.WAITING)return now>=entry.retryAt;
+        long pollStart=System.nanoTime();Motion motion;
+        Throwable failure=null;entry.backendCall=true;
+        try {motion=backend.poll(entry.request);}
+        catch(RuntimeException|Error thrown) {failure=thrown;throw thrown;}
+        finally {
+            registry.metrics().record(Timer.NAVIGATION_POLL,System.nanoTime()-pollStart);
+            finishBackendCall(entry,failure);
         }
-        else chunks.useful(entry.request.workId());
+        if(!owned(entry))return false;
+        if(!chunks.admitted(entry.request.workId())||!chunks.ready(entry.request.workId())) {
+            stop(entry);if(!current(entry))return false;
+            entry.reason=chunks.state(entry.request.workId())==ChunkDemandManager.State.BLOCKED?Reason.WORKING_SET_LIMIT:Reason.CHUNK_NOT_READY;
+            return false;
+        }
+        if(!owned(entry))return false;
+        if(motion==Motion.ARRIVED) {
+            stop(entry);if(!current(entry))return false;
+            entry.state=State.ARRIVED;entry.reason=Reason.NONE;
+            chunks.release(entry.request.workId());if(!owned(entry))return false;
+            entry.domainReleased=true;removePollEntry(entry);
+        } else if(motion==Motion.OBSTRUCTED)retry(entry,Reason.RECONCILING);
+        else if(motion==Motion.UNAVAILABLE) {
+            stop(entry);if(!current(entry))return false;
+            entry.reason=Reason.RECONCILING;rebuildDisplacedDomain(entry);
+        } else {
+            chunks.useful(entry.request.workId());
+            if(!owned(entry))return false;
+        }
         return false;
     }
     private void search(Entry entry) {
-        if (!current(entry) || entry.searchedTick==now) return;
-        if (!authoritative(entry.request)) { cancel(entry.request.workId()); return; }
-        if (rebuildDisplacedDomain(entry)) return;
-        refreshRevisions(entry);
-        if (!chunks.admitted(entry.request.workId()) || !chunks.ready(entry.request.workId())) {
-            stop(entry);
-            entry.reason=chunks.state(entry.request.workId())==ChunkDemandManager.State.BLOCKED
-                    ? Reason.WORKING_SET_LIMIT : Reason.CHUNK_NOT_READY; return;
-        }
-        SearchResult result;
-        entry.searchedTick=now;
-        entry.polledTick=now;
-        long begin=System.nanoTime();
-        searchCount++;
-        try { result=Objects.requireNonNull(backend.search(entry.request,entry.region)); }
-        finally {
-            lastSearchNanos=System.nanoTime()-begin; maxSearchNanos=Math.max(maxSearchNanos,lastSearchNanos);
-            registry.metrics().record(Timer.NAVIGATION_EXTERNAL,lastSearchNanos);
-        }
-        boolean stale=!current(entry) || !authoritative(entry.request) || !chunks.admitted(entry.request.workId())
-                || !chunks.ready(entry.request.workId()) || !valid(entry);
-        if (stale) {
-            staleResults++;
-            if (current(entry)) {
-                stop(entry); entry.retryAt=now;
-                if (!authoritative(entry.request)) cancel(entry.request.workId());
-            }
+        if(!current(entry)||entry.searchedTick==now)return;
+        if(!authoritative(entry.request)){cancel(entry.request.workId());return;}
+        if(rebuildDisplacedDomain(entry)||!current(entry))return;
+        refreshRevisions(entry);if(!current(entry))return;
+        if(!chunks.admitted(entry.request.workId())||!chunks.ready(entry.request.workId())) {
+            stop(entry);if(!current(entry))return;
+            entry.reason=chunks.state(entry.request.workId())==ChunkDemandManager.State.BLOCKED?Reason.WORKING_SET_LIMIT:Reason.CHUNK_NOT_READY;
             return;
         }
-        if (result==SearchOutcome.PENDING || result==SearchOutcome.CAPACITY_WAIT) {
-            entry.capacityWaiting=result==SearchOutcome.CAPACITY_WAIT; enqueue(entry); return;
+        if(!owned(entry))return;
+        SearchResult result;entry.searchedTick=now;entry.polledTick=now;
+        long begin=System.nanoTime();searchCount++;
+        Throwable failure=null;entry.backendCall=true;entry.backendOwned=true;
+        try {result=Objects.requireNonNull(backend.search(entry.request,entry.region));}
+        catch(RuntimeException|Error thrown) {failure=thrown;throw thrown;}
+        finally {
+            lastSearchNanos=System.nanoTime()-begin;maxSearchNanos=Math.max(maxSearchNanos,lastSearchNanos);
+            registry.metrics().record(Timer.NAVIGATION_EXTERNAL,lastSearchNanos);
+            finishBackendCall(entry,failure);
+        }
+        if(!owned(entry))return;
+        boolean stale=!authoritative(entry.request)||!chunks.admitted(entry.request.workId())
+                ||!chunks.ready(entry.request.workId())||!valid(entry);
+        if(!owned(entry))return;
+        if(stale) {
+            staleResults++;
+            stop(entry);
+            if(!current(entry))return;
+            entry.retryAt=now;
+            if(!authoritative(entry.request))cancel(entry.request.workId());
+            return;
+        }
+        if(result==SearchOutcome.PENDING||result==SearchOutcome.CAPACITY_WAIT) {
+            entry.capacityWaiting=result==SearchOutcome.CAPACITY_WAIT;enqueue(entry);return;
         }
         entry.capacityWaiting=false;
-        if (result instanceof SearchOutcome outcome) {
+        if(result instanceof SearchOutcome outcome) {
             failedSearches++;
-            Reason reason=switch (outcome) {
+            Reason reason=switch(outcome) {
                 case UNREACHABLE -> Reason.UNREACHABLE;
                 case EXHAUSTED -> Reason.SEARCH_EXHAUSTED;
                 case UNAVAILABLE -> Reason.RECONCILING;
                 case WORKING_SET_LIMIT -> Reason.WORKING_SET_LIMIT;
                 default -> throw new IllegalStateException("Nonterminal search outcome");
             };
-            retry(entry,reason); return;
+            retry(entry,reason);return;
         }
         Route route=(Route)result;
-        if (route.nodeCount()<1 || route.nodeCount()+1+entry.region.size()*2>registry.admission().limits().resource(Resource.CACHE_ENTRIES_PER_OWNER)) {
-            stop(entry); entry.reason=Reason.WORKING_SET_LIMIT; entry.retryAt=Long.MAX_VALUE; return;
+        if(route.nodeCount()<1||route.nodeCount()+1+entry.region.size()*2>registry.admission().limits().resource(Resource.CACHE_ENTRIES_PER_OWNER)) {
+            stop(entry);if(current(entry)){entry.reason=Reason.WORKING_SET_LIMIT;entry.retryAt=Long.MAX_VALUE;}return;
         }
-        try { entry.routeLease=registry.admission().reserve(entry.request.workId(),entry.request.lane(),Map.of(Resource.CACHE_ENTRIES,route.nodeCount(),Resource.CACHE_ENTRIES_PER_OWNER,route.nodeCount())); }
-        catch (AdmissionLedger.AdmissionException denied) { stop(entry); entry.reason=Reason.STATE_LIMIT; return; }
-        if (!backend.apply(entry.request,route,entry.validity)) { retry(entry,Reason.RECONCILING); return; }
-        entry.state=State.MOVING; entry.reason=Reason.NONE;
+        try {entry.routeLease=registry.admission().reserve(entry.request.workId(),entry.request.lane(),Map.of(Resource.CACHE_ENTRIES,route.nodeCount(),Resource.CACHE_ENTRIES_PER_OWNER,route.nodeCount()));}
+        catch(AdmissionLedger.AdmissionException denied) {stop(entry);if(current(entry))entry.reason=Reason.STATE_LIMIT;return;}
+        if(!current(entry))return;
+        entry.backendCall=true;entry.backendOwned=true;failure=null;
+        boolean applied;
+        try {applied=backend.apply(entry.request,route,entry.validity);}
+        catch(RuntimeException|Error thrown) {failure=thrown;throw thrown;}
+        finally {finishBackendCall(entry,failure);}
+        if(!owned(entry))return;
+        if(!entry.validity.getAsBoolean()) {stop(entry);if(owned(entry))entry.reason=Reason.CHUNK_NOT_READY;return;}
+        if(!applied) {retry(entry,Reason.RECONCILING);return;}
+        entry.state=State.MOVING;entry.reason=Reason.NONE;
         chunks.setProtection(entry.request.workId(),true,false,entry.request.lane()==Lane.CRITICAL);
-        chunks.useful(entry.request.workId());
+        if(owned(entry)) {
+            if(!entry.validity.getAsBoolean()) {stop(entry);return;}
+            chunks.useful(entry.request.workId());
+            owned(entry);
+        }
     }
     private boolean pollable(int lane) { return laneCursors[lane]!=null && laneCursors[lane].polledTick!=now; }
     private boolean current(Entry entry) { return requests.get(entry.request.workId())==entry; }
+    private boolean owned(Entry entry) {
+        if(!current(entry))return false;
+        if(!authoritative(entry.request)) {if(current(entry))cancel(entry.request.workId());return false;}
+        return current(entry);
+    }
     private boolean valid(Entry entry) {
         if (!current(entry)) return false;
         for (int i=0;i<entry.buckets.length;i++) if (entry.revisions[i]!=entry.buckets[i].revision) return false;
@@ -332,7 +418,7 @@ public final class NavigationService implements AutoCloseable {
     }
     private void refreshRevisions(Entry entry) {
         for (int i=0;i<entry.buckets.length;i++) if (entry.revisions[i]!=entry.buckets[i].revision) {
-            stop(entry);
+            stop(entry);if(!current(entry))return;
             for (int j=0;j<entry.buckets.length;j++) entry.revisions[j]=entry.buckets[j].revision;
             entry.failures=0; entry.retryAt=now; return;
         }
@@ -344,31 +430,103 @@ public final class NavigationService implements AutoCloseable {
         entry.queued=true; entry.reason=Reason.BUDGET;
     }
     private void stop(Entry entry) {
-        backend.stop(entry.request);
-        if (entry.routeLease!=null) { entry.routeLease.close(); entry.routeLease=null; }
-        if (entry.queued) {
-            (entry.deferred ? deferredStarts : starts).get(entry.request.lane().ordinal()).remove(entry);
-            entry.queued=false; entry.deferred=false;
-        }
-        entry.capacityWaiting=false;
+        if(!current(entry))return;
+        boolean wasOwned=entry.backendOwned;
+        entry.backendOwned=false;
         entry.state=State.WAITING;
-        chunks.setProtection(entry.request.workId(),false,false,entry.request.lane()==Lane.CRITICAL);
+        if(entry.routeLease!=null){entry.routeLease.close();entry.routeLease=null;}
+        if(entry.queued){(entry.deferred?deferredStarts:starts).get(entry.request.lane().ordinal()).remove(entry);entry.queued=false;entry.deferred=false;}
+        entry.capacityWaiting=false;
+        Throwable failure=null;
+        try {
+            if(wasOwned) {
+                if(entry.backendCall)entry.stopPending=true;
+                else stopBackend(entry);
+            }
+        } catch(RuntimeException|Error thrown) {failure=thrown;throw thrown;}
+        finally {
+            try {
+                if(failure!=null) {if(current(entry))cancel(entry.request.workId());}
+                else if(owned(entry)) {
+                    chunks.setProtection(entry.request.workId(),false,false,entry.request.lane()==Lane.CRITICAL);
+                    owned(entry);
+                }
+            }
+            catch(RuntimeException|Error cleanup) {if(failure!=null)failure.addSuppressed(cleanup);else throw cleanup;}
+        }
+    }
+    private void stopBackend(Entry entry) {
+        backend.stop(entry.request);
+        owned(entry);
+    }
+    private void finishBackendCall(Entry entry,Throwable primary) {
+        Throwable failure=primary;
+        if(primary!=null&&current(entry)) {
+            try {cancel(entry.request.workId());}
+            catch(RuntimeException|Error cleanup) {failure=appendFailure(failure,cleanup);}
+        }
+        entry.backendCall=false;
+        try {
+            if(entry.stopPending) {entry.stopPending=false;entry.backendOwned=false;backend.stop(entry.request);}
+        } catch(RuntimeException|Error cleanup) {failure=appendFailure(failure,cleanup);}
+        finally {
+            if(entry.releasePending) {
+                entry.releasePending=false;
+                try {if(!requests.containsKey(entry.request.workId()))chunks.release(entry.request.workId());}
+                catch(RuntimeException|Error cleanup) {failure=appendFailure(failure,cleanup);}
+            }
+        }
+        if(primary==null&&failure!=null) {
+            try {if(current(entry))cancel(entry.request.workId());}
+            catch(RuntimeException|Error cleanup) {failure=appendFailure(failure,cleanup);}
+            throwFailure(failure);
+        }
+    }
+    private static Throwable appendFailure(Throwable first,Throwable next) {
+        if(first==null)return next;
+        if(first!=next)first.addSuppressed(next);
+        return first;
+    }
+    private static void throwFailure(Throwable failure) {
+        if(failure instanceof RuntimeException runtime)throw runtime;
+        throw (Error)failure;
     }
     private void retry(Entry entry,Reason reason) {
-        stop(entry); entry.reason=reason;
+        stop(entry);if(!current(entry))return;entry.reason=reason;
         // An unsuccessful search owns no movement. Exhaustion is not a negative route proof;
         // retain its distinct reason while releasing the idle domain for bounded backoff.
-        chunks.release(entry.request.workId());entry.domainReleased=true;
+        chunks.release(entry.request.workId());if(!owned(entry))return;entry.domainReleased=true;
         entry.retryAt=now+RETRY[Math.min(entry.failures,RETRY.length-1)];
         if (entry.failures<RETRY.length-1) entry.failures++;
     }
     public void cancel(UUID workId) {
-        registry.requireOwner(); Entry entry=requests.remove(workId); if (entry==null) return;
-        stop(entry); chunks.release(workId); entry.lease.close();
-        for (int i=0;i<entry.region.size();i++) if (--entry.buckets[i].references==0) index.remove(entry.region.get(i));
-        if (entry.next==entry) head=null;
-        else { entry.previous.next=entry.next; entry.next.previous=entry.previous; if (head==entry) head=entry.next; }
+        registry.requireOwner(); Entry entry=requests.get(workId); if(entry==null)return;
+        requests.remove(workId,entry);entry.cancelling=true;
         removePollEntry(entry);
+        if(entry.next==entry)head=null;
+        else{entry.previous.next=entry.next;entry.next.previous=entry.previous;if(head==entry)head=entry.next;}
+        if(entry.queued){(entry.deferred?deferredStarts:starts).get(entry.request.lane().ordinal()).remove(entry);entry.queued=false;entry.deferred=false;}
+        AdmissionLedger.Lease routeLease=entry.routeLease;entry.routeLease=null;
+        if(routeLease!=null)routeLease.close();
+        AdmissionLedger.Lease domainLease=entry.domainLease;entry.domainLease=null;
+        List<ChunkKey> region=entry.region;Bucket[] buckets=entry.buckets;
+        entry.region=List.of();entry.buckets=new Bucket[0];entry.revisions=new long[0];entry.domainReleased=true;
+        boolean backendOwned=entry.backendOwned;entry.backendOwned=false;
+        Throwable failure=null;
+        try {
+            if(entry.backendCall) {entry.stopPending=backendOwned||entry.stopPending;entry.releasePending=true;}
+            else {
+                try {if(backendOwned)backend.stop(entry.request);}
+                catch(RuntimeException|Error thrown) {failure=thrown;}
+                try {if(!requests.containsKey(workId))chunks.release(workId);}
+                catch(RuntimeException|Error cleanup) {failure=appendFailure(failure,cleanup);}
+            }
+        } finally {
+            for(int i=0;i<region.size();i++)if(--buckets[i].references==0)index.remove(region.get(i),buckets[i]);
+            if(domainLease!=null)domainLease.close();
+            entry.lease.close();
+        }
+        if(failure!=null)throwFailure(failure);
     }
     private void removePollEntry(Entry entry) {
         if (entry.laneNext==null) return;

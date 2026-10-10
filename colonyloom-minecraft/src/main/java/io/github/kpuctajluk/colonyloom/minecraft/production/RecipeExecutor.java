@@ -167,6 +167,9 @@ public final class RecipeExecutor {
                 throw new IllegalStateException("Native craft fact changed before publication");
             for(var destination:fact.outputs()) registry.storage().index().observe(destination.slot(),destination.afterItem(),
                     destination.afterCount(),storage.observationTick());
+            if(guard(context,epoch,workshop,recipe)!=WorkOrder.Reason.NONE || !stillCurrent.getAsBoolean()
+                    || storage.currentWorkshopBarrel(workshop)!=current.barrel())
+                throw new IllegalStateException("Native craft fact lost authority during stock reconciliation");
             commit.apply(outputs);
             // Never reconcile expenditure until the exact ingredient obligations have been consumed.
             for(var source:fact.inputs()) registry.storage().index().observe(source.slot(),source.afterItem(),source.afterCount(),storage.observationTick());

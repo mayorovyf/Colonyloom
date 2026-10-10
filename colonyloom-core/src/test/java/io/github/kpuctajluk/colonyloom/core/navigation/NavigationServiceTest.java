@@ -38,9 +38,10 @@ final class NavigationServiceTest {
         NavigationService.Motion motion=NavigationService.Motion.MOVING;
         final Map<UUID,Integer> portions=new HashMap<>();
         final List<UUID> searchOrder=new ArrayList<>();
-        Runnable duringSearch=() -> {};
+        final Map<UUID,NavigationService.Request> movement=new HashMap<>();
+        Runnable duringSearch=() -> {}, duringApply=() -> {}, duringPosition=() -> {}, duringStop=() -> {};
         BooleanSupplier validity;
-        @Override public WorldPosition position(NavigationService.Request request) { return position; }
+        @Override public WorldPosition position(NavigationService.Request request) { duringPosition.run();return position; }
         @Override public NavigationService.SearchResult search(NavigationService.Request request,List<ChunkKey> admitted) {
             searches++;searchOrder.add(request.workId());
             NavigationService.SearchResult result;
@@ -53,9 +54,18 @@ final class NavigationServiceTest {
             }
             duringSearch.run();return result;
         }
-        @Override public boolean apply(NavigationService.Request request,NavigationService.Route route,BooleanSupplier stillCurrent) { applies++;validity=stillCurrent;return applyAccepted; }
+        @Override public boolean apply(NavigationService.Request request,NavigationService.Route route,BooleanSupplier stillCurrent) {
+            applies++;validity=stillCurrent;
+            if(applyAccepted)movement.put(request.citizenId(),request);
+            duringApply.run();return applyAccepted;
+        }
         @Override public NavigationService.Motion poll(NavigationService.Request request) { return motion; }
-        @Override public void stop(NavigationService.Request request) { stops++;portions.remove(request.id()); }
+        @Override public void stop(NavigationService.Request request) {
+            stops++;portions.remove(request.id());
+            NavigationService.Request moving=movement.get(request.citizenId());
+            if(moving!=null && moving.id().equals(request.id()))movement.remove(request.citizenId());
+            duringStop.run();
+        }
     }
     private static final class Fixture {
         final ColonyRegistry registry=new ColonyRegistry(() -> {});
@@ -76,6 +86,21 @@ final class NavigationServiceTest {
         }
         void step() { budgets.beginTick(++tick);chunks.tick(tick);navigation.tick(tick); }
         void until(long deadline) { while(tick<deadline) step(); }
+        NavigationService.Request request(long ordinal,long generation) {
+            return new NavigationService.Request(id(9000+ordinal),work,colony,citizen,1,generation,target,Lane.NORMAL,0);
+        }
+        Map<Resource,Integer> navigationUsage() {
+            Map<Resource,Integer> usage=new HashMap<>();
+            for(Resource resource:List.of(Resource.CACHE_ENTRIES,Resource.CHUNK_DEMANDS,Resource.LOADED_FOOTPRINT,
+                    Resource.BLOCK_TICKING,Resource.ENTITY_TICKING))usage.put(resource,registry.admission().used(resource));
+            return usage;
+        }
+        void assertReleased() {
+            assertEquals(NavigationService.State.CANCELLED,navigation.state(work));
+            assertFalse(chunks.admitted(work));assertEquals(0,access.held);
+            assertTrue(backend.portions.isEmpty());assertTrue(backend.movement.isEmpty());
+            navigationUsage().forEach((resource,used) -> assertEquals(0,used.intValue(),resource.name()));
+        }
         UUID addRequest(int ordinal,Lane lane,int priority) {
             UUID work=id(3000+ordinal);
             addMovement(id(1000+ordinal),id(2000+ordinal),work,lane,priority);return work;
@@ -91,6 +116,25 @@ final class NavigationServiceTest {
             navigation.request(work,colony,citizen,1,0,target,lane,priority);
         }
     }
+    @Test void readyRouteDomainSurvivesCoveredResidentDisplacementWhileWaiting() {
+        Fixture f=new Fixture(true);
+        f.navigation.cancel(f.work);
+        f.backend.position=new WorldPosition("minecraft:overworld",34,64,8);
+        UUID original=f.navigation.request(f.work,f.colony,f.citizen,1,0,f.target,Lane.NORMAL,0);
+        for(int tick=0;tick<20&&f.navigation.state(f.work)!=NavigationService.State.MOVING;tick++)f.step();
+        assertEquals(NavigationService.State.MOVING,f.navigation.state(f.work));
+        f.access.available=false;f.step();
+        assertEquals(NavigationService.State.WAITING,f.navigation.state(f.work));
+        f.backend.position=new WorldPosition("minecraft:overworld",20,64,8);
+        f.access.available=true;f.step();
+        assertEquals(NavigationService.State.MOVING,f.navigation.state(f.work));
+        assertTrue(f.chunks.ready(f.work));
+        assertEquals(original,f.navigation.request(f.work,f.colony,f.citizen,1,0,f.target,Lane.NORMAL,0));
+        f.backend.motion=NavigationService.Motion.ARRIVED;f.step();
+        assertTrue(f.navigation.atTarget(f.work));
+        f.navigation.cancel(f.work);f.assertReleased();
+    }
+
     @Test void displacedResidentRebuildsUnavailableRouteDomainWithoutLosingGoal() {
         Fixture f=new Fixture();f.step();
         f.backend.position=new WorldPosition("minecraft:overworld",8,64,1);
@@ -116,6 +160,28 @@ final class NavigationServiceTest {
         assertEquals(f.citizen,f.registry.workBoard().work(f.work).assignee());
         assertEquals(f.target,f.registry.workBoard().work(f.work).target());
         f.navigation.cancel(f.work);assertEquals(0,f.access.held);
+    }
+    @Test void displacedWaitingRouteRetainsIdentityDuringDomainAdmissionExhaustion() {
+        for(Resource exhausted:List.of(Resource.CHUNK_DEMANDS,Resource.CACHE_ENTRIES)) {
+            Fixture f=new Fixture(true);f.backend.reachable=false;f.step();
+            UUID original=f.navigation.request(f.work,f.colony,f.citizen,1,0,f.target,Lane.NORMAL,0);
+            f.registry.admission().updateLimits(f.registry.admission().limits().withResource(exhausted,1));
+            f.backend.position=new WorldPosition("minecraft:overworld",8,64,1);f.backend.reachable=true;
+            f.step();
+            assertEquals(NavigationService.State.WAITING,f.navigation.state(f.work));
+            assertEquals(WorkOrder.Reason.STATE_LIMIT,f.navigation.reason(f.work));
+            assertEquals(original,f.navigation.request(f.work,f.colony,f.citizen,1,0,f.target,Lane.NORMAL,0));
+            assertEquals(0,f.registry.admission().used(Resource.CHUNK_DEMANDS));
+            f.registry.admission().updateLimits(SimulationLimits.development());
+            for(int tick=0;tick<40 && !f.navigation.atTarget(f.work);tick++) {
+                f.backend.motion=NavigationService.Motion.ARRIVED;f.step();
+            }
+            assertTrue(f.navigation.atTarget(f.work));
+            assertEquals(original,f.navigation.request(f.work,f.colony,f.citizen,1,0,f.target,Lane.NORMAL,0));
+            assertEquals(f.citizen,f.registry.workBoard().work(f.work).assignee());
+            f.navigation.cancel(f.work);
+            assertEquals(0,f.registry.admission().used(Resource.CACHE_ENTRIES));assertEquals(0,f.access.held);
+        }
     }
     @Test void protectedDomainSaturationWaitsWithoutDeclaringRouteImpossible() {
         Fixture f=new Fixture();f.navigation.cancel(f.work);
@@ -152,6 +218,113 @@ final class NavigationServiceTest {
     @Test void cancellationDuringSearchCannotApplyOldResult() {
         Fixture f=new Fixture();f.backend.duringSearch=() -> f.navigation.cancel(f.work);f.step();
         assertEquals(1,f.backend.searches);assertEquals(0,f.backend.applies);assertFalse(f.navigation.atTarget(f.work));assertEquals(0,f.access.held);
+        f.assertReleased();
+    }
+    @Test void cancellationInsideApplyStopsMovementStartedBeforeCallbackAndReturnsCapacity() {
+        Fixture f=new Fixture();NavigationService.Request request=f.request(1,1);
+        assertEquals(request.id(),f.navigation.request(request));
+        f.backend.duringApply=() -> {
+            assertEquals(request,f.backend.movement.get(f.citizen));
+            f.navigation.cancel(f.work);
+        };
+        f.step();assertEquals(1,f.backend.applies);assertFalse(f.navigation.atTarget(f.work));
+        f.assertReleased();f.navigation.cancel(f.work);f.assertReleased();
+        f.backend.duringApply=() -> {};
+        NavigationService.Request replacement=f.request(2,2);
+        assertEquals(replacement.id(),f.navigation.request(replacement));f.step();
+        assertEquals(NavigationService.State.MOVING,f.navigation.state(f.work));
+        assertEquals(replacement,f.backend.movement.get(f.citizen));
+        assertTrue(f.chunks.ready(f.work));
+        f.navigation.cancel(f.work);f.assertReleased();
+    }
+    @Test void replacementInsideApplyKeepsSuccessorMovementAndDemandWhenOldStopIsDeferred() {
+        Fixture f=new Fixture();NavigationService.Request original=f.request(1,1),successor=f.request(2,2);
+        assertEquals(original.id(),f.navigation.request(original));
+        f.budgets.beginTick(++f.tick);f.chunks.tick(f.tick);
+        Map<Resource,Integer> waitingUsage=f.navigationUsage();
+        f.backend.duringApply=() -> {
+            assertEquals(original,f.backend.movement.get(f.citizen));
+            f.backend.duringApply=() -> {};
+            assertEquals(successor.id(),f.navigation.request(successor));
+            f.step();assertEquals(successor,f.backend.movement.get(f.citizen));
+        };
+        f.step();assertEquals(NavigationService.State.MOVING,f.navigation.state(f.work));
+        assertEquals(successor.id(),f.navigation.request(successor));
+        assertEquals(successor,f.backend.movement.get(f.citizen));assertTrue(f.backend.validity.getAsBoolean());
+        assertTrue(f.chunks.admitted(f.work));assertTrue(f.chunks.ready(f.work));assertTrue(f.access.held>0);
+        Map<Resource,Integer> movingUsage=new HashMap<>(waitingUsage);
+        movingUsage.put(Resource.CACHE_ENTRIES,waitingUsage.get(Resource.CACHE_ENTRIES)+f.backend.routeNodes);
+        assertEquals(movingUsage,f.navigationUsage());
+        f.navigation.cancel(f.work);f.assertReleased();
+    }
+    @Test void positionCallbackBeforeEntryPublicationCannotOverwriteSameWorkSuccessor() {
+        for(boolean existing:List.of(false,true)) {
+            Fixture f=new Fixture();f.budgets.beginTick(++f.tick);f.chunks.tick(f.tick);
+            Map<Resource,Integer> movingUsage=f.navigationUsage();
+            movingUsage.put(Resource.CACHE_ENTRIES,movingUsage.get(Resource.CACHE_ENTRIES)+f.backend.routeNodes);
+            if(!existing) {f.navigation.cancel(f.work);f.assertReleased();}
+            NavigationService.Request outer=f.request(1,1),successor=f.request(2,2);
+            f.backend.duringPosition=() -> {
+                f.backend.duringPosition=() -> {};
+                assertEquals(successor.id(),f.navigation.request(successor));
+                f.step();assertEquals(successor,f.backend.movement.get(f.citizen));
+            };
+            assertNull(f.navigation.request(outer));
+            assertEquals(successor.id(),f.navigation.request(successor));
+            assertEquals(NavigationService.State.MOVING,f.navigation.state(f.work));
+            assertEquals(successor,f.backend.movement.get(f.citizen));assertTrue(f.backend.validity.getAsBoolean());
+            assertTrue(f.chunks.admitted(f.work));assertTrue(f.chunks.ready(f.work));assertTrue(f.access.held>0);
+            assertEquals(movingUsage,f.navigationUsage());
+            f.navigation.cancel(f.work);f.assertReleased();
+        }
+    }
+    @Test void readinessLostInsideApplyStopsNewMovementWithoutPublishingMovingState() {
+        Fixture f=new Fixture();NavigationService.Request request=f.request(1,1);
+        assertEquals(request.id(),f.navigation.request(request));
+        f.budgets.beginTick(++f.tick);f.chunks.tick(f.tick);
+        Map<Resource,Integer> waitingUsage=f.navigationUsage();
+        f.backend.duringApply=() -> {
+            assertEquals(request,f.backend.movement.get(f.citizen));f.access.available=false;
+        };
+        f.step();assertEquals(NavigationService.State.WAITING,f.navigation.state(f.work));
+        assertEquals(WorkOrder.Reason.CHUNK_NOT_READY,f.navigation.reason(f.work));
+        assertEquals(request.id(),f.navigation.request(request));assertTrue(f.backend.movement.isEmpty());
+        assertFalse(f.backend.validity.getAsBoolean());assertFalse(f.chunks.ready(f.work));
+        assertEquals(waitingUsage,f.navigationUsage());
+        f.backend.duringApply=() -> {};f.access.available=true;f.step();
+        assertEquals(NavigationService.State.MOVING,f.navigation.state(f.work));
+        assertEquals(request,f.backend.movement.get(f.citizen));
+        f.navigation.cancel(f.work);f.assertReleased();
+    }
+    @Test void applyFailurePreservesPrimaryExceptionAndCleansUpDespiteDeferredStopAndCoverageFailures() {
+        Fixture f=new Fixture();RuntimeException primary=new IllegalStateException("apply failure");
+        RuntimeException stopFailure=new IllegalStateException("stop failure");
+        RuntimeException coverageFailure=new IllegalStateException("coverage failure");
+        f.chunks.setCoverageLossListener(key -> {throw coverageFailure;});
+        f.backend.duringApply=() -> {
+            assertNotNull(f.backend.movement.get(f.citizen));f.navigation.cancel(f.work);throw primary;
+        };
+        f.backend.duringStop=() -> {throw stopFailure;};
+        assertSame(primary,assertThrows(RuntimeException.class,f::step));
+        assertTrue(hasSuppressed(primary,stopFailure));assertTrue(hasSuppressed(primary,coverageFailure));
+        f.assertReleased();f.navigation.cancel(f.work);f.assertReleased();
+    }
+    @Test void throwingCoverageListenerDoesNotLeakPendingRequestDomainOrAdmission() {
+        Fixture f=new Fixture();f.backend.pendingPortions=2;f.step();
+        RuntimeException failure=new IllegalStateException("coverage failure");
+        f.chunks.setCoverageLossListener(key -> {throw failure;});
+        assertSame(failure,assertThrows(RuntimeException.class,() -> f.navigation.cancel(f.work)));
+        f.assertReleased();f.navigation.cancel(f.work);f.assertReleased();
+        f.chunks.setCoverageLossListener(key -> {});f.backend.pendingPortions=0;
+        NavigationService.Request successor=f.request(1,1);
+        assertEquals(successor.id(),f.navigation.request(successor));f.step();
+        assertEquals(successor,f.backend.movement.get(f.citizen));
+        assertTrue(f.chunks.ready(f.work));f.navigation.cancel(f.work);f.assertReleased();
+    }
+    private static boolean hasSuppressed(Throwable failure,Throwable expected) {
+        for(Throwable suppressed:failure.getSuppressed())
+            if(suppressed==expected || hasSuppressed(suppressed,expected))return true;
+        return false;
     }
     @Test void changedChunkDuringSearchRejectsResultAndNextPortionReplans() {
         Fixture f=new Fixture();ChunkKey key=new ChunkKey("minecraft:overworld",0,0);
@@ -199,13 +372,19 @@ final class NavigationServiceTest {
         f.until(100); assertEquals(0,f.backend.searches); assertEquals(WorkOrder.Reason.WORKING_SET_LIMIT,f.navigation.reason(f.work));
     }
     @Test void changingGoalGenerationInsideSearchRejectsOldRoute() {
-        Fixture f=new Fixture();
+        Fixture f=new Fixture();f.budgets.beginTick(++f.tick);f.chunks.tick(f.tick);
+        Map<Resource,Integer> movingUsage=f.navigationUsage();
+        movingUsage.put(Resource.CACHE_ENTRIES,movingUsage.get(Resource.CACHE_ENTRIES)+f.backend.routeNodes);
+        NavigationService.Request successor=f.request(1,1);
         f.backend.duringSearch=() -> {
             f.backend.duringSearch=() -> {};
-            f.navigation.request(f.work,f.colony,f.citizen,1,1,f.target,Lane.NORMAL,0);
+            assertEquals(successor.id(),f.navigation.request(successor));
         };
-        f.step(); assertEquals(0,f.backend.applies);
-        f.step(); assertEquals(1,f.backend.applies);
+        f.step();assertEquals(successor,f.backend.movement.get(f.citizen));assertEquals(movingUsage,f.navigationUsage());
+        assertTrue(f.chunks.admitted(f.work));assertTrue(f.chunks.ready(f.work));assertTrue(f.access.held>0);
+        assertEquals(successor.id(),f.navigation.request(successor));
+        assertEquals(successor,f.backend.movement.get(f.citizen));
+        f.navigation.cancel(f.work);f.assertReleased();
     }
     @Test void unfinishedSearchUsesSubsequentTicksWithoutApplyingOrBackoff() {
         Fixture f=new Fixture();f.backend.pendingPortions=3;

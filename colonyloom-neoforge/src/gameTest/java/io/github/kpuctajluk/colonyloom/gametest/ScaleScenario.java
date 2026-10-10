@@ -195,7 +195,7 @@ final class ScaleScenario {
             drain(server,run);
         } catch (Throwable failure) {
             run.report.addProperty("passed",false); run.report.addProperty("failure",failure.toString()); run.done=true;
-            try { captureConsumerFailure(server,run); } catch (Exception secondary) { failure.addSuppressed(secondary); }
+            try { captureConsumerFailure(server,run); } catch (Exception secondary) { failure.addSuppressed(secondary);run.report.addProperty("consumerFailureCaptureError",secondary.toString()); }
             try { evidence(server,run); } catch (Exception secondary) { failure.addSuppressed(secondary); }
             org.slf4j.LoggerFactory.getLogger(ScaleScenario.class).error("Scale scenario failed",failure); server.halt(false);
         }
@@ -890,7 +890,13 @@ final class ScaleScenario {
                 NbtIo.writeCompressed(run.manifest,world(event.getServer()).resolve(MANIFEST));
             }
             writeReport(run);
-        } catch(Exception failure) {run.report.addProperty("passed",false);run.report.addProperty("failure",failure.toString());try{writeReport(run);}catch(Exception secondary){failure.addSuppressed(secondary);}org.slf4j.LoggerFactory.getLogger(ScaleScenario.class).error("Scale clean checkpoint failed",failure);}
+        } catch(Exception failure) {
+            run.report.addProperty("passed",false);
+            if(run.report.has("failure"))run.report.addProperty("shutdownFailure",failure.toString());
+            else run.report.addProperty("failure",failure.toString());
+            try{writeReport(run);}catch(Exception secondary){failure.addSuppressed(secondary);}
+            org.slf4j.LoggerFactory.getLogger(ScaleScenario.class).error("Scale clean checkpoint failed",failure);
+        }
     }
     /** Failure-only native consumer snapshot; never adds polling work to managed ticks. */
     private static void captureConsumerFailure(MinecraftServer server,Run run) throws Exception {
@@ -907,13 +913,49 @@ final class ScaleScenario {
             budgets.add(budget.name(),usage);
         }
         snapshot.add("budgets",budgets);
+        var workStates=new TreeMap<String,Integer>();
+        for(var work:registry.workBoard().works()) {
+            String key=work.typeId()+"|"+work.lane()+"|"+work.state()+"|"+work.waitingReason()+"|"+work.stage();
+            workStates.merge(key,1,Integer::sum);
+        }
+        snapshot.add("workStates",json(workStates));
+        var constructionService=consumerField(run.runtime,"constructionService");
+        var constructionActive=(Map<?,?>)consumerField(constructionService,"active");var construction=new JsonArray();
+        int constructionCount=0;
+        for(var entry:constructionActive.entrySet()) {
+            if(constructionCount++>=64)break;
+            UUID workId=(UUID)entry.getKey();var state=entry.getValue();var row=new JsonObject();
+            row.addProperty("workId",workId.toString());
+            for(String name:List.of("chunkOwner","region","waypoint","generation","continuation","stepContinuation","stepRevision","stepCitizen","stepEpoch","waitRevision","waitReason","executing","lastCursor","arrived","retryAt","retryReason","reconcileCursor"))row.add(name,json(consumerField(state,name)));
+            UUID owner=(UUID)consumerField(state,"chunkOwner");
+            row.addProperty("domainAdmitted",run.runtime.chunks().admitted(owner));row.addProperty("domainReady",run.runtime.chunks().ready(owner));
+            row.add("domainReason",json(run.runtime.chunks().reason(owner)));
+            var work=registry.workBoard().work(workId);
+            row.add("work",json(Map.of("state",work.state(),"reason",work.waitingReason(),"stage",work.stage(),"revision",work.revision())));
+            construction.add(row);
+        }
+        snapshot.addProperty("constructionActiveCount",constructionActive.size());snapshot.add("constructionActive",construction);
+        var productionService=consumerField(run.runtime,"productionService");
+        var productionActive=(Map<?,?>)consumerField(productionService,"active");var productions=new JsonArray();
+        int productionCount=0;
+        for(var entry:productionActive.entrySet()) {
+            if(productionCount++>=64)break;
+            UUID workId=(UUID)entry.getKey();var state=entry.getValue();var row=new JsonObject();
+            row.addProperty("workId",workId.toString());
+            for(String name:List.of("chunkOwner","waypoint","generation","lastActive","continuation","stepContinuation","stepRevision","stepCitizen","stepEpoch","stepOrder","waitingRevision","waitingReason","processing","executing","outputCursor","outputs"))row.add(name,json(consumerField(state,name)));
+            UUID owner=(UUID)consumerField(state,"chunkOwner");
+            row.addProperty("domainAdmitted",run.runtime.chunks().admitted(owner));row.addProperty("domainReady",run.runtime.chunks().ready(owner));
+            var work=registry.workBoard().work(workId);row.add("work",json(Map.of("state",work.state(),"reason",work.waitingReason(),"stage",work.stage(),"revision",work.revision())));
+            row.add("order",json(registry.supply().productionForWork(workId)));productions.add(row);
+        }
+        snapshot.addProperty("productionActiveCount",productionActive.size());snapshot.add("productionActive",productions);
         var requests=(Map<?,?>)consumerField(run.runtime.navigation(),"requests");var navigation=new JsonArray();
         int count=0;
         for(var entry:requests.values()) {
             if(count++>=128)break;
             var request=(io.github.kpuctajluk.colonyloom.core.navigation.NavigationService.Request)consumerField(entry,"request");
             var row=new JsonObject();row.add("request",json(request));
-            for(String name:List.of("created","state","reason","retryAt","domainReleased","failures","polledTick","searchedTick","queued","deferred","capacityWaiting","region","revisions"))row.add(name,json(consumerField(entry,name)));
+            for(String name:List.of("created","state","reason","retryAt","domainReleased","failures","polledTick","searchedTick","queued","deferred","capacityWaiting","backendOwned","backendCall","stopPending","releasePending","region","revisions"))row.add(name,json(consumerField(entry,name)));
             row.addProperty("domainAdmitted",run.runtime.chunks().admitted(request.workId()));
             row.addProperty("domainReady",run.runtime.chunks().ready(request.workId()));
             row.add("domainReason",json(run.runtime.chunks().reason(request.workId())));
@@ -934,7 +976,7 @@ final class ScaleScenario {
             if(count++>=64)break;
             UUID workId=(UUID)entry.getKey();var state=entry.getValue();var row=new JsonObject();
             row.addProperty("workId",workId.toString());
-            for(String name:List.of("waypoint","generation","waypointCursor","requiredChunks","slotCursors","unknownScans","pendingSlot","pendingRegistration","pendingCapacity","slotCapacity","scanFinished","returnToSource","surplusBufferCursor","pickupSource","pickupInventory","pickupDestination","pickupFallback","pickupCargoSlot","pickupDestinationSlot","pickupReturnSlot"))row.add(name,json(consumerField(state,name)));
+            for(String name:List.of("waypoint","generation","continuation","stepContinuation","stepRevision","stepCitizen","stepEpoch","waitRevision","waitReason","waitStage","executing","foodControl","waypointCursor","requiredChunks","slotCursors","unknownScans","pendingSlot","pendingRegistration","pendingCapacity","slotCapacity","scanFinished","scanExhausted","returnToSource","foodReturn","foodReturnRevision","rejectedFoodReturns","foodReturnFailure","surplusBufferCursor","pickupSource","pickupInventory","pickupDestination","pickupFallback","pickupCargoSlot","pickupDestinationSlot","pickupReturnSlot"))row.add(name,json(consumerField(state,name)));
             for(String name:List.of("loadDomain","retainedLoadDomain")) {
                 var domain=consumerField(state,name);if(domain==null)continue;
                 UUID owner=(UUID)consumerField(domain,"owner");var proof=new JsonObject();proof.addProperty("owner",owner.toString());

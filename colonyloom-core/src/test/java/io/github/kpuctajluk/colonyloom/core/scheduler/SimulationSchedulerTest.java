@@ -72,6 +72,71 @@ final class SimulationSchedulerTest {
         assertEquals(WorkOrder.State.COMPLETED,timer.state());
         assertTrue(f.budgets.used(Budget.DIRTY_RESCAN_OBJECTS)<=1);
     }
+    @Test void paidPlatformMaintenanceCannotStrandAcceptedPhysicalBacklog() {
+        Fixture f=new Fixture();UUID colony=f.colony(1,0);f.citizen(11,colony);
+        var limits=LIMITS.scale300Capacity().withBudget(Budget.DIRTY_RESCAN_OBJECTS,3);
+        f.budgets.updateLimits(limits);f.registry.admission().updateLimits(limits);
+        int[] completed={0},maintenance={0};
+        f.scheduler.beforeWork(tick -> {
+            while(f.budgets.tryConsume(Budget.DIRTY_RESCAN_OBJECTS,AdmissionLedger.Lane.SERVICE))maintenance[0]++;
+        });
+        f.scheduler.physicalExecutor(WorkOrder.MOVE,new SimulationScheduler.PhysicalExecutor() {
+            public void step(WorkOrder work,long tick) {
+                f.board.transition(work.id(),WorkOrder.State.COMPLETED,WorkOrder.Reason.NONE,"completed");completed[0]++;
+            }
+            public void cancel(UUID workId) {}
+        });
+        for(int i=0;i<150;i++)f.board.createMove(id(100+i),colony,new WorldPosition("minecraft:overworld",8,64,0),0,AdmissionLedger.Lane.NORMAL);
+        for(int i=0;i<300;i++) {
+            f.ticks(1);assertTrue(f.budgets.used(Budget.DIRTY_RESCAN_OBJECTS)<=3);
+        }
+        assertEquals(150,completed[0]);assertTrue(maintenance[0]>=300);
+        assertNull(f.registry.citizen(id(11)).assignedWorkId());
+    }
+
+    @Test void missingFoodCannotOccupyReadySlotsOrDelayItsOwnDeliveryAndAllocationWakesConsumer() {
+        Fixture f=new Fixture();UUID colony=f.colony(1,0);
+        var limits=LIMITS.scale300Capacity().withBudget(Budget.DIRTY_RESCAN_OBJECTS,3);
+        f.budgets.updateLimits(limits);f.registry.admission().updateLimits(limits);
+        UUID subject=f.citizen(11,colony);
+        var pos=new WorldPosition("minecraft:overworld",0,64,0);
+        var food=f.board.createFood(id(1000),subject);
+        var demand=f.registry.supply().request(id(1001),colony,food.id(),
+                new io.github.kpuctajluk.colonyloom.core.supply.ItemMatcher("minecraft:bread",null),1,
+                io.github.kpuctajluk.colonyloom.core.supply.Demand.GoalKind.CONSUMPTION,pos,AdmissionLedger.Lane.CRITICAL,10,0);
+        for(int i=0;i<299;i++)f.board.createFood(id(2000+i),f.citizen(10000+i,colony));
+        int[] foodAttempts={0},deliveryAttempts={0};
+        f.scheduler.physicalExecutor(WorkOrder.FOOD,new SimulationScheduler.PhysicalExecutor() {
+            public void step(WorkOrder work,long tick) {
+                foodAttempts[0]++;
+                if(f.registry.supply().foodDemandForWork(work.id())==null || f.registry.supply().foodDemandForWork(work.id()).snapshot().allocated()==0)
+                    f.board.transition(work.id(),WorkOrder.State.WAITING,WorkOrder.Reason.MATERIALS,"food");
+                else {
+                    assertEquals(food.id(),work.id());assertEquals(subject,work.assignee());
+                    f.registry.supply().fulfillConsumption(f.registry.supply().demandShares(demand.id()).getFirst().id(),1);
+                    f.board.transition(work.id(),WorkOrder.State.COMPLETED,WorkOrder.Reason.NONE,"consumed");
+                }
+            }
+            public void cancel(UUID workId) {}
+        });
+        f.scheduler.physicalExecutor(WorkOrder.DELIVERY,new SimulationScheduler.PhysicalExecutor() {
+            public void step(WorkOrder work,long tick) {deliveryAttempts[0]++;if(deliveryAttempts[0]==4)f.board.transition(work.id(),WorkOrder.State.COMPLETED,WorkOrder.Reason.NONE,"delivered");}
+            public void cancel(UUID workId) {}
+        });
+        var delivery=f.board.createCitizenDelivery(id(1002),subject,pos,10,AdmissionLedger.Lane.CRITICAL);
+        f.ticks(1200);
+        assertEquals(WorkOrder.State.COMPLETED,delivery.state());assertEquals(4,deliveryAttempts[0]);
+        assertEquals(0,foodAttempts[0]);assertEquals(WorkOrder.Reason.MATERIALS,food.waitingReason());
+        var slot=new io.github.kpuctajluk.colonyloom.core.storage.StockRegion(new io.github.kpuctajluk.colonyloom.core.storage.StorageId("minecraft:overworld",subject,1),0);
+        f.registry.storage().register(colony,pos,"construction",java.util.List.of(slot.storage()),java.util.List.of(slot),java.util.List.of(pos));
+        var bread=new io.github.kpuctajluk.colonyloom.core.storage.ItemDescriptor("minecraft:bread",new byte[0]);
+        f.registry.storage().index().observe(slot,bread,1,f.tick);
+        f.registry.supply().allocateStock(demand.id(),slot,bread,1,f.tick);
+        f.board.invalidate(food.id());f.ticks(1200);
+        assertEquals(WorkOrder.State.COMPLETED,food.state());assertEquals(1,foodAttempts[0]);
+        assertEquals(1,demand.snapshot().fulfilled());assertNull(f.registry.citizen(subject).assignedWorkId());
+    }
+
     @Test void repeatedlyWokenUnavailableOldWorkCannotStarveReadyPhysicalWork() {
         Fixture f=new Fixture();UUID colony=f.colony(1,0);
         f.registry.admission().updateLimits(LIMITS.withResource(Resource.READY_ENTRIES,8));

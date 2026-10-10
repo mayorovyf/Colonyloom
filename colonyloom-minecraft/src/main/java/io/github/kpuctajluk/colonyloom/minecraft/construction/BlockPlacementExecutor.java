@@ -117,6 +117,9 @@ public final class BlockPlacementExecutor implements WorldAccess {
         return ready(level, pos) && level.getBlockState(pos).equals(ContentLoader.decodeBlockState(expected));
     }
     @Override public Placement place(ActionContext context, long bindingEpoch, BlockDescriptor expected,int sourceSlot) {
+        return place(context,bindingEpoch,expected,sourceSlot,() -> true);
+    }
+    public Placement place(ActionContext context,long bindingEpoch,BlockDescriptor expected,int sourceSlot,java.util.function.BooleanSupplier stillCurrent) {
         owner();
         if (context.actionKind() != ActionContext.Kind.BLOCK_PLACE) return Placement.PERMISSION_DENIED;
         CitizenRecord record = registry.findCitizen(context.citizenId()).orElse(null);
@@ -157,7 +160,21 @@ public final class BlockPlacementExecutor implements WorldAccess {
         BlockState predicted = desired.getBlock().getStateForPlacement(new DirectionalPlaceContext(level, pos, facing, source, Direction.UP));
         if (!desired.equals(predicted)) return Placement.OBSTRUCTED;
         int before = source.getCount();
+        var work=record.assignedWorkId()==null?null:registry.workBoard().work(record.assignedWorkId());
+        long workRevision=work==null?-1:work.revision();
         observe(FaultPoint.BEFORE_BLOCK_CHANGE, context);
+        // Reentrant observers cannot spend the old worker's property or a replaced source stack.
+        if(!level.getBlockState(pos).equals(beforeState)||citizen.inventory().getItem(sourceSlot)!=source||source.getCount()!=before
+                ||!source.getComponentsPatch().isEmpty())return Placement.AMBIGUOUS;
+        var fresh=registry.findCitizen(context.citizenId()).orElse(null);
+        var freshColony=registry.colony(context.colonyId());
+        if(!stillCurrent.getAsBoolean()||entity(fresh,bindingEpoch,level)!=citizen||!freshColony.available()
+                ||freshColony.authorityRevision()!=context.authorityRevision()||!freshColony.territory().contains(context.target())
+                ||work!=null&&(work.terminal()||work.revision()!=workRevision||work.state()!=io.github.kpuctajluk.colonyloom.core.work.WorkOrder.State.RUNNING
+                        ||!work.id().equals(fresh.assignedWorkId())||!fresh.citizenId().equals(work.assignee()))
+                ||!footprintReady(level,pos)||citizen.distanceToSqr(pos.getX()+0.5,pos.getY(),pos.getZ()+0.5)>4.5*4.5
+                ||!level.getBlockState(support).isFaceSturdy(level,support,Direction.UP)||!desired.canSurvive(level,pos)
+                ||!level.isUnobstructed(desired,pos,CollisionContext.empty()))return Placement.UNAVAILABLE;
         float oldYaw = citizen.getYRot();
         if (desired.is(Blocks.OAK_STAIRS)) citizen.setYRot(desired.getValue(StairBlock.FACING).toYRot());
         InteractionResult result;

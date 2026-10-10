@@ -37,6 +37,42 @@ import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 @GameTestHolder("colonyloom")
 @PrefixGameTestTemplate(false)
 public final class StorageTransferGameTests {
+    @GameTest(template="identity_empty",batch="stage14_transfer_assignment",timeoutTicks=240)
+    public static void synchronousReassignmentBeforeTransferKeepsNativeProperty(GameTestHelper helper) {
+        withReadyFixture(helper,f -> {
+            var work=f.registry.workBoard().createMove(UUID.randomUUID(),f.colony,f.position(f.origin),0,Lane.NORMAL);
+            f.registry.workBoard().transition(work.id(),WorkOrder.State.READY,WorkOrder.Reason.NONE,"move");
+            helper.assertTrue(f.registry.workBoard().assign(work.id(),f.citizen),"Original transfer assignment refused");
+            f.registry.workBoard().transition(work.id(),WorkOrder.State.RUNNING,WorkOrder.Reason.NONE,"move");
+            ItemStack original=new ItemStack(Items.OAK_PLANKS,18);f.chest.setItem(0,original);int[] commits={0};
+            var result=f.executor(null,(point,context) -> {
+                if(point!=StorageTransferExecutor.FaultPoint.BEFORE_EFFECT)return;
+                f.registry.workBoard().releaseAssignment(work.id());
+                f.registry.workBoard().transition(work.id(),WorkOrder.State.READY,WorkOrder.Reason.NONE,"move");
+                helper.assertTrue(f.registry.workBoard().assign(work.id(),f.citizen),"Canonical successor assignment refused");
+                f.registry.workBoard().transition(work.id(),WorkOrder.State.RUNNING,WorkOrder.Reason.NONE,"move");
+            }).transfer(f.context(f.chestSlot),1,f.chestSlot,f.courierSlot,f.describe(original),6,moved -> commits[0]++);
+            helper.assertTrue(result.moved()==0&&!result.ambiguous()&&commits[0]==0&&f.registry.effects().size()==0,"Stale assignment published transfer/evidence");
+            helper.assertTrue(f.chest.getItem(0)==original&&original.getCount()==18&&f.courier.inventory().isEmpty(),"Before-effect reassignment changed native property");
+            helper.assertTrue(f.citizen.equals(work.assignee())&&work.id().equals(f.registry.citizen(f.citizen).assignedWorkId()),"Old transfer cancelled successor assignment");
+        });
+    }
+    @GameTest(template="identity_empty",batch="stage14_transfer_fact_assignment",timeoutTicks=240)
+    public static void detachedAssignmentAfterTransferFactKeepsNativeRecoveryProperty(GameTestHelper helper) {
+        withReadyFixture(helper,f -> {
+            var work=f.registry.workBoard().createMove(UUID.randomUUID(),f.colony,f.position(f.origin),0,Lane.NORMAL);
+            f.registry.workBoard().transition(work.id(),WorkOrder.State.READY,WorkOrder.Reason.NONE,"move");
+            helper.assertTrue(f.registry.workBoard().assign(work.id(),f.citizen),"Transfer fact assignment refused");
+            f.registry.workBoard().transition(work.id(),WorkOrder.State.RUNNING,WorkOrder.Reason.NONE,"move");
+            f.chest.setItem(0,new ItemStack(Items.OAK_PLANKS,18));int[] commits={0};
+            var result=f.executor(null,(point,context) -> {if(point==StorageTransferExecutor.FaultPoint.AFTER_FACT_BEFORE_NOTIFY)f.registry.workBoard().releaseAssignment(work.id());})
+                    .transfer(f.context(f.chestSlot),1,f.chestSlot,f.courierSlot,f.describe(f.chest.getItem(0)),6,moved -> commits[0]++);
+            helper.assertTrue(result.ambiguous()&&commits[0]==0&&f.registry.colony(f.colony).recoveryBlocked(),"Detached native fact published instead of requiring recovery");
+            helper.assertTrue(f.chest.getItem(0).getCount()==12&&f.courier.inventory().getItem(0).getCount()==6,"After-effect detach compensated or lost physical transfer");
+            var fact=f.registry.effects().snapshots().getFirst();
+            helper.assertTrue(fact.state()==EffectRecord.State.AMBIGUOUS&&fact.transfer().inserted()==6&&fact.workId().equals(work.id()),"Exact transferred recovery fact lost original owner");
+        });
+    }
     @GameTest(template="identity_empty",timeoutTicks=240)
     public static void realChestCourierBarrelConservesOneExactStack(GameTestHelper helper) {
         withReadyFixture(helper,f -> {

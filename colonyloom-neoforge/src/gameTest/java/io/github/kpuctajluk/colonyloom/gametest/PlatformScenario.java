@@ -506,10 +506,27 @@ final class PlatformScenario {
         JsonArray readyResidents = new JsonArray();
         for (CitizenEntity citizen : run.citizens) {
             JsonObject readiness = new JsonObject(); readiness.addProperty("citizen", citizen.citizenId().toString());
-            readiness.addProperty("admission", run.runtime.core().registry().citizen(citizen.citizenId()).admission().name());
-            readiness.addProperty("chunkReady", run.runtime.chunks().ready(citizen.citizenId())); readiness.addProperty("chunkReason", run.runtime.chunks().reason(citizen.citizenId()).name()); readyResidents.add(readiness);
+            var coverage=run.runtime.citizenAdmission().coverage(citizen.citizenId());
+            var pos=citizen.blockPosition();
+            var center=new ChunkKey(server.overworld().dimension().location().toString(),pos.getX()>>4,pos.getZ()>>4);
+            readiness.addProperty("admission",run.runtime.core().registry().citizen(citizen.citizenId()).admission().name());
+            readiness.addProperty("chunkReady",coverage!=null&&coverage.ready()); readiness.addProperty("chunkReason",coverage==null?"MISSING":coverage.reason().name());
+            readiness.add("coverage",json(coverage));
+            readiness.addProperty("centerAdmitted",run.runtime.chunks().admitted(center));
+            readiness.addProperty("centerReady",run.runtime.chunks().ready(center,ChunkDemandManager.Readiness.ENTITY_TICKING));
+            readiness.addProperty("nativeEntityTicking",server.overworld().isPositionEntityTicking(pos));
+            readyResidents.add(readiness);
         }
         run.report.add("finalAdmissionReadiness", readyResidents);
+        JsonArray pendingMoves=new JsonArray();
+        for(UUID id:run.moves) {
+            WorkOrder work=run.runtime.core().workBoard().work(id);
+            JsonObject observation=new JsonObject();observation.add("work",json(work.snapshot()));
+            observation.addProperty("navigationState",run.runtime.navigation().state(id).name());
+            observation.addProperty("navigationReason",run.runtime.navigation().reason(id).name());
+            pendingMoves.add(observation);
+        }
+        run.report.add("finalMoveStates",pendingMoves);
         run.report.add("finalMetrics", json(run.runtime.minecraftMetrics().snapshot()));
         run.report.add("actualFinalProfile", limits(run.runtime.core().admission().limits()));
         JsonArray finalCitizens = new JsonArray();

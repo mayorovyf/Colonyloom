@@ -53,10 +53,18 @@ final class ManagementScenario {
         boolean acknowledged;
         Flight(ViewDelta delta,int tick) { this.delta=delta;this.tick=tick; }
     }
+    private enum GuestPhase { MANAGER, DEMOTING, VIEWER }
     private static final class Run {
         MinecraftServerRuntime runtime;
         ServerPlayer owner, viewer;
         UUID colony, citizen, otherColony, work;
+        UUID managerEntity;
+        long managerEpoch, managerAuthority, managerColonyRevision;
+        GuestPhase guestPhase = GuestPhase.MANAGER;
+        Command managerOperation, managerRestore;
+        boolean managerOperationAccepted, managerRestoreAccepted;
+        int managerMemberDenied, managerOwnerDenied;
+        boolean managerSummarySeen, viewerSummarySeen, demotedStaleSeen, demotedFreshDenied;
         ServerPlayer deadOwner, respawnedOwner;
         Connection respawnConnection;
         CitizenEntity protectedCitizen;
@@ -154,9 +162,11 @@ final class ManagementScenario {
                 var record=run.runtime.core().registry().citizen(run.citizen);
                 if(record.readiness()!=CitizenRecord.Readiness.READY||!(server.overworld().getEntity(record.entityId()) instanceof CitizenEntity))return;
                 var fixture=new JsonObject();fixture.addProperty("colony",run.colony.toString());fixture.addProperty("citizen",run.citizen.toString());fixture.addProperty("otherColony",run.otherColony.toString());fixture.addProperty("viewer",VIEWER.toString());
+                fixture.addProperty("managerAuthorityRevision",run.managerAuthority);
                 signal(root,"fixture.json",fixture);run.published=true;
-                fact(root,"authoritative_fixture",true,"real ready citizen="+run.citizen+"; public commands created colonies, storage, workshop and viewer membership");
+                fact(root,"authoritative_fixture",true,"real ready citizen="+run.citizen+"; public commands created colonies, storage, workshop and temporary manager membership");
             }
+            roleProof(server,root,run);
             if(Files.isRegularFile(root.resolve("build-requested"))&&!run.buildVerified) {
                 if(run.buildInputs<2||run.buildResults<2)return;
                 verifyBuild(server,root,run,false);run.buildVerified=true;run.builtAt=run.ticks;
@@ -200,6 +210,9 @@ final class ManagementScenario {
             }
             if(run.buildVerified&&run.revoked&&Files.isRegularFile(root.resolve("owner-done"))&&Files.isRegularFile(root.resolve("viewer-done"))) {
                 if(run.ticks-run.builtAt<40)return;
+                require(root,run.guestPhase==GuestPhase.VIEWER&&run.managerOperationAccepted&&run.managerRestoreAccepted
+                        &&run.demotedStaleSeen&&run.demotedFreshDenied&&Files.isRegularFile(root.resolve("viewer-role-barrier")),
+                        "manager_and_viewer_roles_before_completion","original two non-op clients completed manager proof, demotion and ordinary viewer proof before calibration");
                 require(root,Files.isRegularFile(root.resolve("cancel-requested")),"ui_cancel_signal","owner finished only after actual accepted cancel");
                 require(root,run.deathScheduled&&run.respawnVerified&&run.respawnSummaryVerified&&Files.isRegularFile(root.resolve("owner-respawn-done")),
                         "actual_respawn_completed","normal death/respawn replaced ServerPlayer, retained Connection, refreshed actual summary before reconnect");
@@ -316,9 +329,11 @@ final class ManagementScenario {
         command(server,run,"colonyloom building register "+run.colony+" "+coordinates(TABLE)+" "+coordinates(WORKSHOP));
         run.citizen=uuid(command(server,run,"colonyloom citizen create "+run.colony+" "+coordinates(CITIZEN)),"citizen");
         command(server,run,"colonyloom citizen assign "+run.citizen+" colonyloom:builder");
-        command(server,run,"colonyloom member set "+run.colony+" UIGuest viewer");
+        command(server,run,"colonyloom member set "+run.colony+" UIGuest manager");
         var registry=run.runtime.core().registry();
-        require(root,registry.colony(run.colony).rank(OWNER)==MemberRank.OWNER&&registry.colony(run.colony).rank(VIEWER)==MemberRank.VIEWER&&registry.colony(run.otherColony).rank(VIEWER)==null,"fixture_colony_scope_rank","owner=OWNER viewer=VIEWER foreign colony invisible");
+        require(root,registry.colony(run.colony).rank(OWNER)==MemberRank.OWNER&&registry.colony(run.colony).rank(VIEWER)==MemberRank.MANAGER&&registry.colony(run.otherColony).rank(VIEWER)==null,"fixture_colony_scope_rank","owner=OWNER guest=MANAGER foreign colony invisible");
+        run.managerEntity=registry.citizen(run.citizen).entityId();run.managerEpoch=registry.citizen(run.citizen).bindingEpoch();
+        run.managerAuthority=registry.colony(run.colony).authorityRevision();run.managerColonyRevision=registry.colony(run.colony).revision();
     }
     private static void observe(ServerPlayer player,boolean owner,Run run) {
         var channel=player.connection.getConnection().channel();
@@ -383,17 +398,99 @@ final class ManagementScenario {
             } else viewerOutbound(root,run,payload);
         }
     }
+    private static void roleProof(MinecraftServer server,Path root,Run run)throws Exception {
+        for(String name:List.of("manager-operation","manager-restore")) {
+            if(!Files.isRegularFile(root.resolve(name+"-request"))||Files.isRegularFile(root.resolve(name+"-ready")))continue;
+            require(root,run.guestPhase==GuestPhase.MANAGER,"manager_exact_phase",name);
+            var request=JsonParser.parseString(Files.readString(root.resolve(name+"-request"))).getAsJsonObject();
+            boolean restore=name.equals("manager-restore");
+            require(root,!restore||run.managerOperationAccepted,"manager_restore_after_accepted_operation",name);
+            var record=run.runtime.core().registry().citizen(run.citizen);
+            var command=new Command(UUID.fromString(request.get("sessionId").getAsString()),request.get("sequence").getAsLong(),
+                    run.colony,request.get("revision").getAsLong(),new AssignProfession(run.citizen,restore?"colonyloom:builder":"colonyloom:carpenter"));
+            require(root,command.expectedRevision()==record.revision()&&record.entityId().equals(run.managerEntity)&&record.bindingEpoch()==run.managerEpoch,
+                    "manager_original_citizen_capture",command.toString());
+            if(restore)run.managerRestore=command;else run.managerOperation=command;
+            signal(root,name+"-ready",new JsonObject());
+        }
+        if(run.guestPhase==GuestPhase.MANAGER&&Files.isRegularFile(root.resolve("manager-proof-done"))) {
+            var registry=run.runtime.core().registry();var colony=registry.colony(run.colony);var record=registry.citizen(run.citizen);
+            require(root,run.managerOperationAccepted&&run.managerRestoreAccepted&&run.managerMemberDenied==1&&run.managerOwnerDenied==1,
+                    "manager_graphical_wire_proof_complete","two exact operational accepts, SetMember/SetOwner each ACCESS_DENIED");
+            require(root,colony.ownerId().equals(OWNER)&&colony.rank(VIEWER)==MemberRank.MANAGER&&colony.authorityRevision()==run.managerAuthority
+                    &&colony.revision()==run.managerColonyRevision+2&&record.professionId().equals("colonyloom:builder")
+                    &&record.entityId().equals(run.managerEntity)&&record.bindingEpoch()==run.managerEpoch,
+                    "manager_owner_membership_property_unchanged","original builder restored; owner, membership and native binding unchanged");
+            run.managerColonyRevision=colony.revision();
+            command(server,run,"colonyloom member set "+run.colony+" UIGuest viewer");run.guestPhase=GuestPhase.DEMOTING;
+            var demoted=new JsonObject();demoted.addProperty("authorityRevision",registry.colony(run.colony).authorityRevision());
+            demoted.addProperty("colonyRevision",registry.colony(run.colony).revision());
+            require(root,registry.colony(run.colony).rank(VIEWER)==MemberRank.VIEWER&&registry.colony(run.colony).authorityRevision()>run.managerAuthority,
+                    "manager_public_demotion_applied",demoted.toString());
+            signal(root,"manager-demoted",demoted);
+        }
+        if(run.guestPhase==GuestPhase.DEMOTING&&Files.isRegularFile(root.resolve("viewer-role-ready"))) {
+            var colony=run.runtime.core().registry().colony(run.colony);var record=run.runtime.core().registry().citizen(run.citizen);
+            require(root,run.managerSummarySeen&&run.viewerSummarySeen&&run.demotedStaleSeen&&run.demotedFreshDenied
+                    &&colony.ownerId().equals(OWNER)&&colony.rank(VIEWER)==MemberRank.VIEWER&&record.professionId().equals("colonyloom:builder")
+                    &&record.entityId().equals(run.managerEntity)&&record.bindingEpoch()==run.managerEpoch,
+                    "viewer_role_wire_barrier","actual manager/viewer SUMMARY pages; demoted old revision STALE; fresh operation ACCESS_DENIED; original native builder unchanged");
+            run.guestPhase=GuestPhase.VIEWER;signal(root,"viewer-role-barrier",new JsonObject());
+        }
+    }
+    private static void guestPage(Path root,Run run,ViewData data,String check)throws Exception {
+        boolean manager=data.rank().equals("manager")&&run.guestPhase!=GuestPhase.VIEWER&&data.authorityRevision()==run.managerAuthority;
+        boolean viewer=data.rank().equals("viewer")&&run.guestPhase!=GuestPhase.MANAGER&&data.authorityRevision()>run.managerAuthority;
+        require(root,run.colony!=null&&data.colonyId().equals(run.colony)&&(manager||viewer),check,
+                "phase="+run.guestPhase+" rank="+data.rank()+" authority="+data.authorityRevision()+" state="+data.stateRevision());
+        if(data.type()==ViewType.SUMMARY) {
+            if(manager)run.managerSummarySeen=true;
+            if(viewer)run.viewerSummarySeen=true;
+        }
+    }
     private static void viewerOutbound(Path root,Run run,CustomPacketPayload payload)throws Exception {
         if(payload instanceof CommandResult response) {
             var command=run.viewerCommands.get(response.result().sequence());
-            require(root,response.result().status()!=Status.ACCEPTED,"viewer_wire_no_accepted_mutation",response.result().toString());
+            boolean operation=run.guestPhase==GuestPhase.MANAGER&&command!=null&&command.equals(run.managerOperation);
+            boolean restore=run.guestPhase==GuestPhase.MANAGER&&command!=null&&command.equals(run.managerRestore);
+            if(response.result().status()==Status.ACCEPTED) {
+                require(root,operation||restore,"guest_accepted_only_exact_manager_operation",String.valueOf(command));
+                var record=run.runtime.core().registry().citizen(run.citizen);
+                String profession=restore?"colonyloom:builder":"colonyloom:carpenter";
+                require(root,response.result().objectId().equals(run.citizen)&&record.professionId().equals(profession)
+                        &&record.revision()>=response.result().revision()&&record.entityId().equals(run.managerEntity)&&record.bindingEpoch()==run.managerEpoch,
+                        "manager_accepted_canonical_profession",command+" result="+response.result()+" citizen="+record.citizenId()+" profession="+record.professionId());
+                if(restore)run.managerRestoreAccepted=true;else run.managerOperationAccepted=true;
+            } else {
+                require(root,!operation&&!restore,"manager_operational_command_not_rejected",response.result().toString());
+                require(root,response.result().status()!=Status.ACCEPTED,"viewer_wire_no_accepted_mutation",response.result().toString());
+                if(run.guestPhase==GuestPhase.MANAGER&&command!=null&&(command.body() instanceof SetMember||command.body() instanceof SetOwner)) {
+                    require(root,command.colonyId().equals(run.colony)&&response.result().status()==Status.REJECTED&&response.result().reason().equals("ACCESS_DENIED"),
+                            "manager_owner_only_command_denied",command+" result="+response.result());
+                    if(command.body().equals(new SetMember(VIEWER,"none")))run.managerMemberDenied++;
+                    else if(command.body().equals(new SetOwner(VIEWER)))run.managerOwnerDenied++;
+                    else throw new IllegalStateException("Unexpected manager owner-only probe: "+command);
+                }
+                if(run.guestPhase==GuestPhase.DEMOTING&&command!=null) {
+                    if(command.colonyId().equals(run.colony)&&command.expectedRevision()==run.managerColonyRevision
+                            &&command.body().equals(new Build("colonyloom:stair_strip",new io.github.kpuctajluk.colonyloom.core.colony.WorldPosition("minecraft:overworld",8,64,8),0))) {
+                        require(root,response.result().status()==Status.STALE&&response.result().reason().equals("STALE"),"demoted_old_manager_revision_stale",command+" result="+response.result());
+                        run.demotedStaleSeen=true;
+                    } else if(command.colonyId().equals(run.colony)&&command.body().equals(new AssignProfession(run.citizen,"colonyloom:carpenter"))) {
+                        require(root,run.demotedStaleSeen&&command.expectedRevision()==run.runtime.core().registry().citizen(run.citizen).revision()
+                                &&response.result().status()==Status.REJECTED&&response.result().reason().equals("ACCESS_DENIED"),
+                                "demoted_fresh_operation_denied",command+" result="+response.result());
+                        run.demotedFreshDenied=true;
+                    } else throw new IllegalStateException("Unexpected demotion probe: "+command);
+                }
+            }
             if(command!=null&&command.body() instanceof Build&&response.result().status()==Status.REJECTED&&response.result().reason().equals("ACCESS_DENIED"))run.viewerDenied++;
         } else if(payload instanceof ViewSnapshot page) {
-            require(root,run.colony!=null&&page.data().colonyId().equals(run.colony)&&page.data().rank().equals("viewer"),"viewer_snapshot_scope",page.data().colonyId().toString());run.snapshots++;
+            guestPage(root,run,page.data(),"guest_snapshot_scope");run.snapshots++;
             run.snapshotCounts.merge(page.subscriptionId(),1,Integer::sum);
             if(run.accessClosed>0)run.postRevokeData++;
         } else if(payload instanceof ViewDelta page) {
-            require(root,run.colony!=null&&page.data().colonyId().equals(run.colony)&&page.data().rank().equals("viewer"),"viewer_delta_scope","subscription="+page.subscriptionId()+" revision="+page.data().stateRevision());
+            guestPage(root,run,page.data(),"guest_delta_scope");
             run.flights.put(page.subscriptionId(),new Flight(page,run.ticks));run.deltas++;
             run.deltaCounts.merge(page.subscriptionId(),1,Integer::sum);
             if(run.accessClosed>0)run.postRevokeData++;

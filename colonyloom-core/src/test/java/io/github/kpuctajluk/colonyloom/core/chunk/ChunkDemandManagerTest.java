@@ -59,6 +59,27 @@ final class ChunkDemandManagerTest {
     }
     private static ChunkKey key(int x) { return new ChunkKey("minecraft:overworld", x, 0); }
 
+    @Test void feasibleCriticalDemandProgressesWhileNormalEvictionPlanIsBlocked() {
+        Fixture f=new Fixture(200,100,30);
+        var limits=f.budgets.limits().withResource(Resource.CHUNK_DEMANDS,16384)
+                .withBudget(Budget.DIRTY_RESCAN_OBJECTS,4);
+        f.registry.admission().updateLimits(limits);f.budgets.updateLimits(limits);
+        for(int i=1;i<=300;i++)f.request(new UUID(1,i),0,Lane.NORMAL,false);
+        f.ticks(650);
+        f.request(A,0,Lane.NORMAL,true);f.request(B,0,Lane.CRITICAL,true);
+        int spare=16384-f.registry.admission().used(Resource.CHUNK_DEMANDS);
+        try(var occupied=f.registry.admission().reserve(COLONY,Lane.NORMAL,java.util.Map.of(Resource.CHUNK_DEMANDS,spare))) {
+            assertFalse(f.registry.admission().canReserve(COLONY,Lane.CRITICAL,java.util.Map.of(Resource.CHUNK_DEMANDS,1)));
+            f.ticks(12);
+            assertTrue(f.manager.ready(B),"Feasible critical demand must not wait for an unrelated eviction scan");
+            assertFalse(f.manager.admitted(A),"Normal admission must still respect the critical blockade");
+            assertEquals(25,f.manager.footprint());assertEquals(1,f.access.starts);
+        }
+        f.ticks(12);assertTrue(f.manager.ready(A));
+        f.manager.close();assertTrue(f.access.held.isEmpty());
+        assertEquals(0,f.registry.admission().used(Resource.CHUNK_DEMANDS));
+    }
+
     @Test void sameChunkTwoOwnersShareTicketAndRemovingOneRetainsOther() {
         Fixture f = new Fixture(58, 18, 2);
         f.request(A, 0, Lane.NORMAL, false); f.request(B, 0, Lane.NORMAL, false);
@@ -72,6 +93,61 @@ final class ChunkDemandManagerTest {
         f.manager.release(B);
         assertEquals(1, f.access.releases); assertEquals(0, f.manager.footprint());
         assertEquals(0, f.registry.admission().used(Resource.CHUNK_DEMANDS));
+    }
+
+    @Test void lastCrossColonyEntityCoverageLossPublishesAfterChargeRemoval() {
+        Fixture f = new Fixture(200, 9, 1);
+        UUID other = new UUID(0, 2000);
+        f.manager.request(A, COLONY, List.of(key(0)), Readiness.ENTITY_TICKING, Lane.NORMAL, 0, false);
+        f.manager.request(B, other, List.of(key(0)), Readiness.ENTITY_TICKING, Lane.CRITICAL, 0, false);
+        f.manager.request(C, COLONY, List.of(key(0)), Readiness.LOADED, Lane.NORMAL, 0, false);
+        f.ticks(20);
+        var lost = new java.util.ArrayList<ChunkKey>();
+        f.manager.setCoverageLossListener(center -> {
+            assertFalse(f.manager.admitted(center));
+            assertEquals(0, f.manager.entityTicking());
+            lost.add(center);
+        });
+        f.manager.release(A);
+        assertTrue(f.manager.admitted(key(0))); assertTrue(lost.isEmpty());
+        f.manager.release(B);
+        assertEquals(List.of(key(0)), lost);
+        assertTrue(f.manager.ready(C)); assertEquals(25, f.manager.footprint());
+        f.manager.release(C);
+        assertEquals(List.of(key(0)), lost);
+        assertEquals(0, f.registry.admission().used(Resource.CHUNK_DEMANDS));
+    }
+
+    @Test void coverageListenerCanReleaseWithdrawnOwnerWithoutRecursiveChargeRemoval() {
+        Fixture f=new Fixture(200,18,2);
+        f.request(A,0,Lane.NORMAL,false);f.ticks(3);
+        f.manager.setCoverageLossListener(center -> f.manager.release(A));
+        f.limits(16);f.tick();
+        assertEquals(0,f.manager.footprint());assertTrue(f.access.held.isEmpty());
+        assertEquals(0,f.registry.admission().used(Resource.CHUNK_DEMANDS));
+        f.request(B,8,Lane.NORMAL,false);f.limits(200);f.ticks(3);
+        assertTrue(f.manager.ready(B));f.manager.release(B);
+        assertEquals(0,f.manager.footprint());assertTrue(f.access.held.isEmpty());
+    }
+
+    @Test void replacementCoverageListenerSeesPublishedSuccessorAndCanCancelIt() {
+        Fixture f=new Fixture(200,18,2);
+        f.request(A,0,Lane.NORMAL,false);f.ticks(3);
+        f.manager.setCoverageLossListener(center -> f.manager.release(A));
+        f.request(A,8,Lane.NORMAL,false);f.ticks(3);
+        assertFalse(f.manager.admitted(A));assertEquals(0,f.manager.footprint());
+        assertTrue(f.access.held.isEmpty());assertEquals(0,f.registry.admission().used(Resource.CHUNK_DEMANDS));
+    }
+
+    @Test void dependencyHandoffWithSameEntityCenterDoesNotPublishTransientCoverageLoss() {
+        Fixture f=new Fixture(29,9,1);
+        f.request(A,0,Lane.NORMAL,false);f.ticks(3);
+        var lost=new java.util.ArrayList<ChunkKey>();f.manager.setCoverageLossListener(lost::add);
+        f.request(B,0,Lane.CRITICAL,true);f.ticks(20);
+        assertTrue(f.manager.ready(B));assertTrue(lost.isEmpty());
+        f.manager.release(A);assertTrue(lost.isEmpty());
+        f.manager.release(B);assertEquals(List.of(key(0)),lost);
+        assertEquals(0,f.manager.footprint());assertTrue(f.access.held.isEmpty());
     }
 
     @Test void differentColoniesShareGlobalFootprintButKeepIndependentTicketOwnership() {

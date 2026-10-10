@@ -41,6 +41,7 @@ public final class CitizenAdmissionService implements AutoCloseable {
         ResourceKey<net.minecraft.world.level.Level> observedDimension;
         boolean eligible, pending, awaitingEmbodiment;
         Entry pendingPrevious, pendingNext;
+        Entry observedPrevious, observedNext;
         Entry(UUID id) { this.id = id; demandOwner = id; }
     }
     private final MinecraftServer server;
@@ -49,6 +50,7 @@ public final class CitizenAdmissionService implements AutoCloseable {
     private final ChunkDemandManager chunks;
     private final ArrayList<Entry> entries = new ArrayList<>();
     private final Map<UUID, Entry> index = new HashMap<>();
+    private final Map<ChunkKey, Entry> observedResidents = new HashMap<>();
     private int cursor;
     private Entry pendingHead, pendingTail;
     private boolean pendingTurn;
@@ -56,7 +58,31 @@ public final class CitizenAdmissionService implements AutoCloseable {
     public void onFoodNeed(java.util.function.Consumer<UUID> listener) { registry.requireOwner(); foodNeed = java.util.Objects.requireNonNull(listener); }
     public CitizenAdmissionService(MinecraftServer server, ServerRuntime runtime, ChunkDemandManager chunks) {
         this.server = server; this.runtime = runtime; this.registry = runtime.registry(); this.chunks = chunks;
+        chunks.setCoverageLossListener(this::coverageLost);
         for (CitizenRecord citizen : registry.citizensView()) observe(citizen.citizenId());
+    }
+    private void observeCenter(Entry entry, ChunkKey center) {
+        if (java.util.Objects.equals(center, entry.observedCenter)) return;
+        if (entry.observedCenter != null) {
+            if (entry.observedPrevious != null) entry.observedPrevious.observedNext = entry.observedNext;
+            else if (entry.observedNext != null) observedResidents.put(entry.observedCenter, entry.observedNext);
+            else observedResidents.remove(entry.observedCenter);
+            if (entry.observedNext != null) entry.observedNext.observedPrevious = entry.observedPrevious;
+        }
+        entry.observedCenter = center;
+        entry.observedPrevious = null;
+        entry.observedNext = center == null ? null : observedResidents.put(center, entry);
+        if (entry.observedNext != null) entry.observedNext.observedPrevious = entry;
+    }
+    private void coverageLost(ChunkKey center) {
+        // No entity lookup, demand replacement, or dirty sweep inside chunk withdrawal.
+        // Native ticks alone resume the exact embodiment after charged coverage returns.
+        for (Entry entry = observedResidents.get(center); entry != null; entry = entry.observedNext) {
+            entry.eligible = false;
+            entry.awaitingEmbodiment = true;
+            enqueue(entry);
+            runtime.commands().updateCitizenAdmission(entry.id, CitizenRecord.Admission.INACTIVE);
+        }
     }
     public void observe(UUID citizenId) {
         registry.requireOwner();
@@ -125,11 +151,12 @@ public final class CitizenAdmissionService implements AutoCloseable {
         return embodiment(citizen, entity) && citizen.readiness() == CitizenRecord.Readiness.READY;
     }
     private void releaseDemands(Entry entry) {
+        observeCenter(entry, null);
         chunks.release(entry.id);
         chunks.release(entry.rolloverId);
         entry.demandOwner = entry.id;
         entry.retainedOwner = null;
-        entry.center = entry.observedCenter = entry.retainedCenter = null;
+        entry.center = entry.retainedCenter = null;
         entry.observedDimension = null;
         entry.awaitingEmbodiment = false;
     }
@@ -242,7 +269,7 @@ public final class CitizenAdmissionService implements AutoCloseable {
         }
         WorldPosition position = new WorldPosition(level.dimension().location().toString(), entity.blockPosition().getX(), entity.blockPosition().getY(), entity.blockPosition().getZ());
         ChunkKey center = new ChunkKey(position.dimension(), Math.floorDiv(position.x(), 16), Math.floorDiv(position.z(), 16));
-        entry.observedCenter = center;
+        observeCenter(entry, center);
         entry.observedDimension = level.dimension();
         requestCenter(entry, citizen, center);
         if (entry.retainedOwner != null && !chunks.admitted(entry.demandOwner)
@@ -290,7 +317,7 @@ public final class CitizenAdmissionService implements AutoCloseable {
         if (center == null || center.x() != (position.getX() >> 4) || center.z() != (position.getZ() >> 4)
                 || !dimension.equals(entry.observedDimension)) {
             center = new ChunkKey(dimension.location().toString(), position.getX() >> 4, position.getZ() >> 4);
-            entry.observedCenter = center;
+            observeCenter(entry, center);
             entry.observedDimension = dimension;
             WorldPosition observed = new WorldPosition(center.dimension(), position.getX(), position.getY(), position.getZ());
             registry.beforeMutation(); registry.updateCitizen(citizen.withPosition(observed));
@@ -322,7 +349,8 @@ public final class CitizenAdmissionService implements AutoCloseable {
         if (registry.citizen(entry.id).food() <= 6) foodNeed.accept(entry.id);
     }
     @Override public void close() {
+        chunks.setCoverageLossListener(ignored -> {});
         for (Entry entry : entries) { if(entry.entity!=null)entry.entity.managedActiveTick(null); releaseDemands(entry); }
-        entries.clear(); index.clear(); pendingHead = pendingTail = null;
+        entries.clear(); index.clear(); observedResidents.clear(); pendingHead = pendingTail = null;
     }
 }

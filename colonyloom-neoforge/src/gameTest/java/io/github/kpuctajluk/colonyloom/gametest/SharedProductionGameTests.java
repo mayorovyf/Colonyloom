@@ -81,6 +81,11 @@ public final class SharedProductionGameTests {
         run(helper,true);
     }
 
+    @GameTest(template="identity_empty",batch="stage10_shared_coverage_pause",timeoutTicks=6200)
+    public static void sharedBegunBatchResumesOriginalProducerAfterChunkCoverageWithdrawal(GameTestHelper helper) {
+        run(helper,false,PauseMode.COVERAGE);
+    }
+
     @GameTest(template="identity_empty",batch="stage10_shared_food_pause",timeoutTicks=6200)
     public static void sharedBegunBatchResumesOriginalProducerAfterNativeFoodPreemption(GameTestHelper helper) {
         run(helper,false,PauseMode.FOOD);
@@ -96,14 +101,17 @@ public final class SharedProductionGameTests {
         run(helper,false,PauseMode.OUTPUT_CHANGED);
     }
 
-    private enum PauseMode { NONE,FOOD,OUTPUT,OUTPUT_CHANGED }
+    private enum PauseMode { NONE,FOOD,OUTPUT,OUTPUT_CHANGED,COVERAGE }
 
     private static void run(GameTestHelper helper,boolean blockReceiver) {
         run(helper,blockReceiver,PauseMode.NONE);
     }
 
     private static void run(GameTestHelper helper,boolean blockReceiver,PauseMode pauseMode) {
-        var origin=helper.absolutePos(new BlockPos(1,1,1));
+        var baseOrigin=helper.absolutePos(new BlockPos(1,1,1));
+        var origin=pauseMode==PauseMode.COVERAGE
+                ? new BlockPos(Math.floorDiv(baseOrigin.getX(),16)*16+8,baseOrigin.getY(),Math.floorDiv(baseOrigin.getZ(),16)*16+8)
+                : baseOrigin;
         var access=new NeoForgeChunkAccess(helper.getLevel().getServer(),new TicketController(ResourceLocation.parse("colonyloom:runtime")));
         UUID ticketOwner=UUID.randomUUID(); List<ChunkKey> keys=new ArrayList<>();
         String dimension=helper.getLevel().dimension().location().toString();
@@ -127,6 +135,7 @@ public final class SharedProductionGameTests {
                 for(var key:keys) access.release(ticketOwner,key,ChunkDemandManager.Readiness.ENTITY_TICKING);
                 helper.succeed();
             } catch(RuntimeException|AssertionError failure) {
+                failure.printStackTrace();
                 done[0]=true;
                 if(fixture[0]!=null) fixture[0].close();
                 for(var key:keys) access.release(ticketOwner,key,ChunkDemandManager.Readiness.ENTITY_TICKING);
@@ -160,9 +169,10 @@ public final class SharedProductionGameTests {
                 Budget.BLUEPRINT_COMPARISONS,Budget.PHYSICAL_ACTIONS,Budget.STORAGE_SLOT_CHECKS,Budget.CHUNK_REQUESTS,
                 Budget.VIEW_ROWS,Budget.DIRTY_RESCAN_OBJECTS};
         final int[] frozenQuanta={3,1,1,4,1,60,1,1,1};
-        UUID originalProducer,originalWork,foodWork;
-        long preemptedActive,resumedActive;long detachedRemaining=-1;
+        UUID originalProducer,originalWork,foodWork,originalEntity,productionChunkOwner;
+        long originalEpoch,preemptedActive,resumedActive;long detachedRemaining=-1,coverageRemaining=-1,coverageActive=-1,coverageResumedActive=-1;
         boolean foodTriggered,foodDetached,foodConsumed,foodResumed,outputChanged,staleOutputRejected;
+        boolean coveragePriorityChanged,coverageWithdrawalPrepared,coverageLost,coverageRequestsRestored,coverageResumed;
         int outputPauses,outputCursorBeforeAttempt;
         long outputAttemptTick=-1;
         UUID batch,surplus;
@@ -228,15 +238,16 @@ public final class SharedProductionGameTests {
             core.scheduler().physicalExecutor(WorkOrder.CONSTRUCTION,construction); core.scheduler().physicalExecutor(WorkOrder.DELIVERY,delivery); core.scheduler().physicalExecutor(WorkOrder.PRODUCTION,production);core.scheduler().physicalExecutor(WorkOrder.FOOD,food);
             core.scheduler().beforeWork(this::beforeWork);
             core.scheduler().beforeStep(() -> {
+                if(pauseMode==PauseMode.COVERAGE) {prepareCoverageWithdrawal();return;}
                 if(pauseMode!=PauseMode.OUTPUT&&pauseMode!=PauseMode.OUTPUT_CHANGED)return;
-                var order=batch==null?null:core.registry().supply().production(batch);
-                if(order==null||order.terminal()||!order.workId().equals(executingWork().id()))return;
-                outputAttemptTick=core.serverTick();outputCursorBeforeAttempt=outputCursor();
-                // Unrelated native observers have used56 checks; the frozen60-check quota
-                // still admits the exact four-slot final guard on a later paid turn.
-                while(core.budgets().used(Budget.STORAGE_SLOT_CHECKS)<56)
-                    if(!core.budgets().tryConsume(Budget.STORAGE_SLOT_CHECKS,Lane.NORMAL))break;
-            });
+                 var order=batch==null?null:core.registry().supply().production(batch);
+                 if(order==null||order.terminal()||!order.workId().equals(executingWork().id()))return;
+                 outputAttemptTick=core.serverTick();outputCursorBeforeAttempt=outputCursor();
+                 // Unrelated native observers have used56 checks; the frozen60-check quota
+                 // still admits the exact four-slot final guard on a later paid turn.
+                 while(core.budgets().used(Budget.STORAGE_SLOT_CHECKS)<56)
+                     if(!core.budgets().tryConsume(Budget.STORAGE_SLOT_CHECKS,Lane.NORMAL))break;
+             });
             context=new ColonyCommands.CommandContext(owner,false,new ColonyCommands.PhysicalChecks() {
                 public void validateTerritory(Territory territory) {}
                 public void validateCitizenPosition(ColonyRuntime colony,WorldPosition position) {}
@@ -293,6 +304,40 @@ public final class SharedProductionGameTests {
             try {var field=state.getClass().getDeclaredField("outputs");field.setAccessible(true);return !((List<?>)field.get(state)).isEmpty();}
             catch(ReflectiveOperationException failure) {throw new IllegalStateException("Missing production output hint",failure);}
         }
+        private void prepareCoverageWithdrawal() {
+            if(coverageWithdrawalPrepared||!coveragePriorityChanged||originalWork==null)return;
+            var work=executingWork();
+            if(!originalWork.equals(work.id())||!originalProducer.equals(work.assignee()))return;
+            var order=core.registry().supply().production(batch);
+            if(order.terminal()||!order.batchStarted()||order.remainingActiveTicks()==0)return;
+            productionChunkOwner=productionChunkOwner();
+            if(!chunks.admitted(productionChunkOwner))return;
+            var residentCoverage=citizens.stream().map(entity -> admission.coverage(entity.citizenId())).toList();
+            check(residentCoverage.stream().allMatch(value -> value!=null&&value.desiredCenter()!=null&&value.observedCenter()!=null),"Coverage fixture lacks observed resident loading desires");
+            var center=admission.coverage(originalProducer).observedCenter();
+            check(chunks.admitted(center),"Production domain did not cover the exact producer center");
+            coverageActive=core.registry().citizen(originalProducer).activeTimeTicks();
+            coverageRemaining=order.remainingActiveTicks();
+            // Revoke current navigation continuations before removing their chunk-owner links.
+            for(var existing:core.workBoard().works())navigation.cancel(existing.id());
+            for(var owner:chunkDemandOwners())if(!owner.equals(productionChunkOwner))chunks.release(owner);
+            coverageWithdrawalPrepared=true;
+            check(chunks.admitted(center)&&chunks.admitted(productionChunkOwner),"Production owner was not the sole retained center coverage");
+        }
+
+        private UUID productionChunkOwner() {
+            var state=productionState();
+            if(state==null)throw new IllegalStateException("Missing active production state during coverage withdrawal");
+            try {var field=state.getClass().getDeclaredField("chunkOwner");field.setAccessible(true);return (UUID)field.get(state);}
+            catch(ReflectiveOperationException failure) {throw new IllegalStateException("Missing production chunk owner observer",failure);}
+        }
+
+        private List<UUID> chunkDemandOwners() {
+            try {
+                var field=chunks.getClass().getDeclaredField("demands");field.setAccessible(true);
+                return List.copyOf(((Map<UUID,?>)field.get(chunks)).keySet());
+            } catch(ReflectiveOperationException failure) {throw new IllegalStateException("Missing scoped chunk-demand observer",failure);}
+        }
 
         private void citizen(BlockPos start,String profession,UUID workplace) {
             var level=helper.getLevel(); UUID id=UUID.randomUUID();
@@ -316,6 +361,7 @@ public final class SharedProductionGameTests {
                 check(core.registry().construction().site(a.id()).consumed()==0 && core.registry().construction().site(b.id()).consumed()==0,"Sites placed before batch began");
                 batch=shared.id(); core.commands().cancelWork(context,a.id()); cancelled=true;
                 originalProducer=shared.citizenId();originalWork=shared.workId();
+                var producer=core.registry().citizen(originalProducer);originalEntity=producer.entityId();originalEpoch=producer.bindingEpoch();
                 if(pauseMode==PauseMode.FOOD) {
                     preemptedActive=core.registry().citizen(originalProducer).activeTimeTicks();
                     core.registry().updateCitizen(core.registry().citizen(originalProducer).withFood(6));foodTriggered=true;
@@ -324,6 +370,7 @@ public final class SharedProductionGameTests {
                 check(retained.batchStarted() && !retained.terminal() && retained.batches()==1,"Cancellation destroyed shared begun batch");
                 var promised=supply.orderShares(batch).stream().filter(share -> share.stage()==CoverageShare.Stage.PROMISED_OUTPUT).toList();
                 check(promised.size()==1 && promised.getFirst().quantity()==1 && supply.demand(promised.getFirst().demandId()).snapshot().ownerId().equals(b.id()),"Cancelled A retained output promise or B lost its share");
+                if(pauseMode==PauseMode.COVERAGE) {core.workBoard().priority(originalWork,1);coveragePriorityChanged=true;}
             }
             if(pauseMode!=PauseMode.NONE) {
                 for(int i=0;i<frozenBudgets.length;i++) {
@@ -335,6 +382,7 @@ public final class SharedProductionGameTests {
                 check(originalWork.equals(order.workId()),"Pause replaced the original production work");
                 if(!order.terminal())check(originalProducer.equals(order.citizenId()),"Pause replaced the begun batch's exact producer");
                 if(pauseMode==PauseMode.FOOD)observeFoodPause(order);
+                else if(pauseMode==PauseMode.COVERAGE)observeCoveragePause(order,work);
                 else observeOutputPause(order,work);
             }
             var internal=supply.demands().stream().map(Demand::snapshot).filter(d -> supply.productionSurplus(d.id()) && d.matcher().itemId().equals("minecraft:oak_stairs")).findFirst().orElse(null);
@@ -361,6 +409,55 @@ public final class SharedProductionGameTests {
             if(completedAt<0) completedAt=core.serverTick();
             if(core.serverTick()-completedAt<40) return false;
             assertComplete(); return true;
+        }
+
+        private void observeCoveragePause(io.github.kpuctajluk.colonyloom.core.production.ProductionOrder order,WorkOrder work) {
+            var citizen=core.registry().citizen(originalProducer);
+            check(citizen.entityId().equals(originalEntity)&&citizen.bindingEpoch()==originalEpoch,"Coverage withdrawal changed the producer embodiment identity");
+            if(!coverageLost&&citizen.admission()==CitizenRecord.Admission.INACTIVE) {
+                coverageLost=true;
+                check(citizen.activeTimeTicks()==coverageActive,"Coverage withdrawal advanced the producer active clock in its current executor turn");
+                check(citizen.assignedWorkId()==null&&work.assignee()==null&&work.state()==WorkOrder.State.WAITING
+                        &&work.waitingReason()==WorkOrder.Reason.RECONCILING,"Coverage loss did not preserve the original waiting continuation");
+                check(order.batchStarted()&&order.batches()==1&&order.completedBatches()==0&&order.remainingActiveTicks()==coverageRemaining
+                        &&order.id().equals(batch)&&order.workId().equals(originalWork)&&order.citizenId().equals(originalProducer),
+                        "Coverage loss changed the begun native batch, exact producer, or active-time balance");
+                check(count(workshop,Items.OAK_PLANKS)==6&&total(Items.OAK_STAIRS)==0
+                        &&core.registry().effects().snapshots().stream().noneMatch(effect -> effect.craft()!=null),
+                        "Coverage loss expended the native kit, produced stairs, or published craft evidence");
+            }
+            if(coverageLost&&!coverageRequestsRestored) {
+                for(var entity:citizens) {
+                    var resident=core.registry().citizen(entity.citizenId());
+                    var coverage=admission.coverage(resident.citizenId());
+                    check(coverage!=null&&coverage.desiredCenter()!=null,"Coverage withdrawal lost a resident loading desire");
+                    chunks.request(coverage.demandOwner(),resident.colonyId(),List.of(coverage.desiredCenter()),
+                            ChunkDemandManager.Readiness.ENTITY_TICKING,Lane.NORMAL,0,false);
+                    admission.observe(resident.citizenId());
+                }
+                check(chunks.state(admission.coverage(originalProducer).demandOwner())==ChunkDemandManager.State.WAITING,
+                        "Original producer resident desire did not remain queued after coverage loss");
+                coverageRequestsRestored=true;
+            }
+            if(coverageLost&&coverageRequestsRestored&&!coverageResumed) {
+                // Native admission resumes the own clock before the budgeted scheduler can
+                // rebind this work. Only INACTIVE time is frozen; neither interval may pay the batch.
+                if(citizen.admission()==CitizenRecord.Admission.INACTIVE)
+                    check(citizen.activeTimeTicks()==coverageActive,"Inactive coverage pause advanced producer own-time");
+                else check(citizen.activeTimeTicks()>=coverageActive
+                                &&admission.coverage(originalProducer).admitted()&&admission.coverage(originalProducer).ready(),
+                        "Producer own-time resumed before real charged coverage returned");
+                check(order.remainingActiveTicks()==coverageRemaining&&order.batchStarted()&&order.batches()==1&&order.completedBatches()==0,
+                        "Coverage pause advanced or replaced the original batch before producer rebind");
+                if(originalWork.equals(citizen.assignedWorkId())) {
+                    check(citizen.admission()==CitizenRecord.Admission.ACTIVE&&originalProducer.equals(work.assignee())
+                            &&work.state()==WorkOrder.State.RUNNING,"Original producer resumed without exact native assignment");
+                    coverageResumed=true;coverageResumedActive=citizen.activeTimeTicks();
+                }
+            } else if(coverageRequestsRestored&&coverageResumed&&!order.terminal()) {
+                check(order.remainingActiveTicks()>=Math.max(0,coverageRemaining-(citizen.activeTimeTicks()-coverageResumedActive)),
+                        "Production counted time outside the resumed producer's native active clock");
+            }
         }
 
         private void observeFoodPause(io.github.kpuctajluk.colonyloom.core.production.ProductionOrder order) {
@@ -435,7 +532,9 @@ public final class SharedProductionGameTests {
             if(pauseMode==PauseMode.FOOD) {
                 check(foodTriggered&&foodDetached&&foodConsumed&&foodResumed,"Shared batch did not exercise native food preemption and original producer resumption");
                 check(total(Items.BREAD)==0&&core.registry().effects().snapshots().stream().filter(effect -> effect.food()!=null).count()==1,"Food pause lost/duplicated native bread");
-                check(originalProducer.equals(core.registry().effects().snapshots().stream().filter(effect -> effect.craft()!=null).findFirst().orElseThrow().citizenId()),"Batch completed on a substitute producer");
+            } else if(pauseMode==PauseMode.COVERAGE) {
+                check(coverageWithdrawalPrepared&&coverageLost&&coverageRequestsRestored&&coverageResumed,
+                        "Coverage pause did not lose and restore admission before resuming the original producer");
             } else if(pauseMode==PauseMode.OUTPUT||pauseMode==PauseMode.OUTPUT_CHANGED) {
                 check(outputPauses>=6,"Shared batch did not pay multiple native output portions across pauses");
                 check(total(Items.STONE)==25*64,"Paused capacity validation deleted/created unrelated native property");

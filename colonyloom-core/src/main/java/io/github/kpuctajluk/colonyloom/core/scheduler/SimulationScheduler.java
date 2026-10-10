@@ -33,6 +33,7 @@ public final class SimulationScheduler {
     private final Map<UUID,Node> assignments = new HashMap<>();
     private final Map<UUID,ArrayList<Node>> dependents = new HashMap<>();
     private int eventCursor;
+    private int continuationCursor;
     private int compare(Node a, Node b) {
         int result = Integer.compare(b.score,a.score);
         if (result == 0) result = Long.compare(a.schedulingSince,b.schedulingSince);
@@ -138,12 +139,17 @@ public final class SimulationScheduler {
         tick = monotonicTick; clock = Math.incrementExact(clock); budgets.beginTick(monotonicTick);
         long managedStart = System.nanoTime();
         try {
-        // A calibrated one-unit quota cannot be monopolized by platform hooks before dirty debt.
-        if ((monotonicTick & 1) == 0) {
-            for (int phase=0;phase<3;phase++) {
-                int selected=(int)((monotonicTick/2+phase)%3);
-                if (selected==0 ? rescanOne() : selected==1 ? fanoutOne() : wakeDueOne()) break;
+        // Reserve paid scheduler continuation before platform cursors drain the shared quota.
+        // Quota one alternates ownership; larger quotas always leave a platform portion.
+        int dirtyQuota=budgets.limits().budget(Budget.DIRTY_RESCAN_OBJECTS);
+        int reserved=dirtyQuota==1 ? ((monotonicTick&1)==0 ? 1 : 0) : (dirtyQuota+1)/2;
+        for(int portion=0;portion<reserved && budgets.timeAvailable();portion++) {
+            boolean advanced=false;
+            for(int checked=0;checked<4;checked++) {
+                int selected=continuationCursor;continuationCursor=(continuationCursor+1)%4;
+                if(selected==0 || selected==2 ? rescanOne() : selected==1 ? wakeDueOne() : fanoutOne()) {advanced=true;break;}
             }
+            if(!advanced)break;
         }
         beforeWork.accept(monotonicTick);
         for (int i=0;i<colonies.size();i++) { ColonyQueue queue = colonies.get(i); if (queue.active) queue.activeClock++; }
@@ -311,6 +317,16 @@ public final class SimulationScheduler {
         } finally { board.registry().metrics().record(Timer.DIRTY_RESCAN_UNIT, System.nanoTime() - start); }
     }
     private boolean enqueue(Node node) {
+        if (WorkOrder.FOOD.equals(node.work.typeId()) && node.work.assignee() == null) {
+            var demand = board.registry().supply().foodDemandForWork(node.work.id());
+            if (demand == null || demand.snapshot().allocated() == 0) {
+                // Allocation invalidation wakes the consumer; polling must not displace its bread route.
+                deadlines.remove(node.due);
+                board.transition(node.work.id(),State.WAITING,
+                        board.ledger().normalAdmissionBlocked() ? Reason.CRITICAL_CAPACITY : Reason.MATERIALS,"food");
+                return true;
+            }
+        }
         for (int i=0;i<freeReady.size();i++) {
             Lease lease = freeReady.get(i);
             if (lease.transfer(node.work.colonyId(),node.work.lane())) {

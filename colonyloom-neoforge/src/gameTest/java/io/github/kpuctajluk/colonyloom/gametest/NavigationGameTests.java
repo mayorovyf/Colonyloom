@@ -5,6 +5,7 @@ import io.github.kpuctajluk.colonyloom.core.chunk.ChunkDemandManager;
 import io.github.kpuctajluk.colonyloom.core.colony.ColonyRuntime;
 import io.github.kpuctajluk.colonyloom.core.colony.Territory;
 import io.github.kpuctajluk.colonyloom.core.colony.WorldPosition;
+import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Resource;
 import io.github.kpuctajluk.colonyloom.core.navigation.NavigationService;
 import io.github.kpuctajluk.colonyloom.core.runtime.ServerRuntime;
 import io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger.Lane;
@@ -40,6 +41,92 @@ public final class NavigationGameTests {
     public static void vanillaWalkCancellationAndInactivePhysicalDamage(GameTestHelper helper) {
         walk(helper,helper.absolutePos(new BlockPos(1,1,1)));
     }
+    @GameTest(template="identity_empty",batch="stage14_navigation_query_cancel",timeoutTicks=500)
+    public static void pendingNativeQueryCancellationReturnsPoolCapacityWithoutStoppingSuccessor(GameTestHelper helper) {
+        var level=helper.getLevel();var anchor=helper.absolutePos(new BlockPos(1,1,1));
+        BlockPos origin=new BlockPos((anchor.getX()&~15)+1,anchor.getY()+40,(anchor.getZ()&~15)+1);
+        String dimension=level.dimension().location().toString();
+        // Enclose the supported wall arena so adjacent test terrain cannot supply a short escape.
+        for(int x=-2;x<=34;x++)for(int z=-2;z<=34;z++) {
+            BlockPos feet=origin.offset(x,0,z);level.setBlockAndUpdate(feet.below(),Blocks.STONE.defaultBlockState());
+            for(int y=0;y<3;y++)level.setBlockAndUpdate(feet.above(y),x==-2||x==34||z==-2||z==34||x==12&&z<=28 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState());
+        }
+        ServerRuntime core=ServerRuntime.start(Thread.currentThread());core.configureCommands(() -> {},List.of());
+        core.updateLimits(core.admission().limits().scale300Capacity());UUID colony=UUID.randomUUID();
+        core.registry().addColony(new ColonyRuntime(colony,"Pending query reuse",new Territory(dimension,
+                origin.getX()-16,origin.getZ()-16,origin.getX()+48,origin.getZ()+48),UUID.randomUUID(),Map.of(),1,1,false,null,false));
+        var chunks=new ChunkDemandManager(core.registry(),core.budgets(),new NeoForgeChunkAccess(level.getServer(),new TicketController(ResourceLocation.parse("colonyloom:runtime"))));
+        var backend=new MinecraftNavigationBackend(level.getServer(),core.registry(),chunks);
+        int capacity=((Number)backend.diagnostics().get("maxConcurrentQueries")).intValue();
+        var region=new java.util.ArrayList<io.github.kpuctajluk.colonyloom.core.chunk.ChunkKey>();
+        for(int x=(origin.getX()-2)>>4;x<=(origin.getX()+34)>>4;x++)for(int z=(origin.getZ()-2)>>4;z<=(origin.getZ()+34)>>4;z++)
+            region.add(new io.github.kpuctajluk.colonyloom.core.chunk.ChunkKey(dimension,x,z));
+        var requests=new java.util.ArrayList<NavigationService.Request>();var entities=new java.util.ArrayList<CitizenEntity>();
+        var nativeIds=new java.util.ArrayList<UUID>();var bread=new java.util.ArrayList<ItemStack>();boolean[] closed={false};
+        Runnable cleanup=() -> {
+            if(closed[0])return;closed[0]=true;
+            for(var request:requests)backend.stop(request);
+            chunks.close();for(var entity:entities)entity.remove(Entity.RemovalReason.DISCARDED);core.beginStopping();core.stop();
+        };
+        helper.testInfo.addListener(new GameTestListener() {
+            public void testStructureLoaded(GameTestInfo test) {}
+            public void testPassed(GameTestInfo test,GameTestRunner runner) {cleanup.run();}
+            public void testFailed(GameTestInfo test,GameTestRunner runner) {cleanup.run();}
+            public void testAddedForRerun(GameTestInfo original,GameTestInfo rerun,GameTestRunner runner) {}
+        });
+        core.scheduler().beforeWork(chunks::tick);
+        core.scheduler().physicalExecutor(WorkOrder.MOVE,new SimulationScheduler.PhysicalExecutor() {
+            public void step(WorkOrder work,long tick) {}
+            public void cancel(UUID id) {for(var request:requests)if(request.workId().equals(id))backend.stop(request);}
+        });
+        for(int i=0;i<=capacity;i++) {
+            UUID citizen=UUID.randomUUID(),workId=UUID.randomUUID();BlockPos start=origin.offset(4,0,4+i%20);
+            CitizenEntity entity=(CitizenEntity)BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.parse("colonyloom:citizen")).create(level);
+            if(entity==null)throw new IllegalStateException("Pending query resident factory unavailable");
+            entity.initializeIdentity(citizen,1);entity.moveTo(start.getX()+0.5,start.getY(),start.getZ()+0.5,0,0);
+            ItemStack carried=new ItemStack(Items.BREAD,3);entity.inventory().setItem(0,carried);UUID nativeId=entity.getUUID();
+            core.registry().addCitizen(new CitizenRecord(citizen,colony,nativeId,1,null,null,null,null,Map.of(),Map.of("food",20),
+                    CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.UNKNOWN,0,Map.of("food",1200L),position(dimension,start),1),proposed -> {
+                if(!level.addFreshEntity(entity))throw new IllegalStateException("Pending query resident spawn refused");
+            });
+            core.bindings().observe(citizen,nativeId,1);entity.setQuarantined(false);core.commands().updateCitizenReadiness(citizen,CitizenRecord.Readiness.READY);
+            var work=core.workBoard().createMove(workId,colony,position(dimension,origin.offset(24,0,1)),0,Lane.NORMAL);
+            core.workBoard().transition(workId,WorkOrder.State.READY,WorkOrder.Reason.NONE,"move");
+            helper.assertTrue(core.workBoard().assign(workId,citizen),"Pending query resident assignment refused");
+            requests.add(new NavigationService.Request(UUID.randomUUID(),workId,colony,citizen,1,0,work.target(),Lane.NORMAL,0));
+            entities.add(entity);nativeIds.add(nativeId);bread.add(carried);
+            chunks.request(workId,colony,region,ChunkDemandManager.Readiness.ENTITY_TICKING,Lane.NORMAL,0,true);
+        }
+        helper.onEachTick(() -> {
+            core.tick(core.serverTick()+1);
+            if(!requests.stream().allMatch(request -> chunks.ready(request.workId())))return;
+            for(int i=0;i<capacity;i++) {
+                var outcome=backend.search(requests.get(i),region);
+                helper.assertTrue(outcome==NavigationService.SearchOutcome.PENDING,"Native query did not retain a bounded pending portion: index="+i+" outcome="+outcome+" position="+entities.get(i).position()+" native="+backend.diagnostics());
+            }
+            var spare=requests.get(capacity);var old=requests.getFirst();
+            helper.assertTrue(backend.search(spare,region)==NavigationService.SearchOutcome.CAPACITY_WAIT,"Full native query pool admitted another query");
+            backend.stop(old);backend.stop(old);
+            var successor=new NavigationService.Request(UUID.randomUUID(),old.workId(),old.colonyId(),old.citizenId(),old.epoch(),old.goalRevision(),old.target(),old.lane(),old.priority());
+            requests.set(0,successor);
+            helper.assertTrue(backend.search(successor,region)==NavigationService.SearchOutcome.PENDING,"Cancelled pending query did not return reusable native capacity");
+            backend.stop(old);
+            helper.assertTrue(backend.search(spare,region)==NavigationService.SearchOutcome.CAPACITY_WAIT,"Old exact-request stop removed the same-work successor query");
+            backend.stop(successor);
+            helper.assertTrue(backend.search(spare,region)==NavigationService.SearchOutcome.PENDING,"Successor cancellation failed to return native capacity to a different work");
+            for(var request:requests)backend.stop(request);
+            helper.assertTrue(((Number)backend.diagnostics().get("concurrentQueries")).intValue()==0,"Pending native queries survived cleanup");
+            for(int i=0;i<entities.size();i++) {
+                var entity=entities.get(i);var record=core.registry().citizen(requests.get(i).citizenId());
+                helper.assertTrue(level.getEntity(nativeIds.get(i))==entity&&record.entityId().equals(nativeIds.get(i))
+                        &&entity.bindingEpoch()==1&&record.bindingEpoch()==1,"Query cancellation replaced an original native resident");
+                helper.assertTrue(entity.inventory().getItem(0)==bread.get(i)&&bread.get(i).getCount()==3,"Query cancellation changed original carried property");
+                chunks.release(requests.get(i).workId());
+            }
+            helper.assertTrue(chunks.footprint()==0&&chunks.blockTicking()==0&&chunks.entityTicking()==0,"Pending cancellation retained charged ticket rings");
+            helper.succeed();
+        });
+    }
     @GameTest(template = "identity_empty", batch = "stage06_navigation_step", timeoutTicks = 500)
     public static void walkOverOneBlockRiseAndDrop(GameTestHelper helper) {
         helper.onEachTick(walkStep(helper, helper.absolutePos(new BlockPos(1,1,1)), () -> {}, true));
@@ -55,6 +142,111 @@ public final class NavigationGameTests {
     @GameTest(template="identity_empty",batch="stage10_navigation_container",timeoutTicks=700)
     public static void cardinalRouteReachesGoalBesideContainerCorner(GameTestHelper helper) {
         helper.onEachTick(walkStep(helper,helper.absolutePos(new BlockPos(1,1,1)),() -> {},false,false,1,true));
+    }
+    @GameTest(template="identity_empty",batch="stage14_navigation_overhang_barrel",timeoutTicks=700)
+    public static void partialBarrelOverhangUsesSupportedNativeDeparture(GameTestHelper helper) {
+        overhangDeparture(helper,false);
+    }
+    @GameTest(template="identity_empty",batch="stage14_navigation_overhang_table",timeoutTicks=700)
+    public static void partialWorkshopOverhangUsesSupportedNativeDeparture(GameTestHelper helper) {
+        overhangDeparture(helper,true);
+    }
+    private static void overhangDeparture(GameTestHelper helper,boolean table) {
+        var level=helper.getLevel();
+        BlockPos ground=helper.absolutePos(new BlockPos(1,1,1)),start=ground.above(),target=ground.offset(6,0,0);
+        BlockPos furniture=table ? ground.south() : ground.west();
+        var furnitureState=(table ? Blocks.CRAFTING_TABLE : Blocks.BARREL).defaultBlockState();
+        for(int x=-3;x<=9;x++)for(int z=-3;z<=3;z++) {
+            level.setBlockAndUpdate(ground.offset(x,-1,z),Blocks.STONE.defaultBlockState());
+            for(int y=0;y<4;y++)level.setBlockAndUpdate(ground.offset(x,y,z),Blocks.AIR.defaultBlockState());
+        }
+        level.setBlockAndUpdate(furniture,furnitureState);
+        ServerRuntime core=ServerRuntime.start(Thread.currentThread());core.configureCommands(() -> {},List.of());
+        UUID colony=UUID.randomUUID(),citizen=UUID.randomUUID(),workId=UUID.randomUUID();
+        String dimension=level.dimension().location().toString();
+        core.registry().addColony(new ColonyRuntime(colony,"Supported native overhang",new Territory(dimension,
+                ground.getX()-16,ground.getZ()-16,ground.getX()+32,ground.getZ()+16),UUID.randomUUID(),Map.of(),1,1,false,null,false));
+        CitizenEntity entity=(CitizenEntity)BuiltInRegistries.ENTITY_TYPE.get(ResourceLocation.parse("colonyloom:citizen")).create(level);
+        if(entity==null)throw new IllegalStateException("Real overhang resident factory unavailable");
+        entity.initializeIdentity(citizen,1);
+        entity.moveTo(ground.getX()+(table ? 0.475 : 0.128),start.getY(),ground.getZ()+(table ? 0.891 : 0.852),0,0);
+        var initial=entity.position();UUID nativeId=entity.getUUID();ItemStack bread=new ItemStack(Items.BREAD,3);entity.inventory().setItem(0,bread);
+        helper.assertTrue(entity.blockPosition().equals(start)&&level.getBlockState(start.below()).isAir(),"Overhang fixture has centered support");
+        helper.assertTrue(entity.getBoundingBox().minX<furniture.getX()+1&&entity.getBoundingBox().maxX>furniture.getX()
+                &&entity.getBoundingBox().minZ<furniture.getZ()+1&&entity.getBoundingBox().maxZ>furniture.getZ()
+                &&level.noCollision(entity,entity.getBoundingBox()),"Fixture lacks real partial furniture support");
+        core.registry().addCitizen(new CitizenRecord(citizen,colony,nativeId,1,null,null,null,null,Map.of(),Map.of("food",20),
+                CitizenRecord.Lifecycle.ALIVE,CitizenRecord.Admission.ACTIVE,CitizenRecord.Readiness.UNKNOWN,0,Map.of("food",1200L),position(dimension,start),1),proposed -> {
+            if(!level.addFreshEntity(entity))throw new IllegalStateException("Native overhang resident spawn refused");
+        });
+        core.bindings().observe(citizen,nativeId,1);entity.setQuarantined(false);core.commands().updateCitizenReadiness(citizen,CitizenRecord.Readiness.READY);
+        var chunks=new ChunkDemandManager(core.registry(),core.budgets(),new NeoForgeChunkAccess(level.getServer(),new TicketController(ResourceLocation.parse("colonyloom:runtime"))));
+        var backend=new MinecraftNavigationBackend(level.getServer(),core.registry(),chunks);
+        var work=core.workBoard().createMove(workId,colony,position(dimension,target),0,Lane.NORMAL);
+        core.workBoard().transition(workId,WorkOrder.State.READY,WorkOrder.Reason.NONE,"move");
+        helper.assertTrue(core.workBoard().assign(workId,citizen),"Native overhang resident assignment refused");
+        var request=new NavigationService.Request(UUID.randomUUID(),workId,colony,citizen,1,0,work.target(),Lane.NORMAL,0);
+        var region=new java.util.ArrayList<io.github.kpuctajluk.colonyloom.core.chunk.ChunkKey>();
+        for(int x=(ground.getX()-3)>>4;x<=(ground.getX()+9)>>4;x++)for(int z=(ground.getZ()-3)>>4;z<=(ground.getZ()+3)>>4;z++)
+            region.add(new io.github.kpuctajluk.colonyloom.core.chunk.ChunkKey(dimension,x,z));
+        chunks.request(workId,colony,region,ChunkDemandManager.Readiness.ENTITY_TICKING,Lane.NORMAL,0,true);
+        core.scheduler().beforeWork(chunks::tick);
+        boolean[] applied={false},closed={false};var previous=new net.minecraft.world.phys.Vec3[]{initial};
+        var motion=new NavigationService.Motion[]{null};
+        core.scheduler().physicalExecutor(WorkOrder.MOVE,new SimulationScheduler.PhysicalExecutor() {
+            public void step(WorkOrder current,long tick) {
+                if(!applied[0])return;
+                motion[0]=backend.poll(request);
+                helper.assertTrue(motion[0]==NavigationService.Motion.MOVING||motion[0]==NavigationService.Motion.ARRIVED,"Native overhang departure stopped: "+motion[0]+" at "+entity.position());
+                if(motion[0]==NavigationService.Motion.ARRIVED)core.workBoard().transition(workId,WorkOrder.State.COMPLETED,WorkOrder.Reason.NONE,"completed");
+            }
+            public void cancel(UUID id) {backend.stop(request);}
+        });
+        Runnable cleanup=() -> {
+            if(closed[0])return;closed[0]=true;backend.stop(request);chunks.close();entity.remove(Entity.RemovalReason.DISCARDED);core.beginStopping();core.stop();
+        };
+        helper.testInfo.addListener(new GameTestListener() {
+            public void testStructureLoaded(GameTestInfo test) {}
+            public void testPassed(GameTestInfo test,GameTestRunner runner) {cleanup.run();}
+            public void testFailed(GameTestInfo test,GameTestRunner runner) {cleanup.run();}
+            public void testAddedForRerun(GameTestInfo original,GameTestInfo rerun,GameTestRunner runner) {}
+        });
+        helper.onEachTick(() -> {
+            core.tick(core.serverTick()+1);
+            helper.assertTrue(level.getEntity(nativeId)==entity&&entity.bindingEpoch()==1&&entity.inventory().getItem(0)==bread&&bread.getCount()==3,"Overhang navigation changed native identity or custody");
+            helper.assertTrue(entity.position().distanceToSqr(previous[0])<1.0,"Overhang navigation teleported the citizen");previous[0]=entity.position();
+            if(!applied[0]) {
+                if(!chunks.ready(workId))return;
+                helper.assertTrue(entity.position().distanceToSqr(initial)<1.0E-8,"Partial support fixture moved before native search");
+                level.setBlock(furniture,Blocks.AIR.defaultBlockState(),2);
+                helper.assertTrue(backend.search(request,region)==NavigationService.SearchOutcome.UNREACHABLE,"Unsupported native start was blessed");
+                level.setBlock(furniture,furnitureState,2);
+                level.setBlock(start,Blocks.WATER.defaultBlockState(),2);
+                helper.assertTrue(backend.search(request,region)==NavigationService.SearchOutcome.UNREACHABLE,"Wet native overhang start was blessed");
+                level.setBlock(start,Blocks.STONE.defaultBlockState(),2);
+                helper.assertTrue(backend.search(request,region)==NavigationService.SearchOutcome.UNREACHABLE,"Colliding native overhang start was blessed");
+                level.setBlock(start,Blocks.AIR.defaultBlockState(),2);
+                var result=backend.search(request,region);
+                helper.assertTrue(result instanceof NavigationService.Route,"Supported native overhang did not produce a bounded route: "+result);
+                level.setBlock(furniture,Blocks.AIR.defaultBlockState(),2);
+                helper.assertTrue(!backend.apply(request,(NavigationService.Route)result,() -> true),"Route application did not revalidate actual support");
+                level.setBlock(furniture,furnitureState,2);
+                helper.assertTrue(backend.apply(request,(NavigationService.Route)result,() -> true),"Native overhang route application rejected its validated bridge");
+                level.setBlock(furniture,Blocks.AIR.defaultBlockState(),2);
+                helper.assertTrue(backend.poll(request)==NavigationService.Motion.OBSTRUCTED,"Movement did not revalidate bridge support");
+                level.setBlock(furniture,furnitureState,2);
+                result=backend.search(request,region);
+                helper.assertTrue(result instanceof NavigationService.Route&&backend.apply(request,(NavigationService.Route)result,() -> true),"Restored native support could not resume its original goal");
+                helper.assertTrue(entity.position().distanceToSqr(initial)<1.0E-8,"Bridge application repositioned the native citizen");
+                applied[0]=true;return;
+            }
+            if(work.state()!=WorkOrder.State.COMPLETED)return;
+            helper.assertTrue(entity.distanceToSqr(target.getX()+0.5,target.getY(),target.getZ()+0.5)<=0.01,"Overhang arrival lacks exact native target");
+            helper.assertTrue(((Number)backend.diagnostics().get("maxExpansionsPerPortion")).intValue()==256
+                    &&((Number)backend.diagnostics().get("maxNodesPerQuery")).intValue()==8192
+                    &&((Number)backend.diagnostics().get("maxConcurrentQueries")).intValue()==16,"Overhang bridge relaxed native search bounds");
+            cleanup.run();helper.succeed();
+        });
     }
     @GameTest(template="identity_empty",batch="stage14_navigation_exhaustion",timeoutTicks=1000)
     public static void traversableLayeredRouteReportsExhaustionThroughRetryAndManagement(GameTestHelper helper) {
@@ -194,7 +386,7 @@ public final class NavigationGameTests {
         var observedRegion=new java.util.ArrayList<io.github.kpuctajluk.colonyloom.core.chunk.ChunkKey>();
         for(int x=(origin.getX()-2)>>4;x<=(origin.getX()+54)>>4;x++)for(int z=(origin.getZ()-2)>>4;z<=(origin.getZ()+38)>>4;z++)
             observedRegion.add(new io.github.kpuctajluk.colonyloom.core.chunk.ChunkKey(dimension,x,z));
-        boolean[] provisioned={false},initialized={false},closed={false};
+        boolean[] observationPrepared={false},provisioned={false},initialized={false},closed={false};
         var entities=new java.util.ArrayList<CitizenEntity>();var nativeIds=new java.util.ArrayList<UUID>();
         var citizens=new java.util.ArrayList<UUID>();var works=new java.util.ArrayList<UUID>();
         var targets=new java.util.ArrayList<BlockPos>();var bread=new java.util.ArrayList<ItemStack>();
@@ -211,6 +403,23 @@ public final class NavigationGameTests {
                     System.out.println("COLONYLOOM_NAVIGATION_FAILURE provisioned="+provisioned[0]+" domainsReady="+initialized[0]
                             +" chunks="+chunks.diagnostics(colony)+" native="+backend.diagnostics()
                             +" waiting="+works.stream().filter(work -> !navigation.atTarget(work)).map(work -> work+":"+navigation.reason(work)+":"+chunks.state(work)).toList());
+                    for(var key:observedRegion) {
+                        System.out.println("COLONYLOOM_NAVIGATION_OBSERVATION_FAILURE key="+key+" haloPrepared="+observationPrepared[0]
+                                +" loaded="+(level.getChunkSource().getChunkNow(key.x(),key.z())!=null)
+                                +" blockTicking="+level.getChunkSource().isPositionTicking(net.minecraft.world.level.ChunkPos.asLong(key.x(),key.z()))
+                                +" entityTicking="+level.isPositionEntityTicking(new BlockPos(key.x()<<4,level.getMinBuildHeight(),key.z()<<4))
+                                +" admitted="+chunks.admitted(key)+" ready="+chunks.ready(key,ChunkDemandManager.Readiness.ENTITY_TICKING));
+                    }
+                    for(int i=0;i<works.size();i++) {
+                        UUID work=works.get(i);if(navigation.atTarget(work))continue;
+                        CitizenEntity entity=entities.get(i);
+                        System.out.println("COLONYLOOM_NAVIGATION_ROUTE_FAILURE index="+i+" work="+work
+                                +" citizen="+citizens.get(i)+" entity="+nativeIds.get(i)
+                                +" position="+entity.position()+" target="+targets.get(i)
+                                +" distanceSquared="+entity.distanceToSqr(targets.get(i).getX()+0.5,targets.get(i).getY(),targets.get(i).getZ()+0.5)
+                                +" state="+navigation.state(work)+" reason="+navigation.reason(work)
+                                +" chunks="+chunks.state(work)+" native="+backend.diagnostics(work));
+                    }
                 } finally {cleanup.run();}
             }
             public void testAddedForRerun(GameTestInfo original,GameTestInfo rerun,GameTestRunner runner) {}
@@ -262,6 +471,15 @@ public final class NavigationGameTests {
             if(!provisioned[0]) {
                 core.tick(core.serverTick()+1);
                 helper.assertTrue(chunks.state(observationOwner)!=ChunkDemandManager.State.BLOCKED,"Observation domain lost its admissible SERVICE reserve");
+                if(!observationPrepared[0]) {
+                    // Pump only the admitted observation tickets' FULL halo before waiting for
+                    // entity ticking: unpaced GameTest ticks can outrun cold chunk generation.
+                    // false forbids extra UNKNOWN tickets outside the charged loaded union.
+                    for(int x=observedRegion.getFirst().x()-2;x<=observedRegion.getLast().x()+2;x++)
+                        for(int z=observedRegion.getFirst().z()-2;z<=observedRegion.getLast().z()+2;z++)
+                            if(level.getChunkSource().getChunk(x,z,ChunkStatus.FULL,false)==null)return;
+                    observationPrepared[0]=true;
+                }
                 if(!chunks.ready(observationOwner))return;
                 provision.run();provisioned[0]=true;return;
             }
@@ -456,6 +674,13 @@ public final class NavigationGameTests {
     }
     @GameTest(template="identity_empty",batch="stage06_navigation_waiting_displaced",timeoutTicks=700)
     public static void waitingRouteRebuildsDomainAfterNativeDisplacement(GameTestHelper helper) {
+        waitingDisplacement(helper,false);
+    }
+    @GameTest(template="identity_empty",batch="stage06_navigation_displaced_admission",timeoutTicks=700)
+    public static void displacedRouteWaitsForChunkAdmissionThenReachesOriginalGoal(GameTestHelper helper) {
+        waitingDisplacement(helper,true);
+    }
+    private static void waitingDisplacement(GameTestHelper helper,boolean exhaustAdmission) {
         var level=helper.getLevel();
         BlockPos anchor=helper.absolutePos(new BlockPos(1,1,1));
         BlockPos start=new BlockPos((anchor.getX()&~15)+5,anchor.getY(),(anchor.getZ()&~15)+4);
@@ -491,15 +716,26 @@ public final class NavigationGameTests {
         var move=core.workBoard().createMove(UUID.randomUUID(),colony,position(dimension,target),0,Lane.NORMAL);
         core.workBoard().transition(move.id(),WorkOrder.State.READY,WorkOrder.Reason.NONE,"move");
         helper.assertTrue(core.workBoard().assign(move.id(),citizen),"Physical worker assignment refused");
-        boolean[] shifted={false};long[] shiftedAt={0};
+        var originalLimits=core.admission().limits();
+        boolean[] shifted={false},capacityReleased={!exhaustAdmission};long[] shiftedAt={0};UUID[] requestId={null};
         helper.onEachTick(() -> {
             core.tick(core.serverTick()+1);
             if(!shifted[0] && navigation.reason(move.id())==WorkOrder.Reason.UNREACHABLE) {
+                requestId[0]=navigation.request(move.id(),colony,citizen,1,0,move.target(),move.lane(),move.priority());
+                if(exhaustAdmission)core.admission().updateLimits(originalLimits.withResource(Resource.CHUNK_DEMANDS,1));
                 entity.moveTo(displaced.getX()+0.5,displaced.getY(),displaced.getZ()+0.5,0,0);entity.setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
                 level.setBlockAndUpdate(target,Blocks.AIR.defaultBlockState());
                 shifted[0]=true;shiftedAt[0]=core.serverTick();
             }
             if(!shifted[0])return;
+            if(!capacityReleased[0]) {
+                helper.assertTrue(move.assignee().equals(citizen) && !move.terminal(),"Admission refusal dropped original assignment");
+                helper.assertTrue(requestId[0].equals(navigation.request(move.id(),colony,citizen,1,0,move.target(),move.lane(),move.priority())),"Admission refusal replaced original request identity");
+                if(core.serverTick()-shiftedAt[0]<30)return;
+                helper.assertTrue(navigation.state(move.id())==NavigationService.State.WAITING && navigation.reason(move.id())==WorkOrder.Reason.STATE_LIMIT,"Chunk admission exhaustion did not remain typed WAITING");
+                helper.assertTrue(core.admission().used(Resource.CHUNK_DEMANDS)==0 && chunks.footprint()==0,"Denied displacement retained old domain tickets");
+                core.admission().updateLimits(originalLimits);capacityReleased[0]=true;
+            }
             helper.assertTrue(core.serverTick()-shiftedAt[0]<500,"Waiting displaced native route stayed in stale domain: "+entity.position()+" reason="+navigation.reason(move.id()));
             if(move.state()!=WorkOrder.State.COMPLETED)return;
             helper.assertTrue(entity.distanceToSqr(target.getX()+0.5,target.getY(),target.getZ()+0.5)<=0.01,"Completion preceded exact native arrival");

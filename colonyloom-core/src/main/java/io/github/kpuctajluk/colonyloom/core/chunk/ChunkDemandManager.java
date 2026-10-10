@@ -44,9 +44,16 @@ public final class ChunkDemandManager implements AutoCloseable {
     private boolean pendingTurn;
     private Plan plan;
     private long tick, revision, ticketSequence, ticketNanosHighWater;
-
+    private java.util.function.Consumer<ChunkKey> coverageLoss = ignored -> {};
+    private int operationDepth;
+    private boolean drainingCoverageLosses;
+    private Cell coverageLossHead, coverageLossTail;
     private static final class Cell {
+        final ChunkKey key;
         final AdmissionLedger.Footprint[] shares = new AdmissionLedger.Footprint[3];
+        Cell lossNext;
+        boolean lossPending;
+        Cell(ChunkKey key) { this.key = key; }
     }
     private record TicketKey(UUID colony, ChunkKey center, boolean ticking) {}
     private static final class Ticket implements Comparable<Ticket> {
@@ -109,29 +116,93 @@ public final class ChunkDemandManager implements AutoCloseable {
         this.access = Objects.requireNonNull(access);
     }
 
+    /** Notifies only removal of the last charged entity-ticking reference at a center. */
+    public void setCoverageLossListener(java.util.function.Consumer<ChunkKey> listener) {
+        registry.requireOwner(); coverageLoss = Objects.requireNonNull(listener);
+    }
+
+    private void beginOperation() { operationDepth++; }
+
+    private void endOperation(Throwable operationFailure) {
+        if (--operationDepth != 0 || drainingCoverageLosses) return;
+        drainingCoverageLosses = true;
+        Throwable callbackFailure = null;
+        try {
+            while (coverageLossHead != null) {
+                Cell cell = coverageLossHead;
+                coverageLossHead = cell.lossNext;
+                if (coverageLossHead == null) coverageLossTail = null;
+                cell.lossNext = null;
+                cell.lossPending = false;
+                if (!admitted(cell.key)) {
+                    try { coverageLoss.accept(cell.key); }
+                    catch (RuntimeException | Error thrown) {
+                        if (callbackFailure == null) callbackFailure = thrown;
+                        else if (callbackFailure != thrown) callbackFailure.addSuppressed(thrown);
+                    }
+                }
+                if (!cell.lossPending && (cell.shares[0] == null || cell.shares[0].references() == 0)
+                        && (cell.shares[1] == null || cell.shares[1].references() == 0)
+                        && (cell.shares[2] == null || cell.shares[2].references() == 0))
+                    cells.remove(cell.key, cell);
+            }
+        } finally {
+            drainingCoverageLosses = false;
+        }
+        if (callbackFailure != null) {
+            if (operationFailure == null) rethrow(callbackFailure);
+            if (operationFailure != callbackFailure) operationFailure.addSuppressed(callbackFailure);
+        }
+    }
+
+    private static void rethrow(Throwable failure) {
+        if (failure instanceof RuntimeException runtime) throw runtime;
+        if (failure instanceof Error error) throw error;
+        throw new AssertionError(failure);
+    }
+
+    private void queueCoverageLoss(Cell cell) {
+        if (cell.lossPending) return;
+        cell.lossPending = true;
+        if (coverageLossTail == null) coverageLossHead = cell;
+        else coverageLossTail.lossNext = cell;
+        coverageLossTail = cell;
+    }
+
+
     public void request(UUID ownerId, UUID colonyId, List<ChunkKey> centers, Readiness required,
             Lane lane, int priority, boolean dependency) {
-        registry.requireOwner(); Objects.requireNonNull(ownerId); Objects.requireNonNull(colonyId);
-        Objects.requireNonNull(required); Objects.requireNonNull(lane); Objects.requireNonNull(centers);
-        if (centers.isEmpty() || centers.size() > 81 || priority < 0 || priority > 10)
-            throw new IllegalArgumentException("Invalid chunk demand bounds");
-        List<ChunkKey> unique = List.copyOf(new LinkedHashSet<>(centers));
-        Demand old = demands.get(ownerId);
-        if (old != null && old.colony.equals(colonyId) && old.centers.equals(unique)
-                && old.readiness == required && old.lane == lane && old.priority == priority && old.dependency == dependency) return;
-        if (old != null && old.protectedNow()) throw new IllegalStateException("Protected chunk domain cannot be replaced");
-        ChunkKey[][] rings = rings(unique, required);
-        int links = 1 + unique.size();
-        for (ChunkKey[] ring : rings) links = Math.addExact(links, ring.length);
-        AdmissionLedger.Lease lease = registry.admission().reserve(colonyId, lane, Map.of(Resource.CHUNK_DEMANDS, links));
-        if (old != null) release(ownerId);
-        Demand d = new Demand(ownerId, colonyId, unique, rings, required, lane, priority, dependency, lease, tick);
-        demands.put(ownerId, d);
-        if (head == null) { head = cursor = d; d.previous = d.next = d; }
-        else { d.previous = head.previous; d.next = head; head.previous.next = d; head.previous = d; }
-        pendingAdmissions.addLast(d);d.pendingQueued=true;
-        if (!minimumFits(d)) { d.state = State.BLOCKED; d.reason = Reason.WORKING_SET_LIMIT; }
-        revision++;
+        registry.requireOwner();
+        beginOperation();
+        Throwable failure = null;
+        try {
+            Objects.requireNonNull(ownerId); Objects.requireNonNull(colonyId);
+            Objects.requireNonNull(required); Objects.requireNonNull(lane); Objects.requireNonNull(centers);
+            if (centers.isEmpty() || centers.size() > 81 || priority < 0 || priority > 10)
+                throw new IllegalArgumentException("Invalid chunk demand bounds");
+            List<ChunkKey> unique = List.copyOf(new LinkedHashSet<>(centers));
+            Demand old = demands.get(ownerId);
+            if (old != null && old.colony.equals(colonyId) && old.centers.equals(unique)
+                    && old.readiness == required && old.lane == lane && old.priority == priority && old.dependency == dependency) return;
+            if (old != null && old.protectedNow()) throw new IllegalStateException("Protected chunk domain cannot be replaced");
+            ChunkKey[][] rings = rings(unique, required);
+            int links = 1 + unique.size();
+            for (ChunkKey[] ring : rings) links = Math.addExact(links, ring.length);
+            AdmissionLedger.Lease lease = registry.admission().reserve(colonyId, lane, Map.of(Resource.CHUNK_DEMANDS, links));
+            if (old != null) release(ownerId);
+            Demand d = new Demand(ownerId, colonyId, unique, rings, required, lane, priority, dependency, lease, tick);
+            demands.put(ownerId, d);
+            if (head == null) { head = cursor = d; d.previous = d.next = d; }
+            else { d.previous = head.previous; d.next = head; head.previous.next = d; head.previous = d; }
+            pendingAdmissions.addLast(d);d.pendingQueued=true;
+            if (!minimumFits(d)) { d.state = State.BLOCKED; d.reason = Reason.WORKING_SET_LIMIT; }
+            revision++;
+        } catch (RuntimeException | Error thrown) {
+            failure = thrown;
+            throw thrown;
+        } finally {
+            endOperation(failure);
+        }
     }
 
     private static ChunkKey[][] rings(List<ChunkKey> centers, Readiness required) {
@@ -162,29 +233,39 @@ public final class ChunkDemandManager implements AutoCloseable {
     /** Cursor and eviction plans carry unfinished work; neither loops over every demand each tick. */
     public void tick(long monotonicTick) {
         registry.requireOwner();
-        if (monotonicTick < tick) throw new IllegalArgumentException("Nonmonotonic chunk tick");
-        tick = monotonicTick;
-        int visits = Math.min(demands.size(), Math.max(1, budgets.limits().budget(Budget.DIRTY_RESCAN_OBJECTS) / 4));
-        while (cursor != null && visits-- > 0 && budgets.timeAvailable()) {
-            Lane lane = budgets.chooseLane(Budget.DIRTY_RESCAN_OBJECTS, false, true, false);
-            if (lane == null || !budgets.tryConsume(Budget.DIRTY_RESCAN_OBJECTS, lane)) break;
-            if (plan != null && plan.revision != revision) plan = null;
-            if (plan != null) { advancePlan(); continue; }
-            Demand d;
-            pendingTurn=!pendingTurn;
-            if(pendingTurn && !pendingAdmissions.isEmpty()) { d=pendingAdmissions.removeFirst();d.pendingQueued=false; }
-            else { d=cursor;cursor=cursor.next; }
-            if (d.state == State.ADMITTED) {
-                sampleClock(d);
-                if (overLimit(d) && !d.protectedNow()) withdraw(d);
-            } else if (minimumFits(d)) {
-                d.state = State.WAITING;
-                if (!overLimit() && canAdmit(d)) admit(d);
-                else if (!overLimit()) plan = new Plan(d, revision);
-            } else { d.state = State.BLOCKED; d.reason = Reason.WORKING_SET_LIMIT; }
-            if(d.state!=State.ADMITTED && !d.pendingQueued) { pendingAdmissions.addLast(d);d.pendingQueued=true; }
+        beginOperation();
+        Throwable failure = null;
+        try {
+            if (monotonicTick < tick) throw new IllegalArgumentException("Nonmonotonic chunk tick");
+            tick = monotonicTick;
+            int visits = Math.min(demands.size(), Math.max(1, budgets.limits().budget(Budget.DIRTY_RESCAN_OBJECTS) / 4));
+            while (cursor != null && visits-- > 0 && budgets.timeAvailable()) {
+                Lane lane = budgets.chooseLane(Budget.DIRTY_RESCAN_OBJECTS, false, true, false);
+                if (lane == null || !budgets.tryConsume(Budget.DIRTY_RESCAN_OBJECTS,lane)) break;
+                if (plan != null && plan.revision != revision) plan = null;
+                pendingTurn=!pendingTurn;
+                // An incremental eviction plan must not monopolize discovery of feasible demands.
+                if (plan != null && (!pendingTurn || pendingAdmissions.isEmpty())) { advancePlan(); continue; }
+                Demand d;
+                if(pendingTurn && !pendingAdmissions.isEmpty()) { d=pendingAdmissions.removeFirst();d.pendingQueued=false; }
+                else { d=cursor;cursor=cursor.next; }
+                if (d.state == State.ADMITTED) {
+                    sampleClock(d);
+                    if (overLimit(d) && !d.protectedNow()) withdraw(d);
+                } else if (minimumFits(d)) {
+                    d.state = State.WAITING;
+                    if (!overLimit() && canAdmit(d)) admit(d);
+                    else if (!overLimit() && plan == null) plan = new Plan(d, revision);
+                } else { d.state = State.BLOCKED; d.reason = Reason.WORKING_SET_LIMIT; }
+                if(d.state!=State.ADMITTED && !d.pendingQueued) { pendingAdmissions.addLast(d);d.pendingQueued=true; }
+            }
+            startTickets();
+        } catch (RuntimeException | Error thrown) {
+            failure = thrown;
+            throw thrown;
+        } finally {
+            endOperation(failure);
         }
-        startTickets();
     }
 
     private boolean canAdmit(Demand d) {
@@ -205,7 +286,7 @@ public final class ChunkDemandManager implements AutoCloseable {
 
     private void admit(Demand d) {
         for (int r = 0; r < 3; r++) for (ChunkKey key : d.rings[r]) {
-            Cell cell = cells.computeIfAbsent(key, ignored -> new Cell());
+            Cell cell = cells.computeIfAbsent(key, Cell::new);
             if (cell.shares[r] == null) cell.shares[r] = registry.admission().footprint(CHARGES[r]);
             cell.shares[r].retain(d.colony, d.lane);
         }
@@ -302,8 +383,10 @@ public final class ChunkDemandManager implements AutoCloseable {
         for (int r = 0; r < 3; r++) for (ChunkKey key : d.rings[r]) {
             Cell cell = cells.get(key);
             cell.shares[r].release(d.colony, d.lane);
+            if (r == 2 && cell.shares[2].references() == 0) queueCoverageLoss(cell);
             if (cell.shares[0].references() == 0 && (cell.shares[1] == null || cell.shares[1].references() == 0)
-                    && (cell.shares[2] == null || cell.shares[2].references() == 0)) cells.remove(key);
+                    && (cell.shares[2] == null || cell.shares[2].references() == 0)
+                    && !cell.lossPending && cell.lossNext == null) cells.remove(key);
         }
         d.state = State.WAITING; d.reason = Reason.WORKING_SET_LIMIT; d.waitingSince = tick;
         if(!d.pendingQueued && demands.containsKey(d.owner)) { pendingAdmissions.addLast(d);d.pendingQueued=true; }
@@ -397,17 +480,27 @@ public final class ChunkDemandManager implements AutoCloseable {
         if (wasEvictable) revision++;
     }
     public void release(UUID owner) {
-        registry.requireOwner(); Demand d = demands.remove(owner);
-        if (d == null) return;
-        withdraw(d); d.lease.close();
-        if(d.pendingQueued) { pendingAdmissions.remove(d);d.pendingQueued=false; }
-        if (d.next == d) { head = cursor = null; }
-        else {
-            d.previous.next = d.next; d.next.previous = d.previous;
-            if (head == d) head = d.next;
-            if (cursor == d) cursor = d.next;
+        registry.requireOwner();
+        beginOperation();
+        Throwable failure = null;
+        try {
+            Demand d = demands.remove(owner);
+            if (d == null) return;
+            withdraw(d); d.lease.close();
+            if(d.pendingQueued) { pendingAdmissions.remove(d);d.pendingQueued=false; }
+            if (d.next == d) { head = cursor = null; }
+            else {
+                d.previous.next = d.next; d.next.previous = d.previous;
+                if (head == d) head = d.next;
+                if (cursor == d) cursor = d.next;
+            }
+            revision++;
+        } catch (RuntimeException | Error thrown) {
+            failure = thrown;
+            throw thrown;
+        } finally {
+            endOperation(failure);
         }
-        revision++;
     }
     public void limitsUpdated() { registry.requireOwner(); revision++; }
     private boolean overLimit() {
@@ -454,5 +547,18 @@ public final class ChunkDemandManager implements AutoCloseable {
         if (onlyColony == null) footprint.put("ordinaryLoaded", ledger.ordinaryFootprint());
         return Map.of("admitted",admitted,"waiting",waiting,"ready",ready,"readiness",levels,"footprint",footprint);
     }
-    @Override public void close() { registry.requireOwner(); while (head != null) release(head.owner); plan = null; }
+    @Override public void close() {
+        registry.requireOwner();
+        beginOperation();
+        Throwable failure = null;
+        try {
+            while (head != null) release(head.owner);
+            plan = null;
+        } catch (RuntimeException | Error thrown) {
+            failure = thrown;
+            throw thrown;
+        } finally {
+            endOperation(failure);
+        }
+    }
 }
