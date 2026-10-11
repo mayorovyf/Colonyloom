@@ -40,7 +40,8 @@ public final class ChunkDemandManager implements AutoCloseable {
     private final List<TreeSet<Ticket>> starts = List.of(new TreeSet<>(), new TreeSet<>(), new TreeSet<>());
     private final int[] footprintAdditions = new int[3];
     private Demand head, cursor;
-    private final java.util.ArrayDeque<Demand> pendingAdmissions=new java.util.ArrayDeque<>();
+    private final List<java.util.ArrayDeque<Demand>> pendingAdmissions=List.of(new java.util.ArrayDeque<>(),new java.util.ArrayDeque<>(),new java.util.ArrayDeque<>());
+    private int pendingLane;
     private boolean pendingTurn;
     private Plan plan;
     private long tick, revision, ticketSequence, ticketNanosHighWater;
@@ -194,7 +195,7 @@ public final class ChunkDemandManager implements AutoCloseable {
             demands.put(ownerId, d);
             if (head == null) { head = cursor = d; d.previous = d.next = d; }
             else { d.previous = head.previous; d.next = head; head.previous.next = d; head.previous = d; }
-            pendingAdmissions.addLast(d);d.pendingQueued=true;
+            pendingAdmissions.get(d.lane.ordinal()).addLast(d);d.pendingQueued=true;
             if (!minimumFits(d)) { d.state = State.BLOCKED; d.reason = Reason.WORKING_SET_LIMIT; }
             revision++;
         } catch (RuntimeException | Error thrown) {
@@ -245,9 +246,10 @@ public final class ChunkDemandManager implements AutoCloseable {
                 if (plan != null && plan.revision != revision) plan = null;
                 pendingTurn=!pendingTurn;
                 // An incremental eviction plan must not monopolize discovery of feasible demands.
-                if (plan != null && (!pendingTurn || pendingAdmissions.isEmpty())) { advancePlan(); continue; }
+                boolean pending=!pendingAdmissions.get(0).isEmpty()||!pendingAdmissions.get(1).isEmpty()||!pendingAdmissions.get(2).isEmpty();
+                if (plan != null && (!pendingTurn || !pending)) { advancePlan(); continue; }
                 Demand d;
-                if(pendingTurn && !pendingAdmissions.isEmpty()) { d=pendingAdmissions.removeFirst();d.pendingQueued=false; }
+                if(pendingTurn && pending) { d=pollPending();d.pendingQueued=false; }
                 else { d=cursor;cursor=cursor.next; }
                 if (d.state == State.ADMITTED) {
                     sampleClock(d);
@@ -257,7 +259,7 @@ public final class ChunkDemandManager implements AutoCloseable {
                     if (!overLimit() && canAdmit(d)) admit(d);
                     else if (!overLimit() && plan == null) plan = new Plan(d, revision);
                 } else { d.state = State.BLOCKED; d.reason = Reason.WORKING_SET_LIMIT; }
-                if(d.state!=State.ADMITTED && !d.pendingQueued) { pendingAdmissions.addLast(d);d.pendingQueued=true; }
+                if(d.state!=State.ADMITTED && !d.pendingQueued) { pendingAdmissions.get(d.lane.ordinal()).addLast(d);d.pendingQueued=true; }
             }
             startTickets();
         } catch (RuntimeException | Error thrown) {
@@ -266,6 +268,16 @@ public final class ChunkDemandManager implements AutoCloseable {
         } finally {
             endOperation(failure);
         }
+    }
+
+    private Demand pollPending() {
+        // Each lane keeps FIFO order; blocked normal desires cannot bury critical cleanup.
+        for(int checked=0;checked<pendingAdmissions.size();checked++) {
+            int lane=pendingLane;pendingLane=(pendingLane+1)%pendingAdmissions.size();
+            var queue=pendingAdmissions.get(lane);
+            if(!queue.isEmpty())return queue.removeFirst();
+        }
+        throw new IllegalStateException("No pending chunk demand");
     }
 
     private boolean canAdmit(Demand d) {
@@ -301,7 +313,7 @@ public final class ChunkDemandManager implements AutoCloseable {
             refreshLane(ticket);
         }
         d.state = State.ADMITTED; d.reason = Reason.CHUNK_NOT_READY; d.lastUseful = tick;
-        if(d.pendingQueued) { pendingAdmissions.remove(d);d.pendingQueued=false; }
+        if(d.pendingQueued) { pendingAdmissions.get(d.lane.ordinal()).remove(d);d.pendingQueued=false; }
         d.admittedAt = tick; d.sampledTick = -1; d.sampledReady = false;
         if (!d.protectedNow()) evictable.add(d);
         revision++;
@@ -389,7 +401,7 @@ public final class ChunkDemandManager implements AutoCloseable {
                     && !cell.lossPending && cell.lossNext == null) cells.remove(key);
         }
         d.state = State.WAITING; d.reason = Reason.WORKING_SET_LIMIT; d.waitingSince = tick;
-        if(!d.pendingQueued && demands.containsKey(d.owner)) { pendingAdmissions.addLast(d);d.pendingQueued=true; }
+        if(!d.pendingQueued && demands.containsKey(d.owner)) { pendingAdmissions.get(d.lane.ordinal()).addLast(d);d.pendingQueued=true; }
         revision++;
     }
     private void refreshLane(Ticket ticket) {
@@ -487,7 +499,7 @@ public final class ChunkDemandManager implements AutoCloseable {
             Demand d = demands.remove(owner);
             if (d == null) return;
             withdraw(d); d.lease.close();
-            if(d.pendingQueued) { pendingAdmissions.remove(d);d.pendingQueued=false; }
+            if(d.pendingQueued) { pendingAdmissions.get(d.lane.ordinal()).remove(d);d.pendingQueued=false; }
             if (d.next == d) { head = cursor = null; }
             else {
                 d.previous.next = d.next; d.next.previous = d.previous;

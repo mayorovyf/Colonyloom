@@ -404,7 +404,9 @@ public final class SimulationScheduler {
                 if (required.state() != State.COMPLETED) { park(node,Reason.RECONCILING); return; }
             }
             if (work.criticalService() && !WorkOrder.DELIVERY.equals(work.typeId()) && work.assignee() != null) {
-                pause(node); board.waitAssigned(work.id(), Reason.MATERIALS, work.stage());
+                // The food-return consumer owns this assignment's wait revision and navigation.
+                // Suppress ordinary execution without rewriting its captured continuation.
+                pause(node);
                 deadlines.schedule(node.due, tick + 1); return;
             }
             if (work.assignee() != null && !WorkBoard.allowsOrdinaryWork(work, board.registry().citizen(work.assignee()))) { park(node, Reason.MATERIALS); return; }

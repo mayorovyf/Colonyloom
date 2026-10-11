@@ -102,12 +102,17 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         if(registry.targetClaims().state(work.id())==TargetClaimRegistry.State.CONFLICT) { waitFor(work,WorkOrder.Reason.TARGET_CONFLICT); return; }
         if(!registry.targetClaims().owns(work.id(),site.claimRevision())) { waitFor(work,WorkOrder.Reason.RECONCILING); return; }
         if(tick<state.retryAt) { waitFor(work,state.retryReason); return; }
-        try { chunks.request(state.chunkOwner,work.colonyId(),state.region,ChunkDemandManager.Readiness.ENTITY_TICKING,work.lane(),work.priority(),false); }
-        catch(AdmissionLedger.AdmissionException denied) { if(current(work,state))waitFor(work,WorkOrder.Reason.STATE_LIMIT); return; }
-        if(!current(work,state)||!chunks.admitted(state.chunkOwner))return;
-        if(!chunks.ready(state.chunkOwner)) { var reason=chunks.reason(state.chunkOwner); if(current(work,state))waitFor(work,reason==WorkOrder.Reason.NONE?WorkOrder.Reason.CHUNK_NOT_READY:reason); return; }
+        if(!siteReady(state)) {
+            try { chunks.request(state.chunkOwner,work.colonyId(),state.region,ChunkDemandManager.Readiness.ENTITY_TICKING,work.lane(),work.priority(),false); }
+            catch(AdmissionLedger.AdmissionException denied) { if(current(work,state))waitFor(work,WorkOrder.Reason.STATE_LIMIT); return; }
+            if(!current(work,state))return;
+            if(!siteReady(state)) {var reason=chunks.reason(state.chunkOwner);waitFor(work,reason==WorkOrder.Reason.NONE?WorkOrder.Reason.CHUNK_NOT_READY:reason);return;}
+        } else if(!chunks.admitted(state.chunkOwner)) {
+            // Existing admitted owners already cover every required center; drop only our pending desire.
+            chunks.release(state.chunkOwner);
+        }
         chunks.useful(state.chunkOwner);
-        if(!current(work,state)||!chunks.admitted(state.chunkOwner)||!chunks.ready(state.chunkOwner))return;
+        if(!current(work,state)||!siteReady(state))return;
         // A saved cursor is only a hint: recheck already accepted targets in bounded portions.
         while(state.reconcileCursor<site.cursor()) {
             if(!current(work,state))return;
@@ -153,8 +158,14 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
                 if(request==null) {waitFor(work,WorkOrder.Reason.RECONCILING);return;}}
             catch(AdmissionLedger.AdmissionException full) {if(current(work,state))waitFor(work,WorkOrder.Reason.STATE_LIMIT);return;}
             if(!navigation.atTarget(work.id())) {if(navigation.state(work.id())==NavigationService.State.WAITING&&current(work,state))waitFor(work,navigation.reason(work.id()));return;}
-            navigation.cancel(work.id());if(!current(work,state))return;
-            try {var reason=supply.pickup(work,state.materials,buffered);if(reason!=WorkOrder.Reason.NONE&&current(work,state))waitFor(work,reason);}
+            // Arrival already released its chunk domain. A paid scan yield must not reacquire
+            // descriptors and navigation merely to continue inspecting the same inventory.
+            try {
+                var reason=supply.pickup(work,state.materials,buffered);
+                if(!current(work,state))return;
+                if(reason!=WorkOrder.Reason.BUDGET)navigation.cancel(work.id());
+                if(reason!=WorkOrder.Reason.NONE&&current(work,state))waitFor(work,reason);
+            }
             catch(AdmissionLedger.AdmissionException full) {if(current(work,state))waitFor(work,WorkOrder.Reason.STATE_LIMIT);}
             return;
         }
@@ -173,11 +184,11 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
             if(!navigation.atTarget(work.id())) {if(navigation.state(work.id())==NavigationService.State.WAITING&&current(work,state))waitFor(work,navigation.reason(work.id()));return;}
             state.arrived=true;navigation.cancel(work.id());if(!current(work,state))return;
         }
-        if(!chunks.admitted(state.chunkOwner)||!chunks.ready(state.chunkOwner))return;
+        if(!siteReady(state))return;
         if(!registry.targetClaims().owns(work.id(),site.claimRevision())) {if(current(work,state))waitFor(work,WorkOrder.Reason.RECONCILING);return;}
         if(!current(work,state))return;
         int before=placement.materialCount(citizen.citizenId(),citizen.bindingEpoch(),target.expected().itemId());
-        if(!current(work,state)||!chunks.admitted(state.chunkOwner)||!chunks.ready(state.chunkOwner))return;
+        if(!current(work,state)||!siteReady(state))return;
         if(before<1) { waitFor(work,before==0?WorkOrder.Reason.MATERIALS:WorkOrder.Reason.RECONCILING); return; }
         io.github.kpuctajluk.colonyloom.core.supply.SupplyRegistry.PreparedConsumption consumption;
         try {consumption=registry.supply().prepareConsumption(allocation.id(),1);}
@@ -191,15 +202,15 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         boolean attempted=false;
         Throwable failure=null;
         try {
-            if(!current(work,state)||!consumption.unchanged()||!chunks.admitted(state.chunkOwner)||!chunks.ready(state.chunkOwner)) {registry.effects().discardUnchanged(effect.operationId());return;}
+            if(!current(work,state)||!consumption.unchanged()||!siteReady(state)) {registry.effects().discardUnchanged(effect.operationId());return;}
             chunks.setProtection(state.chunkOwner,true,false,false);
-            if(!current(work,state)||!consumption.unchanged()||!chunks.admitted(state.chunkOwner)||!chunks.ready(state.chunkOwner)) {registry.effects().discardUnchanged(effect.operationId());return;}
+            if(!current(work,state)||!consumption.unchanged()||!siteReady(state)) {registry.effects().discardUnchanged(effect.operationId());return;}
             long physicalStart=System.nanoTime();
             WorldAccess.Placement result;
             var captured=state;
             attempted=true;
             try {result=placement.place(context,citizen.bindingEpoch(),target.expected(),allocation.slot().slot(),
-                    () -> current(work,captured)&&consumption.unchanged()&&chunks.admitted(captured.chunkOwner)&&chunks.ready(captured.chunkOwner)
+                    () -> current(work,captured)&&consumption.unchanged()&&siteReady(captured)
                             &&registry.targetClaims().owns(work.id(),site.claimRevision())&&site.equals(registry.construction().site(work.id())));}
             finally {registry.metrics().record(io.github.kpuctajluk.colonyloom.core.metrics.RuntimeMetrics.Timer.PHYSICAL_UNIT,System.nanoTime()-physicalStart);}
             if(result==WorldAccess.Placement.PLACED||result==WorldAccess.Placement.AMBIGUOUS) {
@@ -253,6 +264,13 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         }
         }
         } finally {state.executing=false;}
+    }
+    private boolean siteReady(Active state) {
+        for(int i=0;i<state.region.size();i++) {
+            var center=state.region.get(i);
+            if(!chunks.admitted(center)||!chunks.ready(center,ChunkDemandManager.Readiness.ENTITY_TICKING))return false;
+        }
+        return true;
     }
     private void ambiguous(WorkOrder work,EffectRecord effect,int after) {
         var saved=registry.effects().get(effect.operationId());

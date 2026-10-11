@@ -905,6 +905,14 @@ final class ScaleScenario {
         snapshot.addProperty("tick",run.runtime.serverTick());
         snapshot.add("chunks",json(run.runtime.chunks().diagnostics(null)));
         snapshot.add("scheduler",json(run.runtime.core().scheduler().diagnostics(null)));
+        var chunkOwners=new JsonArray();
+        for(var entry:((Map<?,?>)consumerField(run.runtime.chunks(),"demands")).entrySet()) {
+            var row=new JsonObject();row.add("owner",json(entry.getKey()));
+            for(String name:List.of("colony","centers","rings","lane","priority","dependency","state","reason","physicalStep","unsafeCargo","critical","waitingSince","lastUseful","pendingQueued","admittedAt"))
+                row.add(name,json(consumerField(entry.getValue(),name)));
+            chunkOwners.add(row);
+        }
+        snapshot.add("chunkOwners",chunkOwners);
         var budgets=new JsonObject();
         for(Budget budget:Budget.values()) {
             var usage=new JsonObject();usage.addProperty("used",registry.budgets().used(budget));
@@ -964,6 +972,8 @@ final class ScaleScenario {
             row.add("citizen",json(citizen));
             var entity=server.overworld().getEntity(citizen.entityId());
             if(entity!=null) {row.add("nativePosition",json(List.of(entity.getX(),entity.getY(),entity.getZ())));row.addProperty("nativeTicking",server.overworld().isPositionEntityTicking(entity.blockPosition()));}
+            var backend=(io.github.kpuctajluk.colonyloom.minecraft.navigation.MinecraftNavigationBackend)consumerField(run.runtime,"navigationBackend");
+            row.add("backend",json(backend.diagnostics(request.workId())));
             navigation.add(row);
         }
         snapshot.addProperty("navigationRequestCount",requests.size());snapshot.add("navigationRequests",navigation);

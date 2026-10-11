@@ -40,6 +40,34 @@ final class SimulationSchedulerTest {
         WorkOrder timer(long number, UUID colony, long duration) { return board.createTimer(id(number),colony,new WorldPosition("minecraft:overworld",registry.colony(colony).territory().minX(),64,0),null,0,AdmissionLedger.Lane.NORMAL,duration); }
         void ticks(int count) { for (int i=0;i<count;i++) scheduler.tick(++tick); }
     }
+    @Test void criticalCargoReturnWaitRemainsOwnedByItsPhysicalConsumer() {
+        Fixture f=new Fixture();UUID colony=f.colony(1,0),citizen=f.citizen(11,colony);
+        f.registry.admission().updateLimits(LIMITS.withResource(Resource.READY_ENTRIES,8));
+        var position=new WorldPosition("minecraft:overworld",0,64,0);
+        var work=f.board.createMove(id(21),colony,position,0,AdmissionLedger.Lane.NORMAL);
+        f.scheduler.physicalExecutor(WorkOrder.MOVE,new SimulationScheduler.PhysicalExecutor() {
+            public void step(WorkOrder value,long tick) {f.board.waitAssigned(value.id(),WorkOrder.Reason.BUDGET,"move");}
+            public void cancel(UUID workId) {}
+        });
+        f.ticks(1);assertEquals(citizen,work.assignee());
+        var slot=new io.github.kpuctajluk.colonyloom.core.storage.StockRegion(new io.github.kpuctajluk.colonyloom.core.storage.StorageId("minecraft:overworld",citizen,1),0);
+        var item=new io.github.kpuctajluk.colonyloom.core.storage.ItemDescriptor("minecraft:stone",new byte[0]);
+        f.registry.storage().register(colony,position,"construction",java.util.List.of(slot.storage()),java.util.List.of(slot),java.util.List.of(position));
+        f.registry.storage().index().observe(slot,item,1,1);
+        var demand=f.registry.supply().request(id(22),colony,work.id(),new io.github.kpuctajluk.colonyloom.core.supply.ItemMatcher(item.itemId(),null),1,
+                io.github.kpuctajluk.colonyloom.core.supply.Demand.GoalKind.CONSUMPTION,position,AdmissionLedger.Lane.NORMAL,0,1);
+        f.registry.supply().allocateStock(demand.id(),slot,item,1,1);
+        assertFalse(f.board.requestFoodPreemption(citizen));assertTrue(work.criticalService());
+        f.board.waitAssigned(work.id(),WorkOrder.Reason.CHUNK_NOT_READY,"food-unload");
+        long returnRevision=work.revision();
+        f.ticks(30);
+        assertEquals(WorkOrder.Reason.CHUNK_NOT_READY,work.waitingReason());
+        assertEquals(returnRevision,work.revision(),"Scheduler must not revoke the return consumer's captured authority");
+        assertEquals(citizen,work.assignee());assertEquals(work.id(),f.registry.citizen(citizen).assignedWorkId());
+        assertEquals(1,demand.snapshot().allocated());
+        f.board.cancel(work.id());assertNull(f.registry.citizen(citizen).assignedWorkId());
+    }
+
     @Test void fullReceiverWaitRemainsVisibleAndRelinkedWorkResumesNextTick() {
         Fixture f=new Fixture();UUID colony=f.colony(1,0);f.citizen(11,colony);f.citizen(12,colony);
         var limits=LIMITS.withBudget(Budget.PHYSICAL_ACTIONS,8).withResource(Resource.READY_ENTRIES,8);

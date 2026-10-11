@@ -35,9 +35,19 @@ Navigation consumer regressions distinguish ready WAITING discovery from native 
 
 Chunk eviction plans share paid visits with pending admission discovery. A normal request blocked by unrelated critical capacity must not bury a feasible critical domain behind an entire eviction scan; normal blockade refusal, atomic all-ring admission and shared native ticket accounting remain enforced.
 
+Pending discovery also rotates per-lane FIFOs: a feasible critical domain must not wait behind every normal desire during a critical blockade. The existing overall dirty-rescan quota still applies, and normal requests must resume after capacity release.
+
+Production work admission denial must retain the accepted production order and its allocated kit without creating partial work. A later budgeted visit after capacity release must bind one work and complete the original batch; a native tick must not crash on this typed refusal. This regression does not by itself prove economy drain.
+
 Unpaced native GameTest setup prepares only the already-ticketed radius-two FULL halo with `getChunk(..., FULL, false)` before waiting for real block/entity ticking. This creates no extra UNKNOWN tickets and does not substitute loaded chunks for readiness. The original 63-route and cargo-safe food-return fixtures retain their total deadlines and physical assertions; failure diagnostics report native loaded/block/entity states before cleanup.
 
 Physical continuation regressions require exact captured work identity/revision, bidirectional original citizen assignment and binding epoch across synchronous callbacks. An executor-owned typed assigned WAITING transition retains navigation only; fresh RUNNING capture is required before transfer, craft, placement or food expense. A stale pre-effect continuation leaves native property unchanged; a stale post-effect continuation preserves exact/conservative AMBIGUOUS evidence and blocks recovery without compensation or replay. Construction MATERIALS/protection/conflict backoff keeps its existing deadline while waiting, rather than extending it on each scheduler turn.
+
+Cargo-safe food preemption owns its non-delivery work's wait revision and navigation. Scheduler suppression of ordinary construction/production must not rewrite that wait to MATERIALS. Native builder-return scenarios run through the actual scheduler, preserving original cargo and allocation identity across walking, full/removed/vetoed receivers, and safe assignment release.
+
+Construction pickup keeps an ARRIVED navigation continuation across paid inventory-scan BUDGET yields without re-reserving its released chunk domain. The native last-slot regression saturates CHUNK_DEMANDS after arrival, then requires the original transfer and exact placement/material accounting within the unchanged deadline. Non-budget outcomes cancel that continuation; native transfer proximity and authority remain independently checked.
+
+Construction may reuse another admitted owner's complete charged site coverage, never native readiness alone. Every required center must remain admitted and entity-ticking at effect guards. The shared-site regression exhausts descriptor capacity, proves analysis proceeds, withdraws the covering owner, and requires no material/cursor change until ordinary domain admission can resume.
 
 Cargo dependency loading is separate from executor authority: clean restore may release an unloaded courier's assignment while retaining UNKNOWN IN_TRANSIT coverage. Reconciliation can load only the original ALIVE citizen/epoch and owned cargo without conflicting assignment; it cannot move, extract, deposit or consume. `deliverySmoke` proves the same courier reloads and delivers the original 16 items exactly once without replacement extraction.
 

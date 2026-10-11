@@ -80,6 +80,28 @@ final class ChunkDemandManagerTest {
         assertEquals(0,f.registry.admission().used(Resource.CHUNK_DEMANDS));
     }
 
+    @Test void feasibleCriticalDomainDoesNotWaitForEveryBlockedNormalDesire() {
+        Fixture f=new Fixture(200,100,30);
+        var limits=f.budgets.limits().withResource(Resource.CHUNK_DEMANDS,16384)
+                .withBudget(Budget.DIRTY_RESCAN_OBJECTS,4);
+        f.registry.admission().updateLimits(limits);f.budgets.updateLimits(limits);
+        for(int i=1;i<=300;i++)f.request(new UUID(1,i),0,Lane.NORMAL,false);
+        f.ticks(650);
+        for(int i=1;i<=60;i++)f.request(new UUID(2,i),0,Lane.NORMAL,true);
+        f.request(B,0,Lane.CRITICAL,true);
+        int spare=16384-f.registry.admission().used(Resource.CHUNK_DEMANDS);
+        try(var occupied=f.registry.admission().reserve(COLONY,Lane.NORMAL,java.util.Map.of(Resource.CHUNK_DEMANDS,spare))) {
+            assertFalse(f.registry.admission().canReserve(COLONY,Lane.CRITICAL,java.util.Map.of(Resource.CHUNK_DEMANDS,1)));
+            f.ticks(12);
+            assertTrue(f.manager.ready(B),"Feasible critical work must be discovered independently of blocked normal backlog");
+            for(int i=1;i<=60;i++)assertFalse(f.manager.admitted(new UUID(2,i)));
+            assertEquals(1,f.access.starts);assertEquals(25,f.manager.footprint());
+        }
+        f.ticks(400);
+        for(int i=1;i<=60;i++)assertTrue(f.manager.ready(new UUID(2,i)),"Normal discovery must resume after blockade clears");
+        f.manager.close();assertEquals(0,f.registry.admission().used(Resource.CHUNK_DEMANDS));assertTrue(f.access.held.isEmpty());
+    }
+
     @Test void sameChunkTwoOwnersShareTicketAndRemovingOneRetainsOther() {
         Fixture f = new Fixture(58, 18, 2);
         f.request(A, 0, Lane.NORMAL, false); f.request(B, 0, Lane.NORMAL, false);

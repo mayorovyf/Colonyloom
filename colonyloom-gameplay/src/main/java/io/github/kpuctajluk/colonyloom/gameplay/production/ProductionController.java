@@ -3,6 +3,7 @@ package io.github.kpuctajluk.colonyloom.gameplay.production;
 import io.github.kpuctajluk.colonyloom.core.colony.ColonyRegistry;
 import io.github.kpuctajluk.colonyloom.core.production.ProductionOrder;
 import io.github.kpuctajluk.colonyloom.core.config.SimulationLimits.Budget;
+import io.github.kpuctajluk.colonyloom.core.scheduler.AdmissionLedger;
 import io.github.kpuctajluk.colonyloom.core.scheduler.GlobalWorkBudgets;
 import io.github.kpuctajluk.colonyloom.core.work.WorkOrder;
 import java.util.Objects;
@@ -40,7 +41,13 @@ public final class ProductionController {
                 if (!ready) continue;
                 UUID workId;
                 do { workId = UUID.randomUUID(); } while (registry.usedId(workId));
-                var work = registry.workBoard().createProduction(workId, production.colonyId(), production.equipmentPosition(), production.recipe().professionId(), Math.max(0, Math.min(10, production.priority())), production.lane());
+                WorkOrder work;
+                try {
+                    work = registry.workBoard().createProduction(workId, production.colonyId(), production.equipmentPosition(), production.recipe().professionId(), Math.max(0, Math.min(10, production.priority())), production.lane());
+                } catch (AdmissionLedger.AdmissionException full) {
+                    // The accepted order and allocated kit remain owned; retry on a budgeted visit.
+                    continue;
+                }
                 registry.supply().assignProductionWork(production.id(), work.id());
                 registry.workBoard().transition(work.id(), WorkOrder.State.READY, WorkOrder.Reason.NONE, "production");
             } else {
