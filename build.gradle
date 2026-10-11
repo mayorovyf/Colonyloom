@@ -25,8 +25,8 @@ tasks.register('checkArchitecture') {
             def forbidden = name == 'colonyloom-minecraft'
                 ? ~/\bnet\.neoforged\./
                 : name == 'colonyloom-core'
-                    ? ~/\b(net\.minecraft\.|net\.neoforged\.|io\.github\.kpuctajluk\.colonyloom\.(gameplay|minecraft|neoforge)\.)/
-                    : ~/\b(net\.minecraft\.|net\.neoforged\.|io\.github\.kpuctajluk\.colonyloom\.(minecraft|neoforge)\.)/
+                    ? ~/\b(net\.minecraft\.|net\.neoforged\.|colonyloom\.(gameplay|minecraft|neoforge)\.)/
+                    : ~/\b(net\.minecraft\.|net\.neoforged\.|colonyloom\.(minecraft|neoforge)\.)/
             p.fileTree('src') { include '**/*.java' }.each { source ->
                 if (source.getText('UTF-8') =~ forbidden) {
                     throw new GradleException("Forbidden layer reference in $source")

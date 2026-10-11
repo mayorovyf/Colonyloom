@@ -2,6 +2,11 @@
 
 ## 0.1.0 — implementation in progress
 
+### Java package layout
+
+- Shortened all production and test Java packages/source paths to `colonyloom.*`, including native GameTests; migrated imports, qualified references and architecture checks without compatibility aliases. Gradle publication group, mod IDs and persistence schemas are unchanged. Dated audit paths describe their original checkout and remain historical.
+- Verified `check assemble :colonyloom-neoforge:dedicatedSmoke` in 5m 9s: all unit tasks and native fixture compilation PASS; production-only dedicated startup/content/metrics/normal stop/runtime release and all three persistence-refusal cases PASS (`dedicated-1791693866499`, checkoutUnchanged=true). No full native, graphical or scale run was performed for this package-only migration.
+
 ### Gate T — current technical repairs (acceptance pending)
 
 - Restored missing physical-service local declarations; native production classes compile without fictitious placement defaults.
