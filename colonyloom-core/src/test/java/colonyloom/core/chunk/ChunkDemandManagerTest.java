@@ -59,6 +59,27 @@ final class ChunkDemandManagerTest {
     }
     private static ChunkKey key(int x) { return new ChunkKey("minecraft:overworld", x, 0); }
 
+    @Test void reprioritizingAdmittedAndProtectedDemandRetainsTicketsAndChangesEvictionOrder() {
+        Fixture f=new Fixture(200,18,1);
+        f.request(A,0,Lane.NORMAL,false);f.ticks(3);
+        f.manager.setProtection(A,true,false,false);
+        var limits=f.budgets.limits().withResource(Resource.CHUNK_DEMANDS,f.registry.admission().used(Resource.CHUNK_DEMANDS));
+        f.registry.admission().updateLimits(limits);f.budgets.updateLimits(limits);
+        int starts=f.access.starts,releases=f.access.releases;
+        assertDoesNotThrow(() -> f.manager.request(A,COLONY,List.of(key(0)),Readiness.ENTITY_TICKING,Lane.NORMAL,10,false));
+        assertTrue(f.manager.ready(A));assertEquals(starts,f.access.starts);assertEquals(releases,f.access.releases);
+        f.manager.setProtection(A,false,false,false);
+        limits=limits.withResource(Resource.CHUNK_DEMANDS,4096);
+        f.registry.admission().updateLimits(limits);f.budgets.updateLimits(limits);
+        f.manager.request(B,COLONY,List.of(key(10)),Readiness.ENTITY_TICKING,Lane.NORMAL,5,false);
+        f.ticks(20);
+        assertTrue(f.manager.ready(A));assertFalse(f.manager.admitted(B));
+        f.manager.request(A,COLONY,List.of(key(0)),Readiness.ENTITY_TICKING,Lane.NORMAL,0,false);
+        f.ticks(20);
+        assertTrue(f.manager.ready(B));assertFalse(f.manager.admitted(A));
+        f.manager.close();assertEquals(0,f.registry.admission().used(Resource.CHUNK_DEMANDS));assertTrue(f.access.held.isEmpty());
+    }
+
     @Test void feasibleCriticalDemandProgressesWhileNormalEvictionPlanIsBlocked() {
         Fixture f=new Fixture(200,100,30);
         var limits=f.budgets.limits().withResource(Resource.CHUNK_DEMANDS,16384)

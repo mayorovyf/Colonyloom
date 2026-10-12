@@ -406,6 +406,7 @@ public final class SimulationScheduler {
             if (work.criticalService() && !WorkOrder.DELIVERY.equals(work.typeId()) && work.assignee() != null) {
                 // The food-return consumer owns this assignment's wait revision and navigation.
                 // Suppress ordinary execution without rewriting its captured continuation.
+                if (work.state() == State.ASSIGNED) board.waitAssigned(work.id(), Reason.MATERIALS, "food-unload");
                 pause(node);
                 deadlines.schedule(node.due, tick + 1); return;
             }

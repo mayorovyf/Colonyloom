@@ -110,6 +110,14 @@ public final class ConstructionGameTests {
     public static void chargedReadySiteAnalyzesWithoutDuplicateDomainCapacity(GameTestHelper helper) {
         run(helper,false,false,false,false,false,false,false,ScanPause.NONE,0,AuthorityFault.NONE,true);
     }
+    @GameTest(template="identity_empty",batch="stage05_construction_priority_refresh",timeoutTicks=600)
+    public static void readySitePriorityChangeResistsThenAllowsCompetingDomainEviction(GameTestHelper helper) {
+        run(helper,false,false,false,false,true,false,false,ScanPause.PRIORITY);
+    }
+    @GameTest(template="identity_empty",batch="stage05_construction_source_loss",timeoutTicks=600)
+    public static void budgetRetainedPickupReleasesNavigationWhenRealBarrelSourceDisappears(GameTestHelper helper) {
+        run(helper,false,false,false,false,true,true,false,ScanPause.SOURCE_LOST);
+    }
     // Separate batches prevent concurrent clearing of these oversized three-root arenas.
     // Raised floors also isolate them from residents retained by an earlier failed ground-level fixture.
     @GameTest(template="identity_empty",batch="stage05_construction_analysis_pause",timeoutTicks=1000)
@@ -218,7 +226,8 @@ public final class ConstructionGameTests {
             var work=registry.workBoard().createConstruction(UUID.randomUUID(),colony,position(dim,origin.south()),0,Lane.NORMAL);
             registry.workBoard().transition(work.id(),WorkOrder.State.READY,WorkOrder.Reason.NONE,"construction");
             helper.assertTrue(registry.workBoard().assign(work.id(),citizen),"Cargo-bearing builder assignment refused");
-            registry.workBoard().waitAssigned(work.id(),WorkOrder.Reason.BUDGET,"construction");
+            if(unavailable)registry.workBoard().waitAssigned(work.id(),WorkOrder.Reason.BUDGET,"construction");
+            else helper.assertTrue(work.state()==WorkOrder.State.ASSIGNED,"Food return fixture did not begin at initial assignment");
             registry.updateCitizen(registry.citizen(citizen).withFood(0));
             var demand=registry.supply().request(UUID.randomUUID(),colony,work.id(),new colonyloom.core.supply.ItemMatcher(item.itemId(),item),4,colonyloom.core.supply.Demand.GoalKind.CONSUMPTION,work.target(),Lane.NORMAL,0,0);
             var share=registry.supply().allocateStock(demand.id(),source,item,4,0);
@@ -276,7 +285,7 @@ public final class ConstructionGameTests {
             };
         });
     }
-    private enum ScanPause { NONE,CARRIED,PICKUP,SOURCE_CHANGED,PROPERTY_CHANGED }
+    private enum ScanPause { NONE,CARRIED,PICKUP,SOURCE_CHANGED,PROPERTY_CHANGED,SOURCE_LOST,PRIORITY }
     private enum AuthorityFault { NONE,DETACH,REASSIGN,EPOCH,AFTER_FACT_DETACH,AFTER_NATIVE_EPOCH }
     private static void authorityFault(GameTestHelper helper,AuthorityFault fault) {
         run(helper,false,false,false,false,false,false,false,ScanPause.NONE,0,fault);
@@ -323,7 +332,7 @@ public final class ConstructionGameTests {
         if(lowQuota)core.updateLimits(core.admission().limits().withBudget(Budget.STORAGE_SLOT_CHECKS,storageQuota)
                 .withBudget(Budget.BLUEPRINT_COMPARISONS,4).withBudget(Budget.PHYSICAL_ACTIONS,1)
                 .withBudget(Budget.DIRTY_RESCAN_OBJECTS,suspended?1:core.admission().limits().budget(Budget.DIRTY_RESCAN_OBJECTS)));
-        if(scanPause!=ScanPause.NONE)core.updateLimits(core.admission().limits().withMaxManagedNanos(5_000_000L)
+        if(scanPause!=ScanPause.NONE&&scanPause!=ScanPause.SOURCE_LOST&&scanPause!=ScanPause.PRIORITY)core.updateLimits(core.admission().limits().withMaxManagedNanos(5_000_000L)
                 .withBudget(Budget.ASSIGNMENT_CANDIDATES,3).withBudget(Budget.NAVIGATION_STARTS,1)
                 .withBudget(Budget.CHUNK_REQUESTS,1));
         UUID colony=UUID.randomUUID(),citizen=UUID.randomUUID(),owner=UUID.randomUUID(); String dim=level.dimension().location().toString();
@@ -445,6 +454,13 @@ public final class ConstructionGameTests {
         colonyloom.core.scheduler.AdmissionLedger.Lease[] sharedPressure={null};
         boolean[] sharedPressureObserved={false};
         long[] sharedWithdrawnAt={-1};
+        ItemStack[] removedSource={null};
+        boolean[] sourceLossReleased={false};
+        long[] sourceLostAt={-1};
+        int[] priorityPhase={0},priorityCapacity={0};
+        long[] priorityChangedAt={-1};
+        UUID priorityCompetitor=UUID.randomUUID();
+        var priorityCenter=new colonyloom.core.chunk.ChunkKey(dim,(origin.getX()>>4)+10,origin.getZ()>>4);
         if(sharedDomain) {
             var claim=controller.layout(core.registry().construction().site(work.id())).claim();
             var centers=new java.util.ArrayList<colonyloom.core.chunk.ChunkKey>();
@@ -462,6 +478,16 @@ public final class ConstructionGameTests {
                     case 2 -> core.registry().targetClaims().tick();
                 }
             } else {chunks.tick(tick);navigation.tick(tick);core.registry().targetClaims().tick();}
+            if(scanPause==ScanPause.PRIORITY&&priorityPhase[0]>0&&priorityPhase[0]<4) {
+                while(core.budgets().tryConsume(Budget.BLUEPRINT_COMPARISONS,Lane.NORMAL)) {}
+                if(priorityPhase[0]==1&&tick-priorityChangedAt[0]>=3) {
+                    var resource=colonyloom.core.config.SimulationLimits.Resource.ENTITY_TICKING;
+                    priorityCapacity[0]=core.admission().limits().resource(resource);
+                    core.updateLimits(core.admission().limits().withResource(resource,chunks.entityTicking()));
+                    chunks.request(priorityCompetitor,colony,java.util.List.of(priorityCenter),ChunkDemandManager.Readiness.ENTITY_TICKING,Lane.NORMAL,5,false);
+                    priorityPhase[0]=2;priorityChangedAt[0]=tick;
+                }
+            }
             if(sharedPressure[0]!=null&&sharedWithdrawnAt[0]>=0) {
                 helper.assertTrue(core.registry().construction().site(work.id()).cursor()==0&&entity.inventory().getItem(materialSlot).getCount()==blockCount,
                         "Withdrawn shared coverage spent material or advanced construction");
@@ -474,6 +500,7 @@ public final class ConstructionGameTests {
                 sharedPressure[0]=core.admission().reserve(colony,Lane.NORMAL,Map.of(resource,core.admission().limits().resource(resource)-core.admission().used(resource)));
             }
             if(!lowQuota)return;
+            if(scanPause==ScanPause.SOURCE_LOST)core.registry().supply().reconcile(tick,core.budgets());
             // Genuine barrel inspections leave one builder read in the fixed shared quota.
             for(int check=0;check<storageQuota-1;check++) {
                 var slot=bufferRegistration.slots().get(check%bufferRegistration.slots().size());
@@ -496,6 +523,16 @@ public final class ConstructionGameTests {
             }
         });
         int[] phase={0}; long[] stoppedAt={0}; double[] stoppedX={0};
+        if(scanPause==ScanPause.SOURCE_LOST||scanPause==ScanPause.PRIORITY)helper.testInfo.addListener(new net.minecraft.gametest.framework.GameTestListener() {
+            public void testStructureLoaded(net.minecraft.gametest.framework.GameTestInfo test) {}
+            public void testPassed(net.minecraft.gametest.framework.GameTestInfo test,net.minecraft.gametest.framework.GameTestRunner runner) {}
+            public void testFailed(net.minecraft.gametest.framework.GameTestInfo test,net.minecraft.gametest.framework.GameTestRunner runner) {
+                phase[0]=2;
+                if(pickupPressure[0]!=null) {pickupPressure[0].close();pickupPressure[0]=null;}
+                navigation.close();service.close();chunks.close();entity.remove(Entity.RemovalReason.DISCARDED);core.beginStopping();core.stop();
+            }
+            public void testAddedForRerun(net.minecraft.gametest.framework.GameTestInfo original,net.minecraft.gametest.framework.GameTestInfo rerun,net.minecraft.gametest.framework.GameTestRunner runner) {}
+        });
         helper.onEachTick(() -> {
             if(phase[0]==2) return;
             int priorCursor=core.registry().construction().site(work.id()).cursor();
@@ -541,13 +578,13 @@ public final class ConstructionGameTests {
                 helper.assertTrue(core.budgets().used(Budget.STORAGE_SLOT_CHECKS)<=storageQuota,"Construction exceeded the shared native-read quota");
                 helper.assertTrue(core.budgets().used(Budget.BLUEPRINT_COMPARISONS)<=4,"Construction exceeded the fixed blueprint quota");
                 helper.assertTrue(core.budgets().used(Budget.PHYSICAL_ACTIONS)<=1,"Construction exceeded the fixed physical quota");
-                if(scanPause!=ScanPause.NONE) {
+                if(scanPause!=ScanPause.NONE&&scanPause!=ScanPause.SOURCE_LOST&&scanPause!=ScanPause.PRIORITY) {
                     helper.assertTrue(core.budgets().used(Budget.ASSIGNMENT_CANDIDATES)<=3
                             &&core.budgets().used(Budget.NAVIGATION_STARTS)<=1&&core.budgets().used(Budget.CHUNK_REQUESTS)<=1
                             &&core.budgets().used(Budget.DIRTY_RESCAN_OBJECTS)<=1,"Paused scan exceeded another frozen shared service quota");
                 }
                 if(work.waitingReason()==WorkOrder.Reason.BUDGET)budgetWaits[0]++;
-                if(buffered&&!suspended&&!pickupPressureObserved[0]&&work.waitingReason()==WorkOrder.Reason.BUDGET
+                if(buffered&&!suspended&&scanPause!=ScanPause.SOURCE_LOST&&!pickupPressureObserved[0]&&work.waitingReason()==WorkOrder.Reason.BUDGET
                         &&entity.position().distanceToSqr(new net.minecraft.world.phys.Vec3(buffer.getX()+0.5,buffer.getY(),buffer.getZ()+1.5))<=0.01) {
                     var resource=colonyloom.core.config.SimulationLimits.Resource.CHUNK_DEMANDS;
                     int spare=core.admission().limits().resource(resource)-core.admission().used(resource);
@@ -557,6 +594,50 @@ public final class ConstructionGameTests {
                 if(priorCursor>0)helper.assertTrue(core.budgets().used(Budget.BLUEPRINT_COMPARISONS)<=1,
                         "Confirmed advance restarted the already analyzed portion instead of checking only its current target");
             }
+            if(scanPause==ScanPause.SOURCE_LOST) {
+                if(removedSource[0]==null&&!sourceLossReleased[0]&&work.waitingReason()==WorkOrder.Reason.BUDGET
+                        &&navigation.state(work.id())==NavigationService.State.ARRIVED) {
+                    helper.assertTrue(site.cursor()==0&&site.consumed()==0&&core.registry().effects().snapshots().isEmpty(),"Source loss started after physical pickup");
+                    var demand=core.registry().supply().demands().stream().filter(value -> value.snapshot().ownerId().equals(work.id())).findFirst().orElseThrow();
+                    releasedSource[0]=core.registry().supply().demandShares(demand.id()).stream()
+                            .filter(value -> value.stage()==colonyloom.core.supply.CoverageShare.Stage.ALLOCATED).findFirst().orElseThrow().id();
+                    removedSource[0]=((net.minecraft.world.Container)level.getBlockEntity(buffer)).removeItemNoUpdate(0);
+                    helper.assertTrue(removedSource[0].is(Items.OAK_STAIRS)&&removedSource[0].getCount()==blockCount,"Source loss did not remove the real allocated stack");
+                    core.registry().storage().index().observe(bufferRegistration.slots().getFirst(),null,0,core.serverTick());
+                    sourceLostAt[0]=core.serverTick();
+                } else if(removedSource[0]!=null) {
+                    helper.assertTrue(citizen.equals(work.assignee())&&work.id().equals(core.registry().citizen(citizen).assignedWorkId()),"Source loss released builder assignment");
+                    helper.assertTrue(site.cursor()==0&&site.consumed()==0&&core.registry().effects().snapshots().isEmpty()
+                            &&entity.inventory().getItem(materialSlot).isEmpty(),"Source loss spent material or wrote native effects");
+                    for(int slot=0;slot<materialSlot;slot++)helper.assertTrue(entity.inventory().getItem(slot).is(Items.COBBLESTONE)
+                            &&entity.inventory().getItem(slot).getCount()==64,"Source loss changed unrelated NPC property");
+                    helper.assertTrue(((net.minecraft.world.Container)level.getBlockEntity(buffer)).getItem(0).isEmpty(),"Missing source was recreated before deliberate restoration");
+                    for(int x=0;x<blockCount;x++)helper.assertTrue(level.getBlockState(origin.east(x)).isAir(),"Source loss changed unbuilt native targets");
+                    if(work.waitingReason()==WorkOrder.Reason.MATERIALS) {
+                        helper.assertTrue(navigation.state(work.id())==NavigationService.State.CANCELLED
+                                &&((Number)navigation.diagnostics().get("requests")).intValue()==0
+                                &&!chunks.admitted(work.id()),"Missing buffered source retained navigation request or domain lease");
+                        helper.assertTrue(core.registry().supply().shares().stream().noneMatch(value -> value.id().equals(releasedSource[0])),"Native source observation did not retire lost allocation");
+                        sourceLossReleased[0]=true;
+                    }
+                    if(sourceLossReleased[0]&&core.serverTick()-sourceLostAt[0]>=25) {
+                        ((net.minecraft.world.Container)level.getBlockEntity(buffer)).setItem(0,removedSource[0]);removedSource[0]=null;
+                        bufferAllocated[0]=false;
+                    }
+                }
+            }
+            if(scanPause==ScanPause.PRIORITY) {
+                if(priorityPhase[0]==0&&work.waitingReason()==WorkOrder.Reason.BUDGET&&site.cursor()==0) {
+                    core.commands().prioritizeWork(context,work.id(),10);priorityPhase[0]=1;priorityChangedAt[0]=core.serverTick();
+                } else if(priorityPhase[0]==2&&core.serverTick()-priorityChangedAt[0]>=15) {
+                    helper.assertTrue(!chunks.admitted(priorityCompetitor)&&chunks.admitted(new colonyloom.core.chunk.ChunkKey(dim,origin.getX()>>4,origin.getZ()>>4)),
+                            "Ready site's raised priority did not resist competing domain eviction");
+                    core.commands().prioritizeWork(context,work.id(),0);priorityPhase[0]=3;
+                } else if(priorityPhase[0]==3&&chunks.admitted(priorityCompetitor)) {
+                    priorityPhase[0]=4;chunks.release(priorityCompetitor);
+                    core.updateLimits(core.admission().limits().withResource(colonyloom.core.config.SimulationLimits.Resource.ENTITY_TICKING,priorityCapacity[0]));
+                }
+            }
             if(suspended&&site.cursor()==0&&work.assignee()!=null&&work.waitingReason()==WorkOrder.Reason.BUDGET
                     &&core.budgets().used(Budget.BLUEPRINT_COMPARISONS)==4) {
                 // A temporary loss of observed entity readiness invokes the real executor suspension path.
@@ -564,7 +645,7 @@ public final class ConstructionGameTests {
                 core.commands().updateCitizenReadiness(citizen,CitizenRecord.Readiness.READY);
                 readinessPauses[0]++;
             }
-            if(scanPause!=ScanPause.NONE&&site.cursor()==0&&work.assignee()!=null
+            if(scanPause!=ScanPause.NONE&&scanPause!=ScanPause.SOURCE_LOST&&scanPause!=ScanPause.PRIORITY&&site.cursor()==0&&work.assignee()!=null
                     &&work.waitingReason()==WorkOrder.Reason.BUDGET&&core.budgets().used(Budget.BLUEPRINT_COMPARISONS)==1
                     &&core.budgets().used(Budget.STORAGE_SLOT_CHECKS)==storageQuota) {
                 helper.assertTrue(citizen.equals(work.assignee()),"Paused scan changed the actual builder identity");
@@ -636,7 +717,7 @@ public final class ConstructionGameTests {
                 for(int x=1;x<4;x++)helper.assertTrue(level.getBlockState(origin.east(x)).isAir(),"Quarter-turn placement leaked into unrotated coordinates");
             }
             if(buffered) {
-                if(lowQuota&&!suspended)helper.assertTrue(pickupPressureObserved[0]&&pickupPressure[0]==null,
+                if(lowQuota&&!suspended&&scanPause!=ScanPause.SOURCE_LOST)helper.assertTrue(pickupPressureObserved[0]&&pickupPressure[0]==null,
                         "Paid pickup did not resume under saturated domain descriptors and release pressure after native transfer");
                 var facts=core.registry().effects().snapshots().stream().filter(value -> value.transfer()!=null).toList();
                 helper.assertTrue(facts.size()==1&&facts.getFirst().transfer().inserted()==blockCount
@@ -656,7 +737,9 @@ public final class ConstructionGameTests {
             if(suspended)helper.assertTrue(readinessPauses[0]>=2&&core.workBoard().works().stream().filter(value -> WorkOrder.CONSTRUCTION.equals(value.typeId())).count()==3,
                     "Suspension fixture did not retain paid multi-turn analysis while construction roots competed");
             if(scanPause==ScanPause.CARRIED)helper.assertTrue(carriedPauses[0]>=8,"Carried regression did not suspend the bounded last-slot scan");
-            if(scanPause!=ScanPause.NONE&&scanPause!=ScanPause.CARRIED)helper.assertTrue(pickupPauses[0]>=9,"Pickup regression did not suspend capacity and fresh-read phases at the last slot");
+            if(scanPause!=ScanPause.NONE&&scanPause!=ScanPause.CARRIED&&scanPause!=ScanPause.SOURCE_LOST&&scanPause!=ScanPause.PRIORITY)helper.assertTrue(pickupPauses[0]>=9,"Pickup regression did not suspend capacity and fresh-read phases at the last slot");
+            if(scanPause==ScanPause.SOURCE_LOST)helper.assertTrue(sourceLossReleased[0]&&removedSource[0]==null,"Source loss did not release retained arrival and resume with the same restored stairs");
+            if(scanPause==ScanPause.PRIORITY)helper.assertTrue(priorityPhase[0]==4,"Lowered ready-site priority did not allow the competing native domain to acquire capacity");
             if(scanPause==ScanPause.SOURCE_CHANGED||scanPause==ScanPause.PROPERTY_CHANGED)helper.assertTrue(changedScanGuard[0],"Paused scan guard never changed while native transfer was pending");
             if(scanPause==ScanPause.SOURCE_CHANGED) {
                 helper.assertTrue(pickupPauses[0]>=18,"Changed source allocation reused its predecessor's retained pickup cursor/capacity");
@@ -697,6 +780,8 @@ public final class ConstructionGameTests {
                 }
                 return;
             }
+            if(scanPause==ScanPause.SOURCE_LOST)System.out.println("COLONYLOOM_CONSTRUCTION_SOURCE_LOSS arrivedBeforeRemoval=true allocationLost=true requestReleased="+sourceLossReleased[0]+" sameStackRestored="+(removedSource[0]==null)+" completed="+(work.state()==WorkOrder.State.COMPLETED));
+            if(scanPause==ScanPause.PRIORITY)System.out.println("COLONYLOOM_CONSTRUCTION_PRIORITY raisedResisted=true loweredAdmitted="+(priorityPhase[0]==4)+" completed="+(work.state()==WorkOrder.State.COMPLETED));
             System.out.println("COLONYLOOM_CONSTRUCTION_WALK cancel="+cancel+" placed="+placed+" materials="+entity.inventory().getItem(0).getCount()+" position="+entity.position());
             phase[0]=2; navigation.close(); service.close(); chunks.close(); entity.remove(Entity.RemovalReason.DISCARDED); core.beginStopping(); core.stop(); helper.succeed();
         });
