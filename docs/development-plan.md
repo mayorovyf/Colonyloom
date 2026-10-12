@@ -1,6 +1,6 @@
 # Colonyloom — план разработки по результатам аудита
 
-**Основание:** [аудит от 4 октября 2026 года](audit-2026-10-04.md), замечания A01–A29; [архитектура](architecture.md), особенно §§21–22. **Статус:** выполняемый план; реализация начата по запросу пользователя. Закрытие пакетов требует evidence ниже, не только наличия кода.
+**Основание:** [архитектура](architecture.md), особенно §§21–22, и замечания исторического аудита от 4 октября 2026 года (A01–A29; отдельные отчёты удалены из репозитория). **Статус:** выполняемый план; реализация начата по запросу пользователя. Закрытие пакетов требует evidence ниже, не только наличия кода.
 
 ## 1. Цель и границы
 
@@ -209,7 +209,7 @@ flowchart TD
 - Bounded operator report: type/schema/object ID/dependency/reason/opaque count; raw unknown NBT не отправляется клиентам. Recovery для смерти использует результат T2.
 - Supported matrix: Minecraft 1.21.1/NeoForge/JDK21, native chest/trapped chest/barrel; generic ItemHandler и сторонние claims APIs не объявляются поддержанными. Custom veto event — расширение, не готовый universal protection adapter.
 - Save-format/version/backup/upgrade/downgrade policy; concrete migrations для фактически изменённых форматов. Safe refusal при unknown content объясняется оператору.
-- Обновить статус архитектуры и открытых решений. Выпустить user/admin guide: bootstrap, ожидания, cargo/cancel, recovery, лимиты, команды запуска и acceptance evidence. CHANGELOG остаётся историей.
+- Обновить статус архитектуры и открытых решений. Выпустить user/admin guide: bootstrap, ожидания, cargo/cancel, recovery, лимиты, команды запуска и acceptance evidence. [CHANGELOG](changelog.md) остаётся историей.
 
 **Готово:** другой оператор объясняет блокировку и выполняет безопасный recovery по инструкции без ручной догадки по NBT. Документы соответствуют реально проверенному supported subset.
 
@@ -418,7 +418,7 @@ F1/F2/F3 можно делить по независимым владельца�
 
 ### Единица разработки
 
-Небольшой пакет изменения имеет: цель/invariant, конкретного владельца, область файлов, предпосылки, backward-format policy, failing-before evidence для bug, consumer-visible regression где оправдана, actual smoke и актуальную docs/CHANGELOG запись. Локальная переработка не добавляет retries/telemetry/validation beyond task без доказанной нужды.
+Небольшой пакет изменения имеет: цель/invariant, конкретного владельца, область файлов, предпосылки, backward-format policy, failing-before evidence для bug, consumer-visible regression где оправдана, actual smoke и актуальную документацию/[CHANGELOG](changelog.md). Локальная переработка не добавляет retries/telemetry/validation beyond task без доказанной нужды.
 
 - Перед изменением exported contract — references; после cutover мигрировать все callers/tests/DTO/views, удалить obsolete aliases/paths. Одна серверная точка записи остаётся invariant.
 - Правки основного поведения проверяются реальным сценарием, не source-text/mock echo. UI — настоящий клиент; физика — Minecraft; pure model — consumer contract.

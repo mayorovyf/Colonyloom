@@ -1,10 +1,18 @@
 # Changelog
 
+[Russian](ru/changelog.md)
+
 ## 0.1.0 — implementation in progress
+
+### Documentation
+
+- Reworked the English README for players, added complete Russian documentation in `docs/ru`, and kept canonical documentation in English with language navigation.
+- Added full Russian changelog, development plan and architecture documents in `docs/ru`; preserved technical evidence, commands and acceptance limits, and restored local language-navigation links.
+- Corrected English and Russian bootstrap guides to register the workshop barrel before the workshop and the rotated construction buffer before starting a build.
 
 ### Java package layout
 
-- Shortened all production and test Java packages/source paths to `colonyloom.*`, including native GameTests; migrated imports, qualified references and architecture checks without compatibility aliases. Gradle publication group, mod IDs and persistence schemas are unchanged. Dated audit paths describe their original checkout and remain historical.
+- Shortened all production and test Java packages/source paths to `colonyloom.*`, including native GameTests; migrated imports, qualified references and architecture checks without compatibility aliases. Gradle publication group, mod IDs and persistence schemas are unchanged.
 - Verified `check assemble :colonyloom-neoforge:dedicatedSmoke` in 5m 9s: all unit tasks and native fixture compilation PASS; production-only dedicated startup/content/metrics/normal stop/runtime release and all three persistence-refusal cases PASS (`dedicated-1791693866499`, checkoutUnchanged=true). No full native, graphical or scale run was performed for this package-only migration.
 
 ### Gate T — current technical repairs (acceptance pending)
