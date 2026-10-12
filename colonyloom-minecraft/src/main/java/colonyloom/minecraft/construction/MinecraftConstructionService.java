@@ -102,7 +102,7 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         if(registry.targetClaims().state(work.id())==TargetClaimRegistry.State.CONFLICT) { waitFor(work,WorkOrder.Reason.TARGET_CONFLICT); return; }
         if(!registry.targetClaims().owns(work.id(),site.claimRevision())) { waitFor(work,WorkOrder.Reason.RECONCILING); return; }
         if(tick<state.retryAt) { waitFor(work,state.retryReason); return; }
-        if(!siteReady(state)) {
+        if(chunks.admitted(state.chunkOwner)||!siteReady(state)) {
             try { chunks.request(state.chunkOwner,work.colonyId(),state.region,ChunkDemandManager.Readiness.ENTITY_TICKING,work.lane(),work.priority(),false); }
             catch(AdmissionLedger.AdmissionException denied) { if(current(work,state))waitFor(work,WorkOrder.Reason.STATE_LIMIT); return; }
             if(!current(work,state))return;
@@ -147,10 +147,10 @@ public final class MinecraftConstructionService implements SimulationScheduler.P
         if(allocation==null) {
             var buffered=supply.buffered(work,state.materials,target.expected().itemId());
             if(!current(work,state))return;
-            if(buffered==null) {supply.retryCarried(state.materials);waitFor(work,WorkOrder.Reason.MATERIALS);return;}
+            if(buffered==null) {navigation.cancel(work.id());if(!current(work,state))return;supply.retryCarried(state.materials);waitFor(work,WorkOrder.Reason.MATERIALS);return;}
             var buffer=storage.locate(buffered.slot().storage());
             if(!current(work,state))return;
-            if(buffer==null) {waitFor(work,WorkOrder.Reason.RECONCILING);return;}
+            if(buffer==null) {navigation.cancel(work.id());if(!current(work,state))return;waitFor(work,WorkOrder.Reason.RECONCILING);return;}
             var pickup=new WorldPosition(buffer.dimension(),buffer.x(),buffer.y(),buffer.z()+1);
             if(!pickup.equals(state.waypoint)) {navigation.cancel(work.id());if(!current(work,state))return;state.waypoint=pickup;state.generation++;state.lastCursor=-1;state.arrived=false;}
             try {var request=navigation.request(work.id(),work.colonyId(),citizen.citizenId(),citizen.bindingEpoch(),state.generation,pickup,work.lane(),work.priority());

@@ -40,6 +40,39 @@ final class SimulationSchedulerTest {
         WorkOrder timer(long number, UUID colony, long duration) { return board.createTimer(id(number),colony,new WorldPosition("minecraft:overworld",registry.colony(colony).territory().minX(),64,0),null,0,AdmissionLedger.Lane.NORMAL,duration); }
         void ticks(int count) { for (int i=0;i<count;i++) scheduler.tick(++tick); }
     }
+    @Test void assignedCargoPreemptionEntersReturnWaitWithoutExecutingOrdinaryWork() {
+        Fixture f=new Fixture();UUID colony=f.colony(1,0),citizen=f.citizen(11,colony);
+        f.registry.admission().updateLimits(LIMITS.withResource(Resource.READY_ENTRIES,8));
+        var position=new WorldPosition("minecraft:overworld",0,64,0);
+        var work=f.board.createMove(id(21),colony,position,0,AdmissionLedger.Lane.NORMAL);
+        f.scheduler.physicalExecutor(WorkOrder.MOVE,new SimulationScheduler.PhysicalExecutor() {
+            public void step(WorkOrder value,long tick) {fail("Preempted ordinary work executed");}
+            public void cancel(UUID workId) {}
+        });
+        f.board.transition(work.id(),WorkOrder.State.READY,WorkOrder.Reason.NONE,"move");
+        assertTrue(f.board.assign(work.id(),citizen));
+        var slot=new colonyloom.core.storage.StockRegion(new colonyloom.core.storage.StorageId("minecraft:overworld",citizen,1),0);
+        var item=new colonyloom.core.storage.ItemDescriptor("minecraft:stone",new byte[0]);
+        f.registry.storage().register(colony,position,"construction",java.util.List.of(slot.storage()),java.util.List.of(slot),java.util.List.of(position));
+        f.registry.storage().index().observe(slot,item,1,1);
+        var demand=f.registry.supply().request(id(22),colony,work.id(),new colonyloom.core.supply.ItemMatcher(item.itemId(),null),1,
+                colonyloom.core.supply.Demand.GoalKind.CONSUMPTION,position,AdmissionLedger.Lane.NORMAL,0,1);
+        var cargo=f.registry.supply().allocateStock(demand.id(),slot,item,1,1);
+        assertFalse(f.board.requestFoodPreemption(citizen));
+        assertEquals(WorkOrder.State.ASSIGNED,work.state());
+        f.ticks(2);
+        assertEquals(WorkOrder.State.WAITING,work.state());
+        assertEquals("food-unload",work.stage());
+        assertEquals(citizen,work.assignee());assertEquals(work.id(),f.registry.citizen(citizen).assignedWorkId());
+        assertEquals(java.util.List.of(cargo),f.registry.supply().demandShares(demand.id()));
+        f.board.waitAssigned(work.id(),WorkOrder.Reason.CHUNK_NOT_READY,"food-unload");
+        long returnRevision=work.revision();
+        f.ticks(30);
+        assertEquals(returnRevision,work.revision());
+        assertEquals(WorkOrder.Reason.CHUNK_NOT_READY,work.waitingReason());
+        assertEquals(java.util.List.of(cargo),f.registry.supply().demandShares(demand.id()));
+    }
+
     @Test void criticalCargoReturnWaitRemainsOwnedByItsPhysicalConsumer() {
         Fixture f=new Fixture();UUID colony=f.colony(1,0),citizen=f.citizen(11,colony);
         f.registry.admission().updateLimits(LIMITS.withResource(Resource.READY_ENTRIES,8));

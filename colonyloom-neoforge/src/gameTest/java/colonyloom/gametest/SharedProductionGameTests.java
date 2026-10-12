@@ -323,6 +323,8 @@ public final class SharedProductionGameTests {
             for(var owner:chunkDemandOwners())if(!owner.equals(productionChunkOwner))chunks.release(owner);
             coverageWithdrawalPrepared=true;
             check(chunks.admitted(center)&&chunks.admitted(productionChunkOwner),"Production owner was not the sole retained center coverage");
+            // Priority refresh preserves tickets; withdraw the sole real grant explicitly.
+            chunks.release(productionChunkOwner);
         }
 
         private UUID productionChunkOwner() {

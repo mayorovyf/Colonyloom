@@ -78,7 +78,7 @@ public final class ChunkDemandManager implements AutoCloseable {
         final ChunkKey[][] rings;
         final Readiness readiness;
         final Lane lane;
-        final int priority;
+        int priority;
         final boolean dependency;
         final AdmissionLedger.Lease lease;
         final List<Ticket> tickets = new ArrayList<>();
@@ -181,10 +181,19 @@ public final class ChunkDemandManager implements AutoCloseable {
             Objects.requireNonNull(required); Objects.requireNonNull(lane); Objects.requireNonNull(centers);
             if (centers.isEmpty() || centers.size() > 81 || priority < 0 || priority > 10)
                 throw new IllegalArgumentException("Invalid chunk demand bounds");
-            List<ChunkKey> unique = List.copyOf(new LinkedHashSet<>(centers));
             Demand old = demands.get(ownerId);
+            List<ChunkKey> unique = old != null && old.centers.equals(centers)
+                    ? old.centers : List.copyOf(new LinkedHashSet<>(centers));
             if (old != null && old.colony.equals(colonyId) && old.centers.equals(unique)
-                    && old.readiness == required && old.lane == lane && old.priority == priority && old.dependency == dependency) return;
+                    && old.readiness == required && old.lane == lane && old.dependency == dependency) {
+                if (old.priority != priority) {
+                    evictable.remove(old);
+                    old.priority = priority;
+                    if (old.state == State.ADMITTED && !old.protectedNow()) evictable.add(old);
+                    revision++;
+                }
+                return;
+            }
             if (old != null && old.protectedNow()) throw new IllegalStateException("Protected chunk domain cannot be replaced");
             ChunkKey[][] rings = rings(unique, required);
             int links = 1 + unique.size();
