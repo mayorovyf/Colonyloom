@@ -64,7 +64,7 @@ neoForge {
     }
 }
 def metadata = tasks.register('generateModMetadata', ProcessResources) {
-    def values = [mod_id: project.mod_id, mod_name: project.mod_name, mod_version: project.mod_version]
+    def values = [mod_id: project.mod_id, mod_name: project.mod_name, mod_version: project.mod_version, neo_version: project.neo_version]
     inputs.properties values
     expand values
     from 'src/main/templates'
@@ -95,6 +95,7 @@ neoForge.runs {
 }
 apply from: rootProject.file('gradle/dedicated-smoke.gradle')
 apply from: rootProject.file('gradle/integrated-smoke.gradle')
+apply from: rootProject.file('gradle/offcraft.gradle')
 
 // Test-only named run supplies the exact ModDevGradle launch classpath/environment to child JVMs.
 neoForge.runs {

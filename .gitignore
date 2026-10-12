@@ -9,6 +9,11 @@ bin/
 /integrated-*/
 neoforge-*-installer.jar.log
 
+# Private Offcraft runtime, machine-specific launch arguments and MCP config
+/.offcraft/
+/launch.offcraft.json
+/mcp.offcraft.local.json
+
 # Local IDE metadata
 .idea/
 *.iml

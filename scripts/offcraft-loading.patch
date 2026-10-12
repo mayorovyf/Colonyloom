@@ -1,0 +1,17 @@
+diff --git a/common/src/main/java/offcraft/client/OffcraftClient.java b/common/src/main/java/offcraft/client/OffcraftClient.java
+--- a/common/src/main/java/offcraft/client/OffcraftClient.java
++++ b/common/src/main/java/offcraft/client/OffcraftClient.java
+@@ -277,7 +277,10 @@
+                 if (client.currentScreen instanceof DisconnectedScreen disconnected) {
+                     failActive(client, "connection_failed", disconnected.getNarratedTitle().getString());
+-                } else if (!screen.equals("MessageScreen") && !screen.equals("LevelLoadingScreen")
+-                        && !screen.equals("DownloadingTerrainScreen") && !screen.equals("ProgressScreen")
+-                        && !screen.equals("ConnectScreen") && !screen.equals("ReconfiguringScreen")) {
++                } else if (!(client.currentScreen instanceof net.minecraft.client.gui.screen.MessageScreen)
++                        && !(client.currentScreen instanceof net.minecraft.client.gui.screen.world.LevelLoadingScreen)
++                        && !(client.currentScreen instanceof net.minecraft.client.gui.screen.DownloadingTerrainScreen)
++                        && !(client.currentScreen instanceof net.minecraft.client.gui.screen.ProgressScreen)
++                        && !(client.currentScreen instanceof ConnectScreen)
++                        && !(client.currentScreen instanceof net.minecraft.client.gui.screen.ReconfiguringScreen)) {
+                     failActive(client, "load_requires_attention", "World loading stopped at screen " + screen);
+                 }

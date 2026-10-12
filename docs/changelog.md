@@ -4,6 +4,14 @@
 
 ## 0.1.0 — implementation in progress
 
+### Offcraft development tooling
+
+- Added a separate production-mod-only NeoForge client instance for Offcraft, a hash-pinned installer and a real ModDevGradle Java-launch export. Private launch/MCP files, tools, worlds and captures are ignored; Offcraft is not bundled into the Colonyloom release or installed on dedicated runs.
+- Updated NeoForge from 21.1.252 to 21.1.259 to satisfy Offcraft's actual dependency. Colonyloom's exact loader metadata now follows `neo_version`; old runtime/calibration certificates do not certify this update.
+- Fixed Offcraft's remapped loading-screen rejection in an isolated pinned source rebuild using type checks; the upstream checkout is untouched. The installer applies the tracked patch with Offcraft's Gradle 9.5.0 wrapper and preserves the MIT notice.
+- Verified root `check assemble :colonyloom-neoforge:prepareOffcraft` (2m50s; unit tasks up-to-date, native fixtures compiled), patched mod build (33s), and three real client sessions: JSONL new/observe/inventory/20-tick movement/960×540 PNG/exact cancel/ColonyScreen/quit; MCP handshake/list/status/load/error/cancelled-call/EOF; saved-world reload/quit. All clients exited 0, controlled keys were released, terminal IDs were unique, and both gameplay/Colonyloom UI PNGs were visually inspected. Evidence: `.offcraft/evidence-1791832002613/report.json`; installed JAR SHA-256 `e0618437d9e56ff79bb974464239b15cc40d28b127eb3f9027e3a4882e247fa3`. Initial unpatched `new` failed at `ReceivingLevelScreen`; evidence retained separately. No full native/platform/scale run, production launcher, multiplayer or global MCP registration is claimed.
+- Hardened repeat installation: each invocation extracts pinned sources into its own temporary directory, applies the loading patch once and removes only that generated tree in `finally`. Installation receipts now include patch SHA-256; `prepareOffcraft` refuses missing/stale provenance and a JAR hash mismatch before config/launch writes. Two consecutive installations rebuilt successfully (31s/33s), followed by successful preparation. A one-byte JAR substitution produced the expected SHA-256 refusal and preserved launch bytes; restoring the original JAR allowed preparation and real hidden-client status/quit with exit0. Temporary source directories were absent afterward; evidence `.offcraft/guard-refused.log`, `.offcraft/guard-restored.log`, `.offcraft/guard-client.log`. Concurrent installation is not supported; the receipt is local integrity evidence, not hostile-user authentication.
+
 ### Documentation
 
 - Reworked the English README for players, added complete Russian documentation in `docs/ru`, and kept canonical documentation in English with language navigation.

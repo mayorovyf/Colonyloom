@@ -17,6 +17,26 @@ cmd /c gradlew.bat :colonyloom-neoforge:verificationManifest --no-daemon --conso
 
 `check` проверяет архитектурные границы, наборы тестов ядра/модели и компилирует **все** нативные классы/ресурсы GameTest. Он не запускает Minecraft. `verificationManifest` записывает хеши исходников/конфигурации сборки/содержимого, сведения JDK/ОС/числа процессоров/ОЗУ и фиксированный `gradle/acceptance-profile.json`; статус NOT_RUN не является приёмкой.
 
+## Клиент разработки Offcraft
+
+[Offcraft](https://github.com/mayorovyf/Offcraft/blob/main/spec.md) устанавливается для локальной автоматизации клиента, не на выделенный сервер. Нужны Windows x64, графический рабочий стол/OpenGL, Java 21 и Node.js 22+. Проект теперь закрепляет NeoForge 21.1.259: мод Offcraft требует не ниже этой версии. Старые runtime/load результаты на 21.1.252 не являются приёмкой обновлённого loader.
+
+```text
+node scripts/install-offcraft.mjs C:/Projects/MinecraftMods/Offcraft
+cmd /c gradlew.bat :colonyloom-neoforge:prepareOffcraft --no-daemon --console=plain
+node scripts/offcraft-mcp.mjs --write-config
+```
+
+Установщик принимает существующий Git checkout Offcraft с готовыми артефактами `dist/`. Проверяет закреплённые SHA-256 NeoForge JAR 1.0.0, трёх модулей MCP и MIT notice из ревизии `aa1f6403e5eacfbc5f7c5638b07999edf3b0a7fe`. Каждый запуск архивирует ревизию в новый игнорируемый `.offcraft/source-<unique>/`, один раз применяет `scripts/offcraft-loading.patch` и пересобирает **обёрткой Offcraft Gradle 9.5.0**, не обёрткой Colonyloom. Временный каталог исходников/сборки удаляется в `finally`; существующие деревья исходников и upstream checkout не изменяются. Нужны Git, tar, Java и сеть/кеш Gradle-зависимостей. Патч заменяет сравнение строковых имён классов на ремаппируемые проверки типов: иначе `new/load` ошибочно возвращает `load_requires_attention` на NeoForge `ReceivingLevelScreen`. Локально исправленный JAR 1.0.0 копируется в `colonyloom-neoforge/runs/offcraft/mods/`, MCP и лицензия — в `.offcraft/`; фактические хеши файлов и SHA-256 патча записаны в `.offcraft/install.json`. Production dependency и тестовый мод не добавляются. Повторяйте установку только при остановленном instance; параллельная установка не поддерживается.
+
+`prepareOffcraft` компилирует Colonyloom и получает настоящий запуск ModDevGradle без старта Minecraft. До изменения конфигурации и экспорта запуска требует квитанцию установки, ожидаемые version/revision/patch, актуальный SHA-256 патча и точное совпадение SHA-256 установленного JAR с записанным. Отсутствующая/устаревшая квитанция или подменённый JAR вызывают отказ; повторите установщик, не редактируйте квитанцию. Это контроль целостности локальной установки, не аутентификация против того, кто способен переписать и JAR, и квитанцию. Сохраняет остальные настройки `config/fml.toml`, устанавливает `earlyWindowControl=false` и записывает приватный `launch.offcraft.json` (`java`, `args`, `gameDir`, `env`). Повторяйте после изменений кода/сборки или удаления сгенерированных launch-файлов. Аргументы Fabric и запуск JAR через `java -jar` неприменимы.
+
+Добавьте только запись `offcraft` из игнорируемого `mcp.offcraft.local.json` в существующую конфигурацию MCP-хоста. Она запускает `scripts/offcraft-mcp.mjs` по абсолютному пути; скрипт читает локальный launch, применяет его окружение и использует upstream `launchAdapter`. Клиентом владеет MCP-хост; одновременно не запускайте `runOffcraft`. В stdout — только JSON-RPC, stderr необходимо непрерывно читать. Глобальные настройки ассистента установка не изменяет.
+
+Для прямого JSONL прочитайте тот же launch и запустите Java с массивом аргументов, `cwd=gameDir`, объединённым `env`, без shell и с тремя pipe-потоками; используйте `GameBridge` из `.offcraft/mcp/adapter.mjs`. Не запускайте транспорт через Gradle или bat-обёртку. Дождитесь `ready`, проверьте onboarding/status и последовательно ждите terminal ответы изменяющих команд. Один клиент на instance; уникальные абсолютные PNG-пути под `.offcraft/`. Миры/логи/конфиги игнорируются. `quit` или EOF штатно сохраняют и завершают клиент; читайте потоки до process close. Microsoft-аккаунт эти способы не аутентифицируют.
+
+Приёмка на уникальном одноразовом мире: hidden status, настоящий снимок UI Colonyloom, observe/inventory, движение/PNG/released input, отмена точного action, handshake/error/cancelled-call MCP, quit, EOF и повторная загрузка сохранённого мира. Одна сборка этого не доказывает. Offcraft не закрывает Gate T и приёмку экономики 300 жителей.
+
 ## Физические регрессии и восстановление
 
 ```text

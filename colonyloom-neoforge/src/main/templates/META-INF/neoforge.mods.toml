@@ -9,7 +9,7 @@ description='''Server-authoritative colony simulation.'''
 [[dependencies.${mod_id}]]
 modId="neoforge"
 type="required"
-versionRange="[21.1.252]"
+versionRange="[${neo_version}]"
 ordering="NONE"
 side="BOTH"
 [[dependencies.${mod_id}]]
