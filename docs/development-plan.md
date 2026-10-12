@@ -1,6 +1,6 @@
 # Colonyloom — план разработки по результатам аудита
 
-**Основание:** [аудит от 4 октября 2026 года](audit-2026-10-04.md), замечания A01–A29; [архитектура](architecture.md), особенно §§21–22. **Статус:** выполняемый план; реализация начата по запросу пользователя. Закрытие пакетов требует evidence ниже, не только наличия кода.
+**Основание:** [архитектура](architecture.md), особенно §§21–22, и замечания исторического аудита от 4 октября 2026 года (A01–A29; отдельные отчёты удалены из репозитория). **Статус:** выполняемый план; реализация начата по запросу пользователя. Закрытие пакетов требует evidence ниже, не только наличия кода.
 
 ## 1. Цель и границы
 
@@ -89,6 +89,8 @@
 - a148eeac scale1791543761193 economy FAIL unchanged1200s drain;75files archived/rehashed. CHUNK_DEMANDS16328/16384/rejected17382, final normalAdmissionBlocked=false;40waiting navigation domains individually fit, all55delivery LoadDomain pointers null. Permanent global blockade/oversized routes/delivery-domain leak не доказаны.
 - 10ca8ca2: direct compiled consumer воспроизвёл задержку feasible CRITICAL demand за normal eviction plan при300resident owners/dirty quota4. Pending discovery теперь чередуется с incremental eviction; beforeFAIL/afterPASS, chunk/navigation regressions и root check/assemble PASS. Normal blockade/atomic footprint/shared tickets сохранены. Full-duration native economy witness с historical measured quotas запущен как NON_ACCEPTANCE; экономика ещё не объявлена исправленной, source-matched acceptance предстоит.
 - Witness `economy-admission-probe-1791552162382` завершился без `scale-report.json`; local launcher ENOENT при чтении отсутствующего отчёта. Native PASS не установлен, причина отсутствия отчёта ещё не разобрана. Current10ca8ca2 root281unit/19suites failures/errors0; Gate T OPEN, source-matched native/full scale acceptance не завершены.
+- Причина отсутствовавшего отчёта установлена: ProductionController.tick пропускал наружу typed admission denial при создании работы. Source1090f0a1 сохраняет accepted order/kit и повторяет бюджетированную попытку; beforeFAIL/afterPASS regression завершает ровно один batch после освобождения capacity, root check/assemble PASS. Native economy1791603653951 прошёл1800.114s measurement и normal shutdown, но FAIL на прежнем1200s drain.24non-world evidence files archived/readback verified; экономика и Gate T не закрыты.
+- Установлен конфликт scheduler/food-return authority: scheduler заменял CHUNK_NOT_READY на MATERIALS и инвалидировал continuation возврата. Core beforeFAIL/afterPASS; оба native builder-return сценария теперь идут через реальный scheduler, before timeout/afterPASS без изменения1000-tick deadline или cargo conservation. All182required native PASS (`native-food-dispatch-after-20261010`). Full-duration economy witness с неизменённым historical profile запускается отдельно как NON_ACCEPTANCE; Gate T OPEN.
 - G/F не исключены и не объявлены выполненными. Состав контента не расширяется до Gate T; исторический scale PASS не применяется к изменённым исходникам.
 
 ## 2. Оценка и ресурсный план
@@ -207,7 +209,7 @@ flowchart TD
 - Bounded operator report: type/schema/object ID/dependency/reason/opaque count; raw unknown NBT не отправляется клиентам. Recovery для смерти использует результат T2.
 - Supported matrix: Minecraft 1.21.1/NeoForge/JDK21, native chest/trapped chest/barrel; generic ItemHandler и сторонние claims APIs не объявляются поддержанными. Custom veto event — расширение, не готовый universal protection adapter.
 - Save-format/version/backup/upgrade/downgrade policy; concrete migrations для фактически изменённых форматов. Safe refusal при unknown content объясняется оператору.
-- Обновить статус архитектуры и открытых решений. Выпустить user/admin guide: bootstrap, ожидания, cargo/cancel, recovery, лимиты, команды запуска и acceptance evidence. CHANGELOG остаётся историей.
+- Обновить статус архитектуры и открытых решений. Выпустить user/admin guide: bootstrap, ожидания, cargo/cancel, recovery, лимиты, команды запуска и acceptance evidence. [CHANGELOG](changelog.md) остаётся историей.
 
 **Готово:** другой оператор объясняет блокировку и выполняет безопасный recovery по инструкции без ручной догадки по NBT. Документы соответствуют реально проверенному supported subset.
 
@@ -416,7 +418,7 @@ F1/F2/F3 можно делить по независимым владельца�
 
 ### Единица разработки
 
-Небольшой пакет изменения имеет: цель/invariant, конкретного владельца, область файлов, предпосылки, backward-format policy, failing-before evidence для bug, consumer-visible regression где оправдана, actual smoke и актуальную docs/CHANGELOG запись. Локальная переработка не добавляет retries/telemetry/validation beyond task без доказанной нужды.
+Небольшой пакет изменения имеет: цель/invariant, конкретного владельца, область файлов, предпосылки, backward-format policy, failing-before evidence для bug, consumer-visible regression где оправдана, actual smoke и актуальную документацию/[CHANGELOG](changelog.md). Локальная переработка не добавляет retries/telemetry/validation beyond task без доказанной нужды.
 
 - Перед изменением exported contract — references; после cutover мигрировать все callers/tests/DTO/views, удалить obsolete aliases/paths. Одна серверная точка записи остаётся invariant.
 - Правки основного поведения проверяются реальным сценарием, не source-text/mock echo. UI — настоящий клиент; физика — Minecraft; pure model — consumer contract.

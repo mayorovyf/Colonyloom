@@ -1,6 +1,23 @@
+# Gradle caches and generated build output
 .gradle/
 **/build/
+out/
+bin/
+
+# Local Minecraft instances and integrated smoke evidence
 **/runs/
+/integrated-*/
+neoforge-*-installer.jar.log
+
+# Local IDE metadata
 .idea/
 *.iml
-neoforge-*-installer.jar.log
+.classpath
+.project
+.settings/
+.factorypath
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

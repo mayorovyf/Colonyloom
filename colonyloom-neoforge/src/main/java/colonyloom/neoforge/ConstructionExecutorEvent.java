@@ -1,0 +1,48 @@
+package colonyloom.neoforge;
+
+import colonyloom.minecraft.construction.BlockPlacementExecutor;
+import java.util.Objects;
+import net.minecraft.server.MinecraftServer;
+import net.neoforged.bus.api.Event;
+
+/** Per-server executor extension; production has no observer unless an explicit test module installs one. */
+public final class ConstructionExecutorEvent extends Event {
+    private final MinecraftServer server;
+    private final colonyloom.minecraft.runtime.MinecraftServerRuntime runtime;
+    private BlockPlacementExecutor.FaultObserver observer;
+    public ConstructionExecutorEvent(MinecraftServer server,colonyloom.minecraft.runtime.MinecraftServerRuntime runtime) { this.server=Objects.requireNonNull(server); this.runtime=Objects.requireNonNull(runtime); }
+    public MinecraftServer server() { return server; }
+    public colonyloom.minecraft.runtime.MinecraftServerRuntime runtime() { return runtime; }
+    public void observer(BlockPlacementExecutor.FaultObserver observer) {
+        if(this.observer!=null) throw new IllegalStateException("Construction observer already installed");
+        this.observer=Objects.requireNonNull(observer);
+    }
+    public BlockPlacementExecutor.FaultObserver observer() { return observer; }
+    private colonyloom.minecraft.storage.StorageTransferExecutor.FaultObserver transferObserver;
+    public void transferObserver(colonyloom.minecraft.storage.StorageTransferExecutor.FaultObserver observer) {
+        if(transferObserver!=null)throw new IllegalStateException("Transfer observer already installed");transferObserver=Objects.requireNonNull(observer);
+    }
+    public colonyloom.minecraft.storage.StorageTransferExecutor.FaultObserver transferObserver() {return transferObserver;}
+    private colonyloom.minecraft.production.RecipeExecutor.FaultObserver recipeObserver;
+    public void recipeObserver(colonyloom.minecraft.production.RecipeExecutor.FaultObserver observer) {
+        if(recipeObserver!=null)throw new IllegalStateException("Recipe observer already installed");recipeObserver=Objects.requireNonNull(observer);
+    }
+    public colonyloom.minecraft.production.RecipeExecutor.FaultObserver recipeObserver() {return recipeObserver;}
+    private colonyloom.minecraft.needs.FoodConsumptionExecutor.FaultObserver foodObserver;
+    public void foodObserver(colonyloom.minecraft.needs.FoodConsumptionExecutor.FaultObserver observer) {
+        if(foodObserver!=null)throw new IllegalStateException("Food observer already installed");foodObserver=Objects.requireNonNull(observer);
+    }
+    public colonyloom.minecraft.needs.FoodConsumptionExecutor.FaultObserver foodObserver() {return foodObserver;}
+    private Runnable checkpointObserver;
+    public void checkpointObserver(Runnable observer) {
+        if(checkpointObserver!=null)throw new IllegalStateException("Checkpoint observer already installed");
+        checkpointObserver=Objects.requireNonNull(observer);
+    }
+    public Runnable checkpointObserver() {return checkpointObserver;}
+    private colonyloom.minecraft.entity.CitizenEntity.DeathFaultObserver deathObserver;
+    public void deathObserver(colonyloom.minecraft.entity.CitizenEntity.DeathFaultObserver observer) {
+        if(deathObserver!=null)throw new IllegalStateException("Death observer already installed");
+        deathObserver=Objects.requireNonNull(observer);
+    }
+    public colonyloom.minecraft.entity.CitizenEntity.DeathFaultObserver deathObserver() {return deathObserver;}
+}
