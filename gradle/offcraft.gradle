@@ -1,0 +1,68 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+
+// Offcraft is client-only tooling; no runtime dependency or release-JAR contents change.
+neoForge.runs {
+    offcraft {
+        client()
+        gameDirectory = project.file('runs/offcraft')
+        loadedMods = [neoForge.mods.colonyloom]
+        programArguments.addAll('--username', 'ColonyloomDev', '--width', '960', '--height', '540')
+        jvmArguments.addAll('-Xmx2G', '-Djava.awt.headless=false')
+    }
+}
+
+tasks.register('prepareOffcraft') {
+    group = 'development'
+    description = 'Exports the actual ModDevGradle Java client launch for Offcraft JSONL/MCP.'
+    dependsOn provider {
+        def run = tasks.named('runOffcraft', JavaExec).get()
+        run.taskDependencies.getDependencies(run)
+    }
+    doLast {
+        def run = tasks.named('runOffcraft', JavaExec).get()
+        def gameDir = file('runs/offcraft')
+        def jar = new File(gameDir, 'mods/offcraft-1.0.0-mc1.21.1-neoforge.jar')
+        def adapter = rootProject.file('.offcraft/mcp/index.mjs')
+        if (!jar.isFile() || !adapter.isFile()) {
+            throw new GradleException('Install pinned tooling first: node scripts/install-offcraft.mjs <Offcraft checkout>')
+        }
+        def receiptFile = rootProject.file('.offcraft/install.json')
+        if (!receiptFile.isFile()) throw new GradleException('Offcraft installation receipt is missing; rerun the installer.')
+        def receipt = new JsonSlurper().parse(receiptFile)
+        def sha256 = { File input ->
+            java.security.MessageDigest.getInstance('SHA-256').digest(input.bytes).encodeHex().toString()
+        }
+        if (receipt.version != '1.0.0' || receipt.revision != 'aa1f6403e5eacfbc5f7c5638b07999edf3b0a7fe'
+                || receipt.patch != 'scripts/offcraft-loading.patch'
+                || receipt.patchSha256 != sha256(rootProject.file('scripts/offcraft-loading.patch'))) {
+            throw new GradleException('Offcraft installation provenance/patch mismatch; rerun the installer.')
+        }
+        def jarPath = 'colonyloom-neoforge/runs/offcraft/mods/offcraft-1.0.0-mc1.21.1-neoforge.jar'
+        def installedJars = receipt.files.findAll { it.path == jarPath }
+        if (installedJars.size() != 1 || !(installedJars[0].sha256 ==~ /[a-f0-9]{64}/)
+                || sha256(jar) != installedJars[0].sha256) {
+            throw new GradleException('Offcraft patched JAR SHA-256 mismatch; rerun the installer.')
+        }
+        def config = new File(gameDir, 'config/fml.toml')
+        config.parentFile.mkdirs()
+        def content = config.isFile() ? config.getText('UTF-8') : ''
+        def setting = ~/(?m)^[\t ]*earlyWindowControl[\t ]*=[^\r\n]*/
+        config.setText(setting.matcher(content).find()
+                ? content.replaceAll(setting, 'earlyWindowControl=false')
+                : 'earlyWindowControl=false\n' + content, 'UTF-8')
+        def args = []
+        args.addAll(run.allJvmArgs)
+        def cp = run.classpath + run.classpathProvider
+        if (!cp.isEmpty()) args.addAll(['-cp', cp.asPath])
+        args.add(run.mainClass.get())
+        args.addAll(run.args)
+        def environment = [:]
+        run.environmentProperty.get().each { key, value -> environment[key.toString()] = value.toString() }
+        def launch = [java: run.javaLauncher.get().executablePath.asFile.absolutePath,
+                      args: args.collect { it.toString() }, gameDir: gameDir.absolutePath, env: environment]
+        def target = rootProject.file('launch.offcraft.json')
+        target.setText(JsonOutput.prettyPrint(JsonOutput.toJson(launch)) + '\n', 'UTF-8')
+        logger.lifecycle('Prepared Offcraft Java launch: ' + target)
+    }
+}

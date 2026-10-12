@@ -17,6 +17,26 @@ cmd /c gradlew.bat :colonyloom-neoforge:verificationManifest --no-daemon --conso
 
 `check` verifies architectural boundaries and core/model suites and compiles **all** native GameTest classes/resources. It does not launch Minecraft. `verificationManifest` records source/build-config/content hashes, JDK/OS/CPU-count/RAM details, and the fixed `gradle/acceptance-profile.json`; NOT_RUN status is not acceptance.
 
+## Offcraft development client
+
+Install [Offcraft](https://github.com/mayorovyf/Offcraft/blob/main/spec.md) for local client automation, not on a dedicated server. Windows x64, a desktop/OpenGL session, Java 21 and Node.js 22+ are required. The project now pins NeoForge 21.1.259 because the Offcraft mod requires at least that version. Previous 21.1.252 runtime/load evidence is historical, not acceptance for this loader update.
+
+```text
+node scripts/install-offcraft.mjs C:/Projects/MinecraftMods/Offcraft
+cmd /c gradlew.bat :colonyloom-neoforge:prepareOffcraft --no-daemon --console=plain
+node scripts/offcraft-mcp.mjs --write-config
+```
+
+The installer takes an existing Offcraft Git checkout with built `dist/` artifacts. It verifies fixed SHA-256 values for the NeoForge 1.0.0 JAR, three MCP modules and MIT notice from revision `aa1f6403e5eacfbc5f7c5638b07999edf3b0a7fe`. Each invocation archives that revision into a fresh ignored `.offcraft/source-<unique>/`, applies `scripts/offcraft-loading.patch` once and rebuilds with **Offcraft's Gradle 9.5.0 wrapper**, not Colonyloom's wrapper. Its temporary source/build directory is removed in `finally`; existing source trees and the upstream checkout remain untouched. Git, tar, Java and network/cache access for Gradle dependencies are required. The patch replaces string class-name checks with remappable type checks: otherwise `new/load` incorrectly returns `load_requires_attention` for NeoForge's `ReceivingLevelScreen`. The locally patched 1.0.0 JAR is copied to `colonyloom-neoforge/runs/offcraft/mods/`; MCP files/license are copied to `.offcraft/`, with installed hashes and patch SHA-256 in `.offcraft/install.json`. No production dependency or fixture mod is added. Repeat installation only with this instance stopped; concurrent installation is not supported.
+
+`prepareOffcraft` compiles Colonyloom and generates the real ModDevGradle launch without starting Minecraft. Before changing config or exporting the launch, it requires the installation receipt, expected version/revision/patch, current patch SHA-256 and an exact match between the installed JAR bytes and their recorded SHA-256. Missing/stale receipts or replaced JARs refuse preparation; rerun the installer rather than editing the receipt. This is local installation integrity, not authentication against an attacker able to rewrite both JAR and receipt. It preserves other `config/fml.toml` settings while setting `earlyWindowControl=false`, then writes private `launch.offcraft.json` (`java`, `args`, `gameDir`, `env`). Regenerate after code/build changes or removal of generated launch files. Do not use Fabric arguments or invoke the mod with `java -jar`.
+
+Merge only the `offcraft` entry from ignored `mcp.offcraft.local.json` into the MCP host's existing configuration. The entry invokes `scripts/offcraft-mcp.mjs` by absolute path; it reads the local launch, applies the generated environment and reuses upstream `launchAdapter`. The host owns the client process; do not start `runOffcraft` alongside it. MCP stdout is JSON-RPC only; continuously drain stderr. No global assistant settings are changed by this installation.
+
+For direct JSONL, read the same launch file and spawn its Java executable/argument array with `cwd=gameDir`, merged `env`, shell disabled and three piped streams; reuse `.offcraft/mcp/adapter.mjs` `GameBridge`. Never pipe through Gradle or a batch wrapper. Wait for `ready`, inspect onboarding/status, then await terminal responses for mutating commands. Use one session per instance and unique absolute capture paths under `.offcraft/`; all worlds/logs/configs remain ignored. `quit` or stdin EOF saves and shuts down normally; drain through process close. Neither route authenticates a Microsoft account.
+
+Acceptance uses a uniquely named disposable world: hidden status, actual Colonyloom UI capture, observe/inventory, movement/capture/released input, exact-action cancellation, MCP handshake/error/cancelled-call behavior, normal quit, EOF and saved-world reload. Builds alone do not satisfy these checks. Offcraft does not close Gate T or the 300-resident economy barrier.
+
 ## Physical regressions and recovery
 
 ```text

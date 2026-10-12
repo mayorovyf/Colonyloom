@@ -23,7 +23,7 @@ These features form a technical preview. Survival recruitment, autonomous forest
 | Component | Supported version |
 |---|---|
 | Minecraft Java Edition | 1.21.1 |
-| NeoForge | 21.1.252, required by the current build |
+| NeoForge | 21.1.259, required by the current build |
 | Java | 21, 64-bit |
 | Colonyloom | Current project version: 0.1.0, in development |
 
@@ -31,7 +31,7 @@ Single-player uses Minecraft's integrated server; dedicated servers are also sup
 
 ## Installation
 
-1. Create a separate Minecraft 1.21.1 instance with NeoForge 21.1.252 and Java 21.
+1. Create a separate Minecraft 1.21.1 instance with NeoForge 21.1.259 and Java 21.
 2. Put the production `colonyloom-0.1.0.jar` in that instance's `mods` directory. For multiplayer, install the same build on the server and each participating client.
 3. Start Minecraft and create a test world. On a dedicated server, the server owner must accept Minecraft's EULA before starting it.
 4. Keep a full backup before changing the mod version or trying it in an existing world.
@@ -48,6 +48,8 @@ Linux/macOS: ./gradlew assemble --no-daemon --console=plain
 ```
 
 The production JAR is written to `colonyloom-neoforge/build/libs/`. Build instructions and runtime verification are separate: see the [verification guide](docs/verification.md) for development checks.
+
+For a hidden local development client controlled through JSONL/MCP, see [Offcraft setup](docs/verification.md#offcraft-development-client). It uses a separate instance; do not add Offcraft to ordinary player or dedicated-server installations.
 
 ## First colony: technical preview
 
