@@ -4,6 +4,7 @@ import colonyloom.minecraft.life.LifeSync;
 import colonyloom.minecraft.life.LifeViews;
 import colonyloom.minecraft.life.MinecraftLifeService;
 import colonyloom.minecraft.life.net.LifePayloads;
+import com.mojang.logging.LogUtils;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -15,9 +16,12 @@ import net.neoforged.neoforge.network.PacketDistributor;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
+import org.slf4j.Logger;
 
 public final class LifeNetwork {
     static final int teen_pro_YT_REQUEST_COOLDOWN = 4;
+    private static final Logger teen_pro_YT_LOGGER = LogUtils.getLogger();
+    private static volatile boolean teen_pro_YT_clientFailed;
     private static volatile Consumer<CustomPacketPayload> teen_pro_YT_client = payload -> {};
     private static final Map<UUID, Long> teen_pro_YT_requests = new HashMap<>();
 
@@ -58,7 +62,12 @@ public final class LifeNetwork {
     }
 
     private static void toClient(CustomPacketPayload payload, IPayloadContext context) {
-        teen_pro_YT_client.accept(payload);
+        try {
+            teen_pro_YT_client.accept(payload);
+        } catch (RuntimeException | LinkageError failure) {
+            if (!teen_pro_YT_clientFailed) teen_pro_YT_LOGGER.error("Colonyloom life could not show {}; later failures are not logged", payload.getClass().getSimpleName(), failure);
+            teen_pro_YT_clientFailed = true;
+        }
     }
 
     private static void request(LifePayloads.ViewRequest request, IPayloadContext context) {
@@ -68,8 +77,13 @@ public final class LifeNetwork {
         if (last != null && now - last >= 0 && now - last < teen_pro_YT_REQUEST_COOLDOWN) return;
         teen_pro_YT_requests.put(player.getUUID(), now);
         MinecraftLifeService service = LifeMod.service(player.server);
-        LifePayloads.View view = service == null ? LifeViews.empty("screen.colonyloom.life.disabled")
-                : service.view(player, request.colony(), request.tab(), request.page());
+        LifePayloads.View view;
+        try {
+            view = service == null ? LifeViews.empty("screen.colonyloom.life.disabled") : service.view(player, request.colony(), request.tab(), request.page());
+        } catch (RuntimeException | LinkageError failure) {
+            teen_pro_YT_LOGGER.error("Colonyloom life page could not be built for {}", player.getGameProfile().getName(), failure);
+            view = LifeViews.empty("screen.colonyloom.life.empty");
+        }
         context.reply(view);
     }
 

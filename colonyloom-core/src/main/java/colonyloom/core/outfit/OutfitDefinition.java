@@ -31,9 +31,13 @@ public record OutfitDefinition(String id, String model, String texture, String s
     }
 
     public boolean fits(OutfitProfile profile) {
-        return (kinds.isEmpty() || kinds.contains(profile.kind())) && (sexes.isEmpty() || sexes.contains(profile.sex()))
-                && (stages.isEmpty() || stages.contains(profile.stage()))
-                && (professions.isEmpty() || professions.contains(profile.profession() == null ? "none" : profile.profession()));
+        if (profile == null) return false;
+        return allows(kinds, profile.kind()) && allows(sexes, profile.sex()) && allows(stages, profile.stage())
+                && allows(professions, profile.profession() == null ? "none" : profile.profession());
+    }
+
+    private static boolean allows(Set<String> allowed, String value) {
+        return allowed.isEmpty() || value != null && allowed.contains(value);
     }
 
     public static OutfitDefinition decode(String id, Obj json) {

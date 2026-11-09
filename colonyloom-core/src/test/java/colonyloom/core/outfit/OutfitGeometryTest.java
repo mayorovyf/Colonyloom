@@ -158,4 +158,17 @@ final class OutfitGeometryTest {
                 java.util.Set.of(), java.util.Set.of(), java.util.Set.of(), java.util.Set.of()));
         assertEquals(OutfitCatalog.teen_pro_YT_EMPTY.outfits(), OutfitCatalog.load(path -> null).outfits());
     }
+
+    @Test void wearerFiltersTolerateMissingProfileFields() {
+        OutfitDefinition anyone = new OutfitDefinition("colonyloom:anyone", "a.geo.json", null, null, java.util.Set.of(), false, 1,
+                java.util.Set.of(), java.util.Set.of(), java.util.Set.of(), java.util.Set.of());
+        OutfitDefinition picky = new OutfitDefinition("colonyloom:picky", "a.geo.json", null, null, java.util.Set.of(), false, 1,
+                java.util.Set.of("citizen"), java.util.Set.of("female"), java.util.Set.of("adult"), java.util.Set.of("colonyloom:builder"));
+        assertThrows(NullPointerException.class, () -> new OutfitProfile(null, "male", "adult", null));
+        assertTrue(anyone.fits(new OutfitProfile("child", "male", "baby", null)));
+        assertFalse(anyone.fits(null));
+        assertFalse(picky.fits(null));
+        assertFalse(picky.fits(new OutfitProfile("citizen", "female", "adult", null)));
+        assertTrue(picky.fits(new OutfitProfile("citizen", "female", "adult", "colonyloom:builder")));
+    }
 }

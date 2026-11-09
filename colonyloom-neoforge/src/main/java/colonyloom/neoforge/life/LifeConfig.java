@@ -2,6 +2,8 @@ package colonyloom.neoforge.life;
 
 import colonyloom.core.life.state.LifeSettings;
 import com.mojang.logging.LogUtils;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import net.neoforged.neoforge.common.ModConfigSpec;
 import org.slf4j.Logger;
@@ -10,13 +12,15 @@ public final class LifeConfig {
     public static final String teen_pro_YT_FILE = "colonyloom-life-server.toml";
     private static final Logger teen_pro_YT_LOGGER = LogUtils.getLogger();
     private static final LifeSettings teen_pro_YT_DEFAULTS = LifeSettings.defaults();
+    static final List<String> teen_pro_YT_LETHALITIES = Collections.unmodifiableList(Arrays.asList("gentle", "normal", "hardcore"));
+    static final List<String> teen_pro_YT_NAME_POOLS = Collections.unmodifiableList(Arrays.asList("ru", "en"));
     private static final ModConfigSpec.Builder teen_pro_YT_BUILDER = new ModConfigSpec.Builder().push("life");
     static final ModConfigSpec.BooleanValue teen_pro_YT_ENABLED = teen_pro_YT_BUILDER
             .comment("Residents' own lives: health, genes, moods, families, conversations, children and free time.")
             .define("enabled", teen_pro_YT_DEFAULTS.enabled());
     static final ModConfigSpec.ConfigValue<String> teen_pro_YT_LETHALITY = teen_pro_YT_BUILDER
             .comment("gentle: illness never kills; normal: serious untreated illness kills; hardcore: harsher and more contagious.")
-            .defineInList("lethality", teen_pro_YT_DEFAULTS.lethality().id(), List.of("gentle", "normal", "hardcore"));
+            .defineInList("lethality", teen_pro_YT_DEFAULTS.lethality().id(), teen_pro_YT_LETHALITIES);
     static final ModConfigSpec.LongValue teen_pro_YT_TICKS_PER_YEAR = teen_pro_YT_BUILDER
             .comment("Active ticks per year of a resident's age (24000 = one in-game day).")
             .defineInRange("ticksPerYear", teen_pro_YT_DEFAULTS.ticksPerYear(), 1_200L, 2_400_000L);
@@ -31,7 +35,7 @@ public final class LifeConfig {
             .defineInRange("birthRate", teen_pro_YT_DEFAULTS.birthRate(), 0.0D, 5.0D);
     static final ModConfigSpec.ConfigValue<String> teen_pro_YT_NAMES = teen_pro_YT_BUILDER
             .comment("Name pool for new residents: ru or en.")
-            .defineInList("names", teen_pro_YT_DEFAULTS.names(), List.of("ru", "en"));
+            .defineInList("names", teen_pro_YT_DEFAULTS.names(), teen_pro_YT_NAME_POOLS);
     static final ModConfigSpec.BooleanValue teen_pro_YT_SPEECH = teen_pro_YT_BUILDER
             .comment("Speech bubbles above residents.")
             .define("speech", teen_pro_YT_DEFAULTS.speech());

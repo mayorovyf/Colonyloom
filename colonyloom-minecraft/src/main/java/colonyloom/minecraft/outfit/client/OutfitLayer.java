@@ -23,7 +23,11 @@ public final class OutfitLayer<T extends LivingEntity, M extends HumanoidModel<T
         OutfitModels.Baked outfit = id == null ? null : OutfitModels.get(id);
         if (outfit == null) return;
         int overlay = LivingEntityRenderer.getOverlayCoords(entity, 0.0F);
-        if (outfit.skin() != null) OutfitVisibility.skin(model, outfit, poseStack, buffers, packedLight, overlay);
-        for (OutfitModels.Layer layer : outfit.layers()) OutfitDraw.draw(poseStack, buffers.getBuffer(layer.renderType()), model, layer.quads(), packedLight, overlay, -1);
+        try {
+            if (outfit.skin() != null) OutfitVisibility.skin(model, outfit, poseStack, buffers, packedLight, overlay);
+            for (OutfitModels.Layer layer : outfit.layers()) OutfitDraw.draw(poseStack, buffers.getBuffer(layer.renderType()), model, layer.quads(), packedLight, overlay, -1);
+        } catch (RuntimeException failure) {
+            OutfitModels.fail(id, failure);
+        }
     }
 }

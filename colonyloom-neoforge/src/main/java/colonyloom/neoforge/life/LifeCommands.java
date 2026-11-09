@@ -207,8 +207,12 @@ final class LifeCommands {
         return (ctx, builder) -> {
             MinecraftLifeService service = LifeMod.service(ctx.getSource().getServer());
             if (service == null) return builder.buildFuture();
-            Collection<String> ids = families ? service.life().content().families().keySet() : service.life().content().diseases().keySet();
-            return SharedSuggestionProvider.suggestResource(ids.stream().map(ResourceLocation::tryParse).filter(Objects::nonNull), builder);
+            try {
+                Collection<String> ids = families ? service.life().content().families().keySet() : service.life().content().diseases().keySet();
+                return SharedSuggestionProvider.suggestResource(ids.stream().map(ResourceLocation::tryParse).filter(Objects::nonNull), builder);
+            } catch (RuntimeException failure) {
+                return builder.buildFuture();
+            }
         };
     }
 }

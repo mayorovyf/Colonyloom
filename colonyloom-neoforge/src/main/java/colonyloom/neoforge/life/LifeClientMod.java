@@ -10,7 +10,9 @@ import colonyloom.minecraft.life.client.ResidentVisuals;
 import colonyloom.minecraft.life.client.SpeechBubbles;
 import colonyloom.minecraft.life.entity.ResidentChildEntity;
 import colonyloom.minecraft.outfit.client.OutfitLayer;
+import colonyloom.minecraft.outfit.client.OutfitModels;
 import colonyloom.minecraft.outfit.client.OutfitVisibility;
+import com.mojang.logging.LogUtils;
 import java.lang.reflect.Field;
 import java.util.UUID;
 import net.minecraft.client.KeyMapping;
@@ -39,13 +41,16 @@ import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent;
 import net.neoforged.neoforge.network.PacketDistributor;
 import org.lwjgl.glfw.GLFW;
+import org.slf4j.Logger;
 
 @Mod(value = LifeMod.teen_pro_YT_MOD_ID, dist = Dist.CLIENT)
 public final class LifeClientMod {
-    static final KeyMapping teen_pro_YT_KEY = new KeyMapping("key.colonyloom.life", GLFW.GLFW_KEY_K, "key.categories.colonyloom.life");
+    private static KeyMapping teen_pro_YT_key;
     static final int teen_pro_YT_BUTTON_WIDTH = 76;
     static final int teen_pro_YT_BUTTON_HEIGHT = 14;
     static final int teen_pro_YT_BUTTON_TOP = 7;
+    private static final Logger teen_pro_YT_LOGGER = LogUtils.getLogger();
+    private static boolean teen_pro_YT_renderFailed, teen_pro_YT_speechFailed, teen_pro_YT_screenFailed, teen_pro_YT_tickFailed;
     private static Field teen_pro_YT_colonyField;
     private static boolean teen_pro_YT_colonyFieldMissing;
 
@@ -54,7 +59,7 @@ public final class LifeClientMod {
         LifeClient.sender(payload -> PacketDistributor.sendToServer(payload));
         modBus.addListener(LifeClientMod::renderers);
         modBus.addListener(LifeClientMod::layers);
-        modBus.addListener((RegisterKeyMappingsEvent event) -> event.register(teen_pro_YT_KEY));
+        modBus.addListener(LifeClientMod::keys);
         NeoForge.EVENT_BUS.addListener(LifeClientMod::tick);
         NeoForge.EVENT_BUS.addListener(EventPriority.LOWEST, false, LifeClientMod::beforeRender);
         NeoForge.EVENT_BUS.addListener(LifeClientMod::afterRender);
@@ -70,6 +75,11 @@ public final class LifeClientMod {
         return false;
     }
 
+    private static void keys(RegisterKeyMappingsEvent event) {
+        teen_pro_YT_key = new KeyMapping("key.colonyloom.life", GLFW.GLFW_KEY_K, "key.categories.colonyloom.life");
+        event.register(teen_pro_YT_key);
+    }
+
     private static void renderers(EntityRenderersEvent.RegisterRenderers event) {
         event.registerEntityRenderer(LifeMod.teen_pro_YT_CHILD.get(), ChildRenderer::new);
     }
@@ -82,9 +92,15 @@ public final class LifeClientMod {
     }
 
     private static void tick(ClientTickEvent.Post event) {
-        ResidentVisuals.tick();
         Minecraft minecraft = Minecraft.getInstance();
-        while (teen_pro_YT_KEY.consumeClick()) if (minecraft.player != null && minecraft.screen == null) LifeClient.open(null);
+        try {
+            ResidentVisuals.tick();
+            KeyMapping key = teen_pro_YT_key;
+            while (key != null && key.consumeClick()) if (minecraft.player != null && minecraft.screen == null) LifeClient.open(null);
+        } catch (RuntimeException failure) {
+            if (!teen_pro_YT_tickFailed) teen_pro_YT_LOGGER.error("Colonyloom life client tick failed; later failures are not logged", failure);
+            teen_pro_YT_tickFailed = true;
+        }
     }
 
     static boolean dressed(Entity entity) {
@@ -93,14 +109,28 @@ public final class LifeClientMod {
 
     private static void beforeRender(RenderLivingEvent.Pre<?, ?> event) {
         LivingEntity entity = event.getEntity();
-        if (dressed(entity) && event.getRenderer().getModel() instanceof HumanoidModel<?> model) OutfitVisibility.before(model, entity);
+        if (teen_pro_YT_renderFailed || !dressed(entity) || !(event.getRenderer().getModel() instanceof HumanoidModel<?> model)) return;
+        try {
+            OutfitVisibility.before(model, entity);
+        } catch (RuntimeException failure) {
+            teen_pro_YT_renderFailed = true;
+            OutfitModels.disable();
+            OutfitVisibility.after(model);
+            teen_pro_YT_LOGGER.error("Colonyloom outfits are switched off after a render failure", failure);
+        }
     }
 
     private static void afterRender(RenderLivingEvent.Post<?, ?> event) {
         LivingEntity entity = event.getEntity();
         if (!dressed(entity)) return;
         if (event.getRenderer().getModel() instanceof HumanoidModel<?> model) OutfitVisibility.after(model);
-        SpeechBubbles.render(entity, event.getPartialTick(), event.getPoseStack(), event.getMultiBufferSource(), event.getPackedLight());
+        if (teen_pro_YT_speechFailed) return;
+        try {
+            SpeechBubbles.render(entity, event.getPartialTick(), event.getPoseStack(), event.getMultiBufferSource(), event.getPackedLight());
+        } catch (RuntimeException failure) {
+            teen_pro_YT_speechFailed = true;
+            teen_pro_YT_LOGGER.error("Colonyloom speech bubbles are switched off after a render failure", failure);
+        }
     }
 
     private static void left(EntityLeaveLevelEvent event) {
@@ -117,26 +147,41 @@ public final class LifeClientMod {
     }
 
     private static void screenRendered(ScreenEvent.Render.Post event) {
-        if (!(event.getScreen() instanceof ColonyScreen screen) || testRun()) return;
+        if (teen_pro_YT_screenFailed || !(event.getScreen() instanceof ColonyScreen screen) || testRun()) return;
+        try {
+            drawButton(event, screen);
+        } catch (RuntimeException failure) {
+            teen_pro_YT_screenFailed = true;
+            teen_pro_YT_LOGGER.error("Colonyloom life button is switched off after a failure", failure);
+        }
+    }
+
+    private static void drawButton(ScreenEvent.Render.Post event, ColonyScreen screen) {
         GuiGraphics graphics = event.getGuiGraphics();
         int left = buttonLeft(screen), top = teen_pro_YT_BUTTON_TOP;
         boolean hover = over(screen, event.getMouseX(), event.getMouseY());
         graphics.fill(left, top, left + teen_pro_YT_BUTTON_WIDTH, top + teen_pro_YT_BUTTON_HEIGHT, hover ? 0xFF4E6E3A : 0xFF2E4424);
         graphics.renderOutline(left, top, teen_pro_YT_BUTTON_WIDTH, teen_pro_YT_BUTTON_HEIGHT, hover ? 0xFFD8F0B8 : 0xFF8DB070);
-        Component label = Component.translatable("screen.colonyloom.life.open", teen_pro_YT_KEY.getTranslatedKeyMessage());
+        KeyMapping key = teen_pro_YT_key;
+        Component label = Component.translatable("screen.colonyloom.life.open", key == null ? Component.literal("K") : key.getTranslatedKeyMessage());
         Minecraft minecraft = Minecraft.getInstance();
         graphics.drawCenteredString(minecraft.font, label, left + teen_pro_YT_BUTTON_WIDTH / 2, top + (teen_pro_YT_BUTTON_HEIGHT - 8) / 2, 0xFFFFFF);
     }
 
     private static void screenClicked(ScreenEvent.MouseButtonPressed.Pre event) {
-        if (event.getButton() != GLFW.GLFW_MOUSE_BUTTON_LEFT || !(event.getScreen() instanceof ColonyScreen screen) || testRun()) return;
+        if (teen_pro_YT_screenFailed || event.getButton() != GLFW.GLFW_MOUSE_BUTTON_LEFT || !(event.getScreen() instanceof ColonyScreen screen) || testRun()) return;
         if (!over(screen, event.getMouseX(), event.getMouseY())) return;
         event.setCanceled(true);
         Minecraft minecraft = Minecraft.getInstance();
         minecraft.getSoundManager().play(SimpleSoundInstance.forUI(SoundEvents.UI_BUTTON_CLICK, 1.0F));
-        UUID colony = colonyOf(screen);
-        ManagementClient client = screen.client();
-        LifeClient.open(colony, colony == null ? null : () -> new ColonyScreen(client, colony));
+        try {
+            UUID colony = colonyOf(screen);
+            ManagementClient client = screen.client();
+            LifeClient.open(colony, colony == null ? null : () -> new ColonyScreen(client, colony));
+        } catch (RuntimeException failure) {
+            teen_pro_YT_screenFailed = true;
+            teen_pro_YT_LOGGER.error("Colonyloom life screen could not be opened from the colony window", failure);
+        }
     }
 
     private static UUID colonyOf(ColonyScreen screen) {

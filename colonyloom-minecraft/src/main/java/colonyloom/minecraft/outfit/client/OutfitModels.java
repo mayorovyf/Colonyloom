@@ -33,6 +33,7 @@ public final class OutfitModels {
     private static final Set<String> teen_pro_YT_BROKEN = new HashSet<>();
     private static final List<ResourceLocation> teen_pro_YT_TEXTURES = new ArrayList<>();
     private static OutfitCatalog teen_pro_YT_catalog;
+    private static boolean teen_pro_YT_disabled;
 
     public record Layer(RenderType renderType, Map<OutfitPart, List<OutfitQuad>> quads) {}
 
@@ -55,7 +56,7 @@ public final class OutfitModels {
     }
 
     public static Baked get(String id) {
-        if (id == null || teen_pro_YT_BROKEN.contains(id)) return null;
+        if (id == null || teen_pro_YT_disabled || teen_pro_YT_BROKEN.contains(id)) return null;
         Baked baked = teen_pro_YT_BAKED.get(id);
         if (baked != null) return baked;
         OutfitDefinition definition = catalog().outfit(id);
@@ -121,6 +122,16 @@ public final class OutfitModels {
             if (bytes.length > limit) throw new IOException("Outfit file too large: " + path);
             return bytes;
         }
+    }
+
+    public static void disable() {
+        teen_pro_YT_disabled = true;
+    }
+
+    public static void fail(String id, Throwable failure) {
+        if (id == null || !teen_pro_YT_BROKEN.add(id)) return;
+        teen_pro_YT_BAKED.remove(id);
+        teen_pro_YT_LOGGER.error("Colonyloom outfit {} failed to render and is switched off", id, failure);
     }
 
     public static void clear() {

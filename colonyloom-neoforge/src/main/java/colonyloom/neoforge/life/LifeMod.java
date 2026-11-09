@@ -15,6 +15,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.gametest.framework.GameTestServer;
 import net.minecraft.server.MinecraftServer;
@@ -52,6 +53,7 @@ public final class LifeMod {
     public static final String teen_pro_YT_MOD_ID = "colonyloom";
     static final int teen_pro_YT_SETTINGS_INTERVAL = 20;
     static final int teen_pro_YT_FAILURE_LIMIT = 3;
+    static final int teen_pro_YT_EVENT_FAILURE_LIMIT = 8;
     private static final Logger teen_pro_YT_LOGGER = LogUtils.getLogger();
     private static final DeferredRegister<EntityType<?>> teen_pro_YT_TYPES = DeferredRegister.create(Registries.ENTITY_TYPE, teen_pro_YT_MOD_ID);
     public static final DeferredHolder<EntityType<?>, EntityType<ResidentChildEntity>> teen_pro_YT_CHILD = teen_pro_YT_TYPES.register(ResidentChildEntity.teen_pro_YT_ID,
@@ -60,6 +62,7 @@ public final class LifeMod {
     private static final Map<MinecraftServer, MinecraftServerRuntime> teen_pro_YT_RUNTIMES = new IdentityHashMap<>();
     private static final Map<MinecraftServer, MinecraftLifeService> teen_pro_YT_SERVICES = new IdentityHashMap<>();
     private static final Map<MinecraftServer, Integer> teen_pro_YT_FAILURES = new IdentityHashMap<>();
+    private static final Map<MinecraftServer, Integer> teen_pro_YT_EVENT_FAILURES = new IdentityHashMap<>();
     private static OutfitCatalog teen_pro_YT_outfits;
 
     public LifeMod(IEventBus modBus, ModContainer container) {
@@ -124,11 +127,37 @@ public final class LifeMod {
                 for (Entity entity : loaded) service.joined(entity);
             }
             return service;
-        } catch (RuntimeException failure) {
+        } catch (RuntimeException | LinkageError failure) {
             teen_pro_YT_SERVICES.remove(server);
             teen_pro_YT_FAILURES.put(server, teen_pro_YT_FAILURE_LIMIT);
             teen_pro_YT_LOGGER.error("Colonyloom life simulation could not start; colonies keep working without it", failure);
             return null;
+        }
+    }
+
+    private static void pause(MinecraftServer server, MinecraftLifeService service) {
+        teen_pro_YT_LOGGER.error("Colonyloom life simulation is paused until the world is reopened; colonies keep working");
+        try {
+            service.save();
+        } catch (RuntimeException | LinkageError failure) {
+            teen_pro_YT_LOGGER.error("Colonyloom life state could not be saved while pausing", failure);
+        }
+        synchronized (LifeMod.class) {
+            teen_pro_YT_SERVICES.remove(server);
+            teen_pro_YT_FAILURES.put(server, teen_pro_YT_FAILURE_LIMIT);
+        }
+    }
+
+    private static void guarded(MinecraftServer server, String what, Consumer<MinecraftLifeService> action) {
+        MinecraftLifeService service = service(server);
+        if (service == null) return;
+        try {
+            action.accept(service);
+        } catch (RuntimeException | LinkageError failure) {
+            int failures;
+            synchronized (LifeMod.class) { failures = teen_pro_YT_EVENT_FAILURES.merge(server, 1, Integer::sum); }
+            teen_pro_YT_LOGGER.error("Colonyloom life {} failed ({} of {})", what, failures, teen_pro_YT_EVENT_FAILURE_LIMIT, failure);
+            if (failures >= teen_pro_YT_EVENT_FAILURE_LIMIT) pause(server, service);
         }
     }
 
@@ -140,22 +169,17 @@ public final class LifeMod {
             if (server.getTickCount() % teen_pro_YT_SETTINGS_INTERVAL == 0) service.settings(LifeConfig.snapshot());
             service.tick();
             synchronized (LifeMod.class) { teen_pro_YT_FAILURES.remove(server); }
-        } catch (RuntimeException failure) {
+        } catch (RuntimeException | LinkageError failure) {
             int failures;
             synchronized (LifeMod.class) { failures = teen_pro_YT_FAILURES.merge(server, 1, Integer::sum); }
             teen_pro_YT_LOGGER.error("Colonyloom life tick failed ({} of {})", failures, teen_pro_YT_FAILURE_LIMIT, failure);
-            if (failures >= teen_pro_YT_FAILURE_LIMIT) {
-                teen_pro_YT_LOGGER.error("Colonyloom life simulation is paused until the world is reopened; colonies keep working");
-                service.save();
-                synchronized (LifeMod.class) { teen_pro_YT_SERVICES.remove(server); }
-            }
+            if (failures >= teen_pro_YT_FAILURE_LIMIT) pause(server, service);
         }
     }
 
     private static void save(LevelEvent.Save event) {
         if (!(event.getLevel() instanceof ServerLevel level) || level.dimension() != Level.OVERWORLD) return;
-        MinecraftLifeService service = service(level.getServer());
-        if (service != null) service.save();
+        guarded(level.getServer(), "save", MinecraftLifeService::save);
     }
 
     private static void stopped(ServerStoppedEvent event) {
@@ -163,38 +187,34 @@ public final class LifeMod {
             teen_pro_YT_SERVICES.remove(event.getServer());
             teen_pro_YT_RUNTIMES.remove(event.getServer());
             teen_pro_YT_FAILURES.remove(event.getServer());
+            teen_pro_YT_EVENT_FAILURES.remove(event.getServer());
         }
         LifeNetwork.clear();
     }
 
     private static void joined(EntityJoinLevelEvent event) {
         if (!(event.getLevel() instanceof ServerLevel level)) return;
-        MinecraftLifeService service = service(level.getServer());
-        if (service != null) service.joined(event.getEntity());
+        guarded(level.getServer(), "entity join", service -> service.joined(event.getEntity()));
     }
 
     private static void left(EntityLeaveLevelEvent event) {
         if (!(event.getLevel() instanceof ServerLevel level)) return;
-        MinecraftLifeService service = service(level.getServer());
-        if (service != null) service.left(event.getEntity());
+        guarded(level.getServer(), "entity leave", service -> service.left(event.getEntity()));
     }
 
     private static void died(LivingDeathEvent event) {
         if (!(event.getEntity().level() instanceof ServerLevel level)) return;
-        MinecraftLifeService service = service(level.getServer());
-        if (service != null) service.died(event.getEntity(), event.getSource());
+        guarded(level.getServer(), "death", service -> service.died(event.getEntity(), event.getSource()));
     }
 
     private static void injured(LivingDamageEvent.Post event) {
         if (event.getNewDamage() <= 0.0F || !(event.getEntity().level() instanceof ServerLevel level)) return;
-        MinecraftLifeService service = service(level.getServer());
-        if (service != null) service.injured(event.getEntity(), event.getSource());
+        guarded(level.getServer(), "injury", service -> service.injured(event.getEntity(), event.getSource()));
     }
 
     private static void tracking(PlayerEvent.StartTracking event) {
         if (!(event.getEntity() instanceof ServerPlayer player)) return;
-        MinecraftLifeService service = service(player.server);
-        if (service != null) service.tracking(player, event.getTarget());
+        guarded(player.server, "tracking", service -> service.tracking(player, event.getTarget()));
     }
 
     private static void loggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
@@ -206,8 +226,9 @@ public final class LifeMod {
         event.setCancellationResult(InteractionResult.SUCCESS);
         event.setCanceled(true);
         if (!(event.getEntity() instanceof ServerPlayer player)) return;
-        MinecraftLifeService service = service(player.server);
-        UUID lifeId = service == null ? null : service.lifeOf(child);
-        if (lifeId != null) player.sendSystemMessage(LifeReports.info(service, lifeId));
+        guarded(player.server, "child card", service -> {
+            UUID lifeId = service.lifeOf(child);
+            if (lifeId != null) player.sendSystemMessage(LifeReports.info(service, lifeId));
+        });
     }
 }
