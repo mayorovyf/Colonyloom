@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "moderate",
+  "systems": [
+    "skin",
+    "nervous",
+    "reproductive"
+  ],
+  "routes": [
+    "blood"
+  ],
+  "contagiousness": 0.15,
+  "incubationDays": [
+    2,
+    8
+  ],
+  "severityPerDay": 0.06,
+  "immunityPerDay": 0.06,
+  "symptoms": [
+    "rash",
+    "pain"
+  ],
+  "rarity": 0.3,
+  "varieties": {
+    "count": 6
+  }
+}

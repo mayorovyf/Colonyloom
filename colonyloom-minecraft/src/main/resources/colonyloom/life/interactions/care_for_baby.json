@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "kind": "care",
+  "weight": 2,
+  "intimacy": 1.5,
+  "speech": 5,
+  "emote": "heart",
+  "requires": {
+    "relation": "parent_to_child",
+    "recipientMaxAge": 2
+  },
+  "onSuccess": {
+    "initiator": "colonyloom:cared_for_baby",
+    "recipient": "colonyloom:cared_for"
+  }
+}

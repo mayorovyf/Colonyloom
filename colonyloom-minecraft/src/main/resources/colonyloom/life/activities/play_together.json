@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "purpose": "child",
+  "place": "friend",
+  "gains": {
+    "recreation": 9,
+    "social": 2
+  },
+  "joy": "play",
+  "tags": [
+    "play",
+    "social"
+  ],
+  "schedule": [
+    "work",
+    "leisure"
+  ],
+  "ages": [
+    3,
+    12
+  ],
+  "memory": "colonyloom:played",
+  "durationTicks": [
+    400,
+    1000
+  ],
+  "weight": 1.5
+}

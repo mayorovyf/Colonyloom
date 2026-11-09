@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "lark",
+      "frequency": 0.3,
+      "traits": {
+        "colonyloom:early_bird": 2
+      }
+    },
+    {
+      "id": "neutral",
+      "frequency": 0.45
+    },
+    {
+      "id": "owl",
+      "frequency": 0.25,
+      "traits": {
+        "colonyloom:night_owl": 2
+      }
+    }
+  ]
+}

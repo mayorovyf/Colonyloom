@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "category": "nutritional",
+  "severity": "mild",
+  "systems": [
+    "blood"
+  ],
+  "symptoms": [
+    "pale",
+    "drowsy"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0015
+  }
+}

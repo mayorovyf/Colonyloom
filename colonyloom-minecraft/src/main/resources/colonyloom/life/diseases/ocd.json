@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "category": "mental",
+  "severity": "mild",
+  "chronic": true,
+  "symptoms": [
+    "anxiety"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0004,
+    "minAge": 10,
+    "moodBelow": 45
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "chronic",
+  "severity": "moderate",
+  "systems": [
+    "renal"
+  ],
+  "symptoms": [
+    "pale",
+    "swelling"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0006,
+    "minAge": 40
+  }
+}

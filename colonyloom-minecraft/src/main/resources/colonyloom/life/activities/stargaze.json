@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "sky",
+  "animation": "look_up",
+  "gains": {
+    "recreation": 7.5
+  },
+  "joy": "meditative",
+  "tags": [
+    "nature",
+    "calm"
+  ],
+  "time": [
+    13000,
+    23000
+  ],
+  "weather": "clear",
+  "memory": "colonyloom:stargazed",
+  "durationTicks": [
+    500,
+    1200
+  ],
+  "speech": 3
+}

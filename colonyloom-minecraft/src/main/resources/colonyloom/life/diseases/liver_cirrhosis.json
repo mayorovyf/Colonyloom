@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "chronic",
+  "severity": "severe",
+  "systems": [
+    "digestive",
+    "renal"
+  ],
+  "lethal": true,
+  "symptoms": [
+    "pale",
+    "pain",
+    "nausea"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0003,
+    "minAge": 40
+  }
+}

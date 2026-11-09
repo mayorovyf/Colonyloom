@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "mild",
+  "systems": [
+    "digestive"
+  ],
+  "routes": [
+    "contact",
+    "food"
+  ],
+  "contagiousness": 0.15,
+  "symptoms": [
+    "vomit",
+    "nausea",
+    "pain"
+  ],
+  "rarity": 3,
+  "varieties": {
+    "count": 40
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "wander",
+  "radius": 28,
+  "gains": {
+    "recreation": 6
+  },
+  "joy": "active",
+  "durationTicks": [
+    900,
+    2000
+  ],
+  "tags": [
+    "explore"
+  ],
+  "memory": "colonyloom:explored",
+  "ages": [
+    8,
+    999
+  ]
+}

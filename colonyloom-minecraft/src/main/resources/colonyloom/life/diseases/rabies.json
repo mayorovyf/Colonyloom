@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "deadly",
+  "systems": [
+    "nervous"
+  ],
+  "routes": [
+    "animal",
+    "injury"
+  ],
+  "incubationDays": [
+    3,
+    15
+  ],
+  "tendable": true,
+  "symptoms": [
+    "confusion",
+    "anxiety",
+    "fever",
+    "tremor"
+  ],
+  "trigger": {
+    "injury": "attack",
+    "eventChance": 0.004
+  },
+  "rarity": 0.2
+}

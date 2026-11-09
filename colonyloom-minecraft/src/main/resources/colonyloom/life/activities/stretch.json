@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "purpose": "idle",
+  "place": "here",
+  "animation": "swing",
+  "schedule": [
+    "work",
+    "leisure"
+  ],
+  "durationTicks": [
+    60,
+    150
+  ],
+  "tags": [
+    "sport"
+  ]
+}

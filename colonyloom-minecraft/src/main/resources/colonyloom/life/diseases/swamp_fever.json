@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "moderate",
+  "systems": [
+    "blood"
+  ],
+  "routes": [
+    "contact",
+    "vector"
+  ],
+  "contagiousness": 0.04,
+  "symptoms": [
+    "fever",
+    "chills",
+    "drowsy"
+  ],
+  "trigger": {
+    "environment": [
+      "swamp"
+    ],
+    "chancePerDay": 0.003
+  },
+  "rarity": 1,
+  "varieties": {
+    "count": 15
+  }
+}

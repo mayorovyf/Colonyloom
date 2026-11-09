@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "purpose": "idle",
+  "place": "here",
+  "schedule": [
+    "work",
+    "leisure"
+  ],
+  "gains": {
+    "hygiene": 12
+  },
+  "durationTicks": [
+    100,
+    200
+  ],
+  "tags": [
+    "hygiene"
+  ]
+}

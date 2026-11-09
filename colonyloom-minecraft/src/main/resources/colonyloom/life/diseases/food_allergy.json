@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "category": "allergy",
+  "severity": "mild",
+  "systems": [
+    "digestive",
+    "immune"
+  ],
+  "routes": [
+    "food"
+  ],
+  "symptoms": [
+    "rash",
+    "swelling",
+    "nausea"
+  ],
+  "trigger": {
+    "eventChance": 0.0004
+  }
+}

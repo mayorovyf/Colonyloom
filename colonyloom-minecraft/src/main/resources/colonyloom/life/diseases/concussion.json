@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "category": "injury",
+  "severity": "moderate",
+  "systems": [
+    "nervous"
+  ],
+  "symptoms": [
+    "headache",
+    "nausea",
+    "confusion"
+  ],
+  "trigger": {
+    "injury": "fall",
+    "eventChance": 0.06
+  }
+}

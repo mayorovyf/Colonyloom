@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "bell",
+  "gains": {
+    "recreation": 6
+  },
+  "joy": "spiritual",
+  "tags": [
+    "prayer",
+    "calm"
+  ],
+  "memory": "colonyloom:prayed",
+  "ages": [
+    6,
+    999
+  ],
+  "durationTicks": [
+    400,
+    900
+  ],
+  "speech": 3
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "friend",
+  "weight": 2,
+  "gains": {
+    "recreation": 4.5,
+    "social": 3
+  },
+  "joy": "social",
+  "tags": [
+    "social"
+  ],
+  "speech": 4,
+  "memory": "colonyloom:chatted_evening",
+  "durationTicks": [
+    500,
+    1200
+  ]
+}

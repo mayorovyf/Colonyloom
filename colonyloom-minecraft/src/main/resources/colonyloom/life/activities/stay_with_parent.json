@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "purpose": "child",
+  "place": "parent",
+  "gains": {
+    "social": 2,
+    "recreation": 3
+  },
+  "schedule": [
+    "work",
+    "leisure"
+  ],
+  "ages": [
+    0,
+    2
+  ],
+  "durationTicks": [
+    600,
+    1500
+  ]
+}

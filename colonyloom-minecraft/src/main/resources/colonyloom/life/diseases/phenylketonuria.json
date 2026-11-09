@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "category": "genetic",
+  "severity": "moderate",
+  "systems": [
+    "nervous"
+  ],
+  "symptoms": [
+    "confusion",
+    "rash"
+  ]
+}

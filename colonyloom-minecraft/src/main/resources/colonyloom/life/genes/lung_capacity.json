@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "small",
+      "frequency": 0.2,
+      "effects": {
+        "capacities": {
+          "breathing": -0.05
+        }
+      }
+    },
+    {
+      "id": "typical",
+      "frequency": 0.6
+    },
+    {
+      "id": "large",
+      "frequency": 0.2,
+      "effects": {
+        "capacities": {
+          "breathing": 0.05
+        }
+      }
+    }
+  ]
+}

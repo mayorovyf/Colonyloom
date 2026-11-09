@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "category": "reproductive",
+  "severity": "mild",
+  "systems": [
+    "reproductive"
+  ],
+  "chronic": false,
+  "symptoms": [
+    "pain"
+  ],
+  "trigger": {
+    "chancePerDay": 0.001,
+    "minAge": 30,
+    "sex": "male"
+  }
+}

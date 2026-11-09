@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "xLinked": true,
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.92,
+      "dominance": 2
+    },
+    {
+      "id": "color_blindness",
+      "frequency": 0.08
+    }
+  ],
+  "condition": {
+    "allele": "color_blindness",
+    "zygosity": "homozygous",
+    "disease": "colonyloom:color_blindness",
+    "onsetAge": 0
+  }
+}

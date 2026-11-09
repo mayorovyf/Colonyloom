@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "category": "reproductive",
+  "severity": "moderate",
+  "systems": [
+    "reproductive"
+  ],
+  "symptoms": [
+    "sadness"
+  ],
+  "effects": {
+    "capacities": {
+      "fertility": -0.6
+    }
+  },
+  "trigger": {
+    "chancePerDay": 0.0006,
+    "minAge": 18,
+    "sex": "male"
+  }
+}

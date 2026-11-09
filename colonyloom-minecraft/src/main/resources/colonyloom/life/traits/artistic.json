@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "group": "creativity",
+  "effects": {
+    "activities": {
+      "music": 2.5,
+      "art": 2.5
+    }
+  }
+}

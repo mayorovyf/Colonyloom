@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "moderate",
+  "systems": [
+    "respiratory"
+  ],
+  "routes": [
+    "contact",
+    "injury"
+  ],
+  "contagiousness": 0.03,
+  "symptoms": [
+    "cough",
+    "breathless"
+  ],
+  "trigger": {
+    "injury": "drown",
+    "eventChance": 0.25
+  },
+  "rarity": 0.8,
+  "varieties": {
+    "count": 8
+  }
+}

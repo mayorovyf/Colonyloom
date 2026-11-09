@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "kind": "chat",
+  "weight": 0.6,
+  "speech": 5,
+  "requires": {
+    "initiatorMinAge": 30,
+    "recipientMinAge": 20,
+    "minOpinion": 30
+  },
+  "onSuccess": {
+    "initiator": "colonyloom:reminisced",
+    "recipient": "colonyloom:reminisced"
+  }
+}

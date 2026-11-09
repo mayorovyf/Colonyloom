@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "id": "typical",
+      "frequency": 0.9,
+      "dominance": 2
+    },
+    {
+      "id": "red",
+      "frequency": 0.1,
+      "effects": {
+        "stats": {
+          "pain_factor": 1.1
+        },
+        "susceptibility": {
+          "skin": 1.3
+        }
+      }
+    }
+  ]
+}

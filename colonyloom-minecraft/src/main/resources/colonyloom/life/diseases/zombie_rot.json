@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "severe",
+  "systems": [
+    "skin",
+    "blood"
+  ],
+  "routes": [
+    "contact",
+    "injury"
+  ],
+  "contagiousness": 0.04,
+  "lethal": true,
+  "symptoms": [
+    "rash",
+    "pale",
+    "pain"
+  ],
+  "trigger": {
+    "injury": "attack",
+    "eventChance": 0.02
+  },
+  "rarity": 0.5,
+  "varieties": {
+    "count": 12
+  }
+}

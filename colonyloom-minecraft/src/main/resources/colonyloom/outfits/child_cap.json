@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "model": "models/child_cap.geo.json",
+  "texture": "textures/child_cap.png",
+  "skin": "skins/child.png",
+  "hide": [
+    "hat"
+  ],
+  "weight": 10,
+  "wearers": {
+    "kinds": [
+      "child"
+    ]
+  }
+}

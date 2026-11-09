@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "category": "allergy",
+  "severity": "moderate",
+  "systems": [
+    "immune",
+    "skin"
+  ],
+  "routes": [
+    "injury"
+  ],
+  "symptoms": [
+    "swelling",
+    "rash",
+    "breathless"
+  ],
+  "trigger": {
+    "injury": "attack",
+    "eventChance": 0.005
+  }
+}

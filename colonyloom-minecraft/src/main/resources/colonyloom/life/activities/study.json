@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "books",
+  "gains": {
+    "recreation": 1.5
+  },
+  "tags": [
+    "books"
+  ],
+  "schedule": [
+    "work"
+  ],
+  "ages": [
+    6,
+    15
+  ],
+  "durationTicks": [
+    800,
+    2000
+  ],
+  "weight": 2
+}

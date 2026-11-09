@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "severe",
+  "systems": [
+    "respiratory"
+  ],
+  "routes": [
+    "contact",
+    "airborne",
+    "animal"
+  ],
+  "contagiousness": 0.1,
+  "symptoms": [
+    "fever",
+    "cough",
+    "breathless"
+  ],
+  "trigger": {
+    "environment": [
+      "near_poultry"
+    ],
+    "chancePerDay": 0.002
+  },
+  "rarity": 0.4,
+  "varieties": {
+    "count": 20
+  }
+}

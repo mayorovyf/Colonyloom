@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "category": "nutritional",
+  "severity": "moderate",
+  "systems": [
+    "digestive",
+    "immune"
+  ],
+  "symptoms": [
+    "pale",
+    "drowsy"
+  ],
+  "effects": {
+    "stats": {
+      "immunity_gain": 0.85
+    }
+  },
+  "trigger": {
+    "chancePerDay": 0.0008
+  }
+}

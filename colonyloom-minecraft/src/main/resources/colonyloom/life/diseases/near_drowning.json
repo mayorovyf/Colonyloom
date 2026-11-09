@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "injury",
+  "severity": "moderate",
+  "systems": [
+    "respiratory"
+  ],
+  "symptoms": [
+    "cough",
+    "breathless"
+  ],
+  "trigger": {
+    "injury": "drown",
+    "eventChance": 0.5
+  }
+}

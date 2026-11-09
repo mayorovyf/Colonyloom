@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "kind": "chat",
+  "weight": 5,
+  "speech": 8,
+  "onSuccess": {
+    "initiator": "colonyloom:chitchat",
+    "recipient": "colonyloom:chitchat"
+  },
+  "emote": "note"
+}

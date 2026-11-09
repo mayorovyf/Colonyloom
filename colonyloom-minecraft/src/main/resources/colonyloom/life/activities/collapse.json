@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "purpose": "collapse",
+  "place": "here",
+  "pose": "lie",
+  "schedule": [
+    "sleep",
+    "work",
+    "leisure"
+  ],
+  "durationTicks": [
+    400,
+    800
+  ]
+}

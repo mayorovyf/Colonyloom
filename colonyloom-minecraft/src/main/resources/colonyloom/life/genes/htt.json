@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.985
+    },
+    {
+      "id": "huntington",
+      "frequency": 0.015,
+      "dominance": 2
+    }
+  ],
+  "condition": {
+    "allele": "huntington",
+    "zygosity": "any",
+    "disease": "colonyloom:huntington",
+    "onsetAge": 35
+  }
+}

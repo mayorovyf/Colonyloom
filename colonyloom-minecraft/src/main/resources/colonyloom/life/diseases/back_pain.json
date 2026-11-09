@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "chronic",
+  "severity": "mild",
+  "systems": [
+    "musculoskeletal"
+  ],
+  "symptoms": [
+    "pain",
+    "limp"
+  ],
+  "trigger": {
+    "chancePerDay": 0.002,
+    "minAge": 25
+  }
+}

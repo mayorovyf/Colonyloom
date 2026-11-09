@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "mild",
+  "systems": [
+    "digestive",
+    "respiratory"
+  ],
+  "contagiousness": 0.12,
+  "symptoms": [
+    "nausea",
+    "cough",
+    "drowsy"
+  ],
+  "trigger": {
+    "environment": [
+      "swamp"
+    ],
+    "chancePerDay": 0.002
+  },
+  "rarity": 1.5,
+  "varieties": {
+    "count": 25
+  }
+}

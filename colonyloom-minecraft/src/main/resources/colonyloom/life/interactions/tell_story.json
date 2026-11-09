@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "kind": "story",
+  "weight": 1,
+  "speech": 5,
+  "skill": "teaching",
+  "xp": 5,
+  "requires": {
+    "initiatorMinAge": 16,
+    "recipientMinAge": 2,
+    "recipientMaxAge": 10
+  },
+  "onSuccess": {
+    "initiator": "colonyloom:taught",
+    "recipient": "colonyloom:heard_story"
+  }
+}

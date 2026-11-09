@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "parasite",
+  "severity": "severe",
+  "systems": [
+    "blood"
+  ],
+  "routes": [
+    "vector"
+  ],
+  "lethal": true,
+  "immunityDays": 3,
+  "symptoms": [
+    "fever",
+    "chills",
+    "sweat",
+    "pale"
+  ],
+  "trigger": {
+    "chancePerDay": 0.004
+  },
+  "rarity": 0.5
+}

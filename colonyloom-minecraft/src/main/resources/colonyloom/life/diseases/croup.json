@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "mild",
+  "systems": [
+    "respiratory"
+  ],
+  "contagiousness": 0.12,
+  "symptoms": [
+    "cough",
+    "wheeze"
+  ],
+  "trigger": {
+    "maxAge": 8
+  },
+  "rarity": 0.8,
+  "varieties": {
+    "count": 6
+  }
+}

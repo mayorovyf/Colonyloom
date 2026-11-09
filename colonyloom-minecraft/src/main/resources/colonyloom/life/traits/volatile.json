@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "group": "nerves",
+  "weight": 0.4,
+  "breakThreshold": 15
+}

@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "deadly",
+  "systems": [
+    "respiratory",
+    "blood"
+  ],
+  "routes": [
+    "contact",
+    "airborne",
+    "animal"
+  ],
+  "contagiousness": 0.12,
+  "symptoms": [
+    "fever",
+    "cough",
+    "swelling",
+    "pale"
+  ],
+  "trigger": {
+    "environment": [
+      "near_wild_animals"
+    ],
+    "chancePerDay": 0.0003
+  },
+  "rarity": 0.25,
+  "varieties": {
+    "count": 30
+  }
+}

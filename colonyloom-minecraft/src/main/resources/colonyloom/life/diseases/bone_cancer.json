@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "category": "cancer",
+  "severity": "severe",
+  "systems": [
+    "musculoskeletal"
+  ],
+  "symptoms": [
+    "pain",
+    "swelling",
+    "limp"
+  ],
+  "trigger": {
+    "minAge": 10,
+    "chancePerDay": 0.0001
+  }
+}

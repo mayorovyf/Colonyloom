@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "group": "sociability",
+  "effects": {
+    "stats": {
+      "social_impact": 0.85
+    },
+    "interactions": {
+      "colonyloom:flirt": 0.4,
+      "colonyloom:romance": 0.6,
+      "colonyloom:joke": 0.5
+    }
+  }
+}

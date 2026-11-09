@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "group": "humor",
+  "effects": {
+    "stats": {
+      "social_impact": 1.2
+    },
+    "interactions": {
+      "colonyloom:joke": 3.0
+    }
+  }
+}

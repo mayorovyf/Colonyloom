@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "purpose": "mental",
+  "mental": "major",
+  "place": "crowd",
+  "tags": [
+    "insult"
+  ],
+  "schedule": [
+    "sleep",
+    "work",
+    "leisure"
+  ],
+  "emote": "angry",
+  "speech": 4,
+  "durationTicks": [
+    800,
+    2000
+  ]
+}

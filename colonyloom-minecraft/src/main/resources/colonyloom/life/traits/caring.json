@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "group": "empathy",
+  "effects": {
+    "interactions": {
+      "colonyloom:comfort": 2.0,
+      "colonyloom:care_for_baby": 2.0,
+      "colonyloom:play_with_child": 1.5
+    },
+    "activities": {
+      "care": 2.0,
+      "isolate": 3.0
+    },
+    "stats": {
+      "tend_quality": 1.1
+    }
+  }
+}

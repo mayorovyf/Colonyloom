@@ -1,0 +1,5 @@
+settler_tunic.json
+settler_tunic_dark.json
+farmer_straw.json
+apron_scarf.json
+child_cap.json

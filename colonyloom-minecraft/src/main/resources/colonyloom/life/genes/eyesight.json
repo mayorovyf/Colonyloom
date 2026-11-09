@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "myopic",
+      "frequency": 0.25,
+      "effects": {
+        "capacities": {
+          "sight": -0.1
+        }
+      }
+    },
+    {
+      "id": "typical",
+      "frequency": 0.6
+    },
+    {
+      "id": "keen",
+      "frequency": 0.15,
+      "effects": {
+        "capacities": {
+          "sight": 0.1
+        }
+      }
+    }
+  ]
+}

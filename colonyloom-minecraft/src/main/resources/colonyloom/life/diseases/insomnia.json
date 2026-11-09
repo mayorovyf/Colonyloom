@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "category": "mental",
+  "severity": "mild",
+  "symptoms": [
+    "drowsy",
+    "anxiety"
+  ],
+  "effects": {
+    "stats": {
+      "rest_fall": 1.3,
+      "rest_gain": 0.8
+    }
+  },
+  "trigger": {
+    "chancePerDay": 0.004,
+    "minAge": 10,
+    "moodBelow": 40
+  }
+}

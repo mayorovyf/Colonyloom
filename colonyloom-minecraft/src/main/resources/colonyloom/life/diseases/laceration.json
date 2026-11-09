@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "category": "injury",
+  "severity": "mild",
+  "systems": [
+    "skin",
+    "blood"
+  ],
+  "symptoms": [
+    "pain",
+    "bleeding"
+  ],
+  "trigger": {
+    "injury": "attack",
+    "eventChance": 0.35
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "group": "appetite",
+  "effects": {
+    "stats": {
+      "mood": 1
+    }
+  }
+}

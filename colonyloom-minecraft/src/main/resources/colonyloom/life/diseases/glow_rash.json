@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "fungus",
+  "severity": "trivial",
+  "systems": [
+    "skin"
+  ],
+  "contagiousness": 0.05,
+  "symptoms": [
+    "rash",
+    "itch"
+  ],
+  "trigger": {
+    "environment": [
+      "underground",
+      "in_water"
+    ],
+    "chancePerDay": 0.004
+  },
+  "rarity": 1,
+  "varieties": {
+    "count": 10
+  }
+}

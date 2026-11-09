@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "category": "environmental",
+  "severity": "mild",
+  "systems": [
+    "cardiovascular"
+  ],
+  "symptoms": [
+    "sweat",
+    "drowsy"
+  ],
+  "trigger": {
+    "environment": [
+      "nether"
+    ],
+    "chancePerDay": 0.05
+  }
+}

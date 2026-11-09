@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "group": "temper",
+  "effects": {
+    "stats": {
+      "mood": -2
+    },
+    "interactions": {
+      "colonyloom:complain": 3,
+      "colonyloom:insult": 1.5
+    }
+  }
+}

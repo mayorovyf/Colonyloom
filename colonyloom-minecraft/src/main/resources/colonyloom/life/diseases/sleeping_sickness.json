@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "parasite",
+  "severity": "severe",
+  "systems": [
+    "nervous"
+  ],
+  "routes": [
+    "vector"
+  ],
+  "lethal": true,
+  "symptoms": [
+    "drowsy",
+    "confusion",
+    "fever"
+  ],
+  "trigger": {
+    "environment": [
+      "jungle"
+    ],
+    "chancePerDay": 0.002
+  },
+  "rarity": 0.3
+}

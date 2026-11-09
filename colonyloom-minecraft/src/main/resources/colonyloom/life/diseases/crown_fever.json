@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "moderate",
+  "systems": [
+    "respiratory"
+  ],
+  "contagiousness": 0.2,
+  "incubationDays": [
+    0.3,
+    1.0
+  ],
+  "symptoms": [
+    "fever",
+    "cough",
+    "breathless",
+    "headache"
+  ],
+  "rarity": 1.5,
+  "varieties": {
+    "count": 40
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "severe",
+  "systems": [
+    "digestive",
+    "blood"
+  ],
+  "routes": [
+    "contact",
+    "food",
+    "water"
+  ],
+  "contagiousness": 0.04,
+  "symptoms": [
+    "fever",
+    "pain",
+    "rash",
+    "confusion"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0004
+  },
+  "rarity": 0.4,
+  "varieties": {
+    "count": 12
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "group": "industry",
+  "effects": {
+    "stats": {
+      "work_speed": 0.8
+    },
+    "activities": {
+      "rest": 1.8,
+      "calm": 1.4
+    }
+  }
+}

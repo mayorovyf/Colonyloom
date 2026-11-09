@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "moderate",
+  "systems": [
+    "respiratory"
+  ],
+  "routes": [
+    "animal"
+  ],
+  "symptoms": [
+    "fever",
+    "cough",
+    "headache"
+  ],
+  "trigger": {
+    "environment": [
+      "near_poultry"
+    ],
+    "chancePerDay": 0.001
+  }
+}

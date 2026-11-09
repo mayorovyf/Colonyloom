@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "environmental",
+  "severity": "mild",
+  "systems": [
+    "respiratory"
+  ],
+  "symptoms": [
+    "headache",
+    "nausea",
+    "breathless"
+  ],
+  "trigger": {
+    "environment": [
+      "high_altitude"
+    ],
+    "chancePerDay": 0.05
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "severe",
+  "systems": [
+    "respiratory",
+    "blood"
+  ],
+  "routes": [
+    "contact",
+    "airborne"
+  ],
+  "contagiousness": 0.04,
+  "incubationDays": [
+    3,
+    10
+  ],
+  "severityPerDay": 0.12,
+  "immunityPerDay": 0.1,
+  "symptoms": [
+    "cough",
+    "bleeding",
+    "pale",
+    "sweat"
+  ],
+  "rarity": 0.6,
+  "varieties": {
+    "count": 25
+  }
+}

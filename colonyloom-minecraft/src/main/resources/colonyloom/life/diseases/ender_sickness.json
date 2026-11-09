@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "moderate",
+  "systems": [
+    "nervous"
+  ],
+  "contagiousness": 0.06,
+  "symptoms": [
+    "confusion",
+    "headache",
+    "anxiety"
+  ],
+  "trigger": {
+    "environment": [
+      "end"
+    ],
+    "chancePerDay": 0.02
+  },
+  "rarity": 0.6,
+  "varieties": {
+    "count": 25
+  }
+}

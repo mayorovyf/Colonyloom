@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "kind": "chat",
+  "weight": 0.6,
+  "speech": 6,
+  "requires": {
+    "initiatorMinAge": 14
+  },
+  "onSuccess": {
+    "recipient": "colonyloom:got_advice"
+  }
+}

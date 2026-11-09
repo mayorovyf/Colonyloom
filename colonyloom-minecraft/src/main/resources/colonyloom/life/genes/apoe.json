@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "e2",
+      "frequency": 0.08,
+      "effects": {
+        "susceptibility": {
+          "nervous": 0.85
+        }
+      }
+    },
+    {
+      "id": "e3",
+      "frequency": 0.77
+    },
+    {
+      "id": "e4",
+      "frequency": 0.15,
+      "effects": {
+        "susceptibility": {
+          "nervous": 1.4,
+          "cardiovascular": 1.15
+        }
+      }
+    }
+  ]
+}

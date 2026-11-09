@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "xLinked": true,
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.99,
+      "dominance": 2
+    },
+    {
+      "id": "muscular_dystrophy",
+      "frequency": 0.01
+    }
+  ],
+  "condition": {
+    "allele": "muscular_dystrophy",
+    "zygosity": "homozygous",
+    "disease": "colonyloom:muscular_dystrophy",
+    "onsetAge": 3
+  }
+}

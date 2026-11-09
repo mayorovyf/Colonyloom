@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "category": "mental",
+  "severity": "trivial",
+  "symptoms": [
+    "sadness"
+  ],
+  "trigger": {
+    "chancePerDay": 0.004,
+    "moodBelow": 45
+  }
+}

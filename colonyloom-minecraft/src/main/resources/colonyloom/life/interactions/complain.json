@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "kind": "chat",
+  "weight": 0.6,
+  "speech": 6,
+  "requires": {
+    "initiatorMoodMax": 40
+  },
+  "onSuccess": {
+    "recipient": "colonyloom:complained_to"
+  },
+  "emote": "sad"
+}

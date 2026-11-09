@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "category": "mental",
+  "severity": "mild",
+  "symptoms": [
+    "anxiety",
+    "breathless",
+    "sweat"
+  ],
+  "trigger": {
+    "chancePerDay": 0.002,
+    "minAge": 12,
+    "moodBelow": 35
+  }
+}

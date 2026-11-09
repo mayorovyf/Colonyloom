@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "purpose": "idle",
+  "place": "here",
+  "schedule": [
+    "work",
+    "leisure"
+  ],
+  "gains": {
+    "rest": 0.5
+  },
+  "durationTicks": [
+    100,
+    300
+  ],
+  "tags": [
+    "rest"
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "endurance",
+      "frequency": 0.3,
+      "effects": {
+        "stats": {
+          "rest_fall": 0.95
+        }
+      }
+    },
+    {
+      "id": "mixed",
+      "frequency": 0.4
+    },
+    {
+      "id": "power",
+      "frequency": 0.3,
+      "effects": {
+        "capacityFactors": {
+          "manipulation": 1.05,
+          "moving": 1.03
+        }
+      },
+      "traits": {
+        "colonyloom:athletic": 1
+      }
+    }
+  ]
+}

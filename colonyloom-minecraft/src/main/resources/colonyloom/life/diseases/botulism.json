@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "toxin",
+  "severity": "deadly",
+  "systems": [
+    "nervous",
+    "respiratory"
+  ],
+  "routes": [
+    "food"
+  ],
+  "immunityDays": 0,
+  "symptoms": [
+    "breathless",
+    "confusion",
+    "drowsy"
+  ],
+  "trigger": {
+    "eventChance": 4e-05
+  }
+}

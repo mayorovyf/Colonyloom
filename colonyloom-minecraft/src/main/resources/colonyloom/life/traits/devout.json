@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "group": "faith",
+  "effects": {
+    "activities": {
+      "prayer": 3.0
+    },
+    "stats": {
+      "break_threshold": -2
+    }
+  }
+}

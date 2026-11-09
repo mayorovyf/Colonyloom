@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "trivial",
+  "systems": [
+    "skin"
+  ],
+  "routes": [
+    "contact"
+  ],
+  "contagiousness": 0.03,
+  "symptoms": [
+    "itch"
+  ],
+  "rarity": 1,
+  "varieties": {
+    "count": 6
+  }
+}

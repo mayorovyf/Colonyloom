@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "fire",
+  "gains": {
+    "recreation": 6,
+    "rest": 0.5
+  },
+  "joy": "meditative",
+  "tags": [
+    "calm",
+    "social"
+  ],
+  "memory": "colonyloom:warmed_by_fire",
+  "durationTicks": [
+    500,
+    1200
+  ]
+}

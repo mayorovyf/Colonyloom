@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "group": "outlook",
+  "effects": {
+    "stats": {
+      "mood": -6
+    }
+  }
+}

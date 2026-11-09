@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "category": "genetic",
+  "severity": "trivial",
+  "systems": [
+    "musculoskeletal"
+  ],
+  "effects": {
+    "capacities": {
+      "moving": -0.05
+    }
+  }
+}

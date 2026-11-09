@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "chronic",
+  "severity": "severe",
+  "systems": [
+    "digestive"
+  ],
+  "lethal": true,
+  "chronic": false,
+  "symptoms": [
+    "pain",
+    "fever",
+    "vomit"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0005,
+    "minAge": 5
+  }
+}

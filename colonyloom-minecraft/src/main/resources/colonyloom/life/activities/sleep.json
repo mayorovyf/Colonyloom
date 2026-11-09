@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "purpose": "sleep",
+  "place": "bed",
+  "pose": "lie",
+  "schedule": [
+    "sleep"
+  ],
+  "gains": {
+    "rest": 4
+  },
+  "durationTicks": [
+    2000,
+    9000
+  ],
+  "emote": "sleep",
+  "memory": "colonyloom:slept_well",
+  "tags": [
+    "rest"
+  ]
+}

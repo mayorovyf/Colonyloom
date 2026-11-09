@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "kind": "chat",
+  "weight": 2,
+  "intimacy": 2,
+  "speech": 3,
+  "emote": "heart",
+  "requires": {
+    "relation": "fiance",
+    "minOpinion": 40
+  },
+  "onSuccess": {
+    "change": "marry"
+  }
+}

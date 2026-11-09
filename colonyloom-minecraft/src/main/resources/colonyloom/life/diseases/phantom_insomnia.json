@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "mild",
+  "systems": [
+    "nervous",
+    "mental"
+  ],
+  "contagiousness": 0.08,
+  "symptoms": [
+    "drowsy",
+    "anxiety"
+  ],
+  "effects": {
+    "stats": {
+      "rest_fall": 1.3
+    }
+  },
+  "trigger": {
+    "environment": [
+      "night"
+    ],
+    "chancePerDay": 0.001
+  },
+  "rarity": 1,
+  "varieties": {
+    "count": 12
+  }
+}

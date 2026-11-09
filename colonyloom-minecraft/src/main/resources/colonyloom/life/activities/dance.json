@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "crowd",
+  "animation": "spin",
+  "gains": {
+    "recreation": 9,
+    "social": 1.5
+  },
+  "joy": "music",
+  "tags": [
+    "music",
+    "crowd",
+    "sport"
+  ],
+  "emote": "note",
+  "time": [
+    11000,
+    19000
+  ],
+  "memory": "colonyloom:danced",
+  "durationTicks": [
+    400,
+    900
+  ],
+  "ages": [
+    5,
+    999
+  ],
+  "speech": 3
+}

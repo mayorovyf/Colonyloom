@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 1,
+  "category": "reproductive",
+  "severity": "mild",
+  "systems": [
+    "reproductive"
+  ],
+  "symptoms": [
+    "sadness"
+  ],
+  "effects": {
+    "capacities": {
+      "fertility": -0.35
+    },
+    "stats": {
+      "mood": -3,
+      "romance": 0.7
+    }
+  },
+  "trigger": {
+    "chancePerDay": 0.002,
+    "minAge": 30,
+    "sex": "male"
+  },
+  "subtypes": [
+    {
+      "id": "psychogenic",
+      "chronic": false,
+      "selfLimiting": true,
+      "trigger": {
+        "chancePerDay": 0.003,
+        "minAge": 18,
+        "sex": "male",
+        "moodBelow": 30
+      }
+    },
+    {
+      "id": "vascular",
+      "severity": "moderate",
+      "trigger": {
+        "chancePerDay": 0.0015,
+        "minAge": 45,
+        "sex": "male"
+      }
+    },
+    {
+      "id": "hormonal",
+      "systems": [
+        "reproductive",
+        "endocrine"
+      ],
+      "trigger": {
+        "chancePerDay": 0.001,
+        "minAge": 35,
+        "sex": "male"
+      }
+    }
+  ]
+}

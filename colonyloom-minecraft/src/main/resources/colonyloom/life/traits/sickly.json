@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "group": "constitution",
+  "effects": {
+    "stats": {
+      "susceptibility": 1.4,
+      "immunity_gain": 0.85
+    }
+  }
+}

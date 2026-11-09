@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "water",
+  "gains": {
+    "hygiene": 40
+  },
+  "tags": [
+    "hygiene"
+  ],
+  "emote": "splash",
+  "memory": "colonyloom:bathed",
+  "durationTicks": [
+    300,
+    600
+  ],
+  "schedule": [
+    "work",
+    "leisure"
+  ]
+}

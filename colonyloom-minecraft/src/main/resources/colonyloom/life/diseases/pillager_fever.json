@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "moderate",
+  "systems": [
+    "blood"
+  ],
+  "routes": [
+    "contact",
+    "injury"
+  ],
+  "contagiousness": 0.07,
+  "symptoms": [
+    "fever",
+    "chills",
+    "pain"
+  ],
+  "trigger": {
+    "injury": "attack",
+    "eventChance": 0.01
+  },
+  "rarity": 0.8,
+  "varieties": {
+    "count": 12
+  }
+}

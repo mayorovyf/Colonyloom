@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "purpose": "care",
+  "place": "baby",
+  "gains": {
+    "social": 1,
+    "recreation": 1.5
+  },
+  "tags": [
+    "care"
+  ],
+  "memory": "colonyloom:cared_for_baby",
+  "ages": [
+    14,
+    999
+  ],
+  "durationTicks": [
+    500,
+    1200
+  ],
+  "speech": 4
+}

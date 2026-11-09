@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "purpose": "bed_rest",
+  "place": "bed",
+  "pose": "lie",
+  "schedule": [
+    "sleep",
+    "work",
+    "leisure"
+  ],
+  "gains": {
+    "rest": 2
+  },
+  "durationTicks": [
+    1200,
+    2400
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "kind": "insult",
+  "weight": 0.3,
+  "speech": 6,
+  "requires": {
+    "initiatorMinAge": 8,
+    "maxOpinion": 20
+  },
+  "onSuccess": {
+    "recipient": "colonyloom:slighted"
+  }
+}

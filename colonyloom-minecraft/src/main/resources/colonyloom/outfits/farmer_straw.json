@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "model": "models/farmer_straw.bbmodel",
+  "skin": "skins/farmer.png",
+  "hide": [
+    "hat"
+  ],
+  "weight": 8,
+  "wearers": {
+    "kinds": [
+      "citizen"
+    ],
+    "stages": [
+      "adult"
+    ]
+  }
+}

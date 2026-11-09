@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "category": "chronic",
+  "severity": "mild",
+  "systems": [
+    "cardiovascular"
+  ],
+  "symptoms": [
+    "headache"
+  ],
+  "trigger": {
+    "chancePerDay": 0.002,
+    "minAge": 35
+  }
+}

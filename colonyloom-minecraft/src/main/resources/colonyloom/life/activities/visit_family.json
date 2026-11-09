@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "parent",
+  "gains": {
+    "recreation": 3,
+    "social": 2.5
+  },
+  "joy": "social",
+  "tags": [
+    "social",
+    "care"
+  ],
+  "memory": "colonyloom:visited_family",
+  "ages": [
+    6,
+    999
+  ],
+  "durationTicks": [
+    500,
+    1200
+  ]
+}

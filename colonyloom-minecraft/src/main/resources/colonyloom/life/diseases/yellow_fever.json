@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "severe",
+  "systems": [
+    "blood",
+    "digestive"
+  ],
+  "routes": [
+    "vector"
+  ],
+  "lethal": true,
+  "immunityDays": -1,
+  "symptoms": [
+    "fever",
+    "vomit",
+    "bleeding"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0015
+  },
+  "rarity": 0.3
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "category": "allergy",
+  "severity": "mild",
+  "systems": [
+    "respiratory",
+    "immune"
+  ],
+  "symptoms": [
+    "sneeze",
+    "wheeze"
+  ],
+  "trigger": {
+    "environment": [
+      "wet",
+      "dark"
+    ],
+    "chancePerDay": 0.008
+  }
+}

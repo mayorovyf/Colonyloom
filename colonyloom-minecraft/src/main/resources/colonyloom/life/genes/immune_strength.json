@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "weak",
+      "frequency": 0.2,
+      "effects": {
+        "stats": {
+          "immunity_gain": 0.85,
+          "susceptibility": 1.15
+        }
+      }
+    },
+    {
+      "id": "average",
+      "frequency": 0.6
+    },
+    {
+      "id": "strong",
+      "frequency": 0.2,
+      "effects": {
+        "stats": {
+          "immunity_gain": 1.15,
+          "susceptibility": 0.85
+        }
+      },
+      "traits": {
+        "colonyloom:robust": 1.5
+      }
+    }
+  ]
+}

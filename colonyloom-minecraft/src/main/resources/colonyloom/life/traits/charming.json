@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "group": "charm",
+  "effects": {
+    "stats": {
+      "social_impact": 1.3,
+      "romance": 1.2
+    }
+  }
+}

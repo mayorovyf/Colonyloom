@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "moderate",
+  "systems": [
+    "respiratory",
+    "skin"
+  ],
+  "contagiousness": 0.3,
+  "immunityDays": -1,
+  "symptoms": [
+    "rash",
+    "fever",
+    "cough",
+    "sneeze"
+  ],
+  "rarity": 0.8,
+  "varieties": {
+    "count": 10
+  }
+}

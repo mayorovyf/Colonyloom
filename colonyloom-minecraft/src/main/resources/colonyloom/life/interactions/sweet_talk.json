@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "kind": "chat",
+  "weight": 2,
+  "intimacy": 2.5,
+  "social": 0.04,
+  "recipientSocial": 0.04,
+  "speech": 6,
+  "emote": "heart",
+  "requires": {
+    "relation": "partner"
+  },
+  "onSuccess": {
+    "initiator": "colonyloom:romantic_moment",
+    "recipient": "colonyloom:romantic_moment"
+  }
+}

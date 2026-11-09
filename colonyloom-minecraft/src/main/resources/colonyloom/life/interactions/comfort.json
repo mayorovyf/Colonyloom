@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "kind": "comfort",
+  "weight": 1,
+  "intimacy": 1.5,
+  "social": 0.03,
+  "recipientSocial": 0.05,
+  "speech": 6,
+  "requires": {
+    "initiatorMinAge": 8,
+    "minOpinion": 0
+  },
+  "onSuccess": {
+    "recipient": "colonyloom:comforted"
+  }
+}

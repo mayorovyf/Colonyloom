@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "mild",
+  "systems": [
+    "endocrine",
+    "reproductive"
+  ],
+  "contagiousness": 0.15,
+  "immunityDays": -1,
+  "symptoms": [
+    "swelling",
+    "fever",
+    "pain"
+  ],
+  "rarity": 0.7,
+  "varieties": {
+    "count": 8
+  }
+}

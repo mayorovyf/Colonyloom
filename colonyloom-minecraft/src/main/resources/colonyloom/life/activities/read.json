@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "books",
+  "gains": {
+    "recreation": 7.5
+  },
+  "joy": "reading",
+  "tags": [
+    "books",
+    "calm"
+  ],
+  "memory": "colonyloom:read_book",
+  "ages": [
+    7,
+    999
+  ],
+  "durationTicks": [
+    600,
+    1500
+  ]
+}

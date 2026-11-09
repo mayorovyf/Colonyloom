@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "music",
+  "gains": {
+    "recreation": 9
+  },
+  "joy": "music",
+  "tags": [
+    "music",
+    "art"
+  ],
+  "emote": "note",
+  "speech": 3,
+  "memory": "colonyloom:played_music",
+  "durationTicks": [
+    500,
+    1200
+  ],
+  "ages": [
+    6,
+    999
+  ]
+}

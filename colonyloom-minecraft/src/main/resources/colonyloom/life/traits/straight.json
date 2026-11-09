@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "group": "orientation",
+  "orientation": "straight",
+  "weight": 8.5,
+  "minAge": 13,
+  "childhood": false
+}

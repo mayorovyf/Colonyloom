@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "severe",
+  "systems": [
+    "respiratory"
+  ],
+  "routes": [
+    "contact",
+    "airborne"
+  ],
+  "contagiousness": 0.1,
+  "symptoms": [
+    "fever",
+    "breathless",
+    "swelling"
+  ],
+  "rarity": 0.4,
+  "varieties": {
+    "count": 8
+  }
+}

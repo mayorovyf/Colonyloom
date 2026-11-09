@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "deadly",
+  "systems": [
+    "skin",
+    "respiratory"
+  ],
+  "routes": [
+    "animal"
+  ],
+  "symptoms": [
+    "swelling",
+    "fever",
+    "breathless"
+  ],
+  "trigger": {
+    "environment": [
+      "near_livestock"
+    ],
+    "chancePerDay": 0.0003
+  }
+}

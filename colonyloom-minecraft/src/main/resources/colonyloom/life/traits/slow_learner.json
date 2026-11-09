@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "group": "learning",
+  "effects": {
+    "stats": {
+      "learning": 0.7
+    }
+  }
+}

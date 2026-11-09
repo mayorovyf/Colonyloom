@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "category": "genetic",
+  "severity": "mild",
+  "systems": [
+    "blood"
+  ],
+  "symptoms": [
+    "pale"
+  ]
+}

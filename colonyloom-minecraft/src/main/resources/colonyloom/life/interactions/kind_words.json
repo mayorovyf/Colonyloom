@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "kind": "chat",
+  "weight": 0.6,
+  "speech": 5,
+  "onSuccess": {
+    "recipient": "colonyloom:kind_words"
+  }
+}

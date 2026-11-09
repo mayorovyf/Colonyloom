@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "kind": "apology",
+  "weight": 0.5,
+  "speech": 5,
+  "requires": {
+    "initiatorMinAge": 6,
+    "maxOpinion": 0
+  },
+  "onSuccess": {
+    "recipient": "colonyloom:apologized_to"
+  }
+}

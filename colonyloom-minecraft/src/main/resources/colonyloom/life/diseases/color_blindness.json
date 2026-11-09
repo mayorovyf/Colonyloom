@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "category": "genetic",
+  "severity": "trivial",
+  "systems": [
+    "sensory"
+  ],
+  "selfLimiting": false,
+  "effects": {
+    "capacities": {
+      "sight": -0.05
+    }
+  }
+}

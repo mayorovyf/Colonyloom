@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "mild",
+  "systems": [
+    "respiratory"
+  ],
+  "contagiousness": 0.06,
+  "symptoms": [
+    "cough",
+    "wheeze",
+    "breathless"
+  ],
+  "rarity": 2,
+  "varieties": {
+    "count": 20
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "cancer",
+  "severity": "severe",
+  "systems": [
+    "reproductive"
+  ],
+  "symptoms": [
+    "pain"
+  ],
+  "trigger": {
+    "minAge": 50,
+    "sex": "male",
+    "chancePerDay": 0.0004
+  }
+}

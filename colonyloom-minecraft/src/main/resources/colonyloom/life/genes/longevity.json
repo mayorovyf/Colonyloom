@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "short",
+      "frequency": 0.2,
+      "effects": {
+        "stats": {
+          "aging": 1.15
+        }
+      }
+    },
+    {
+      "id": "typical",
+      "frequency": 0.6
+    },
+    {
+      "id": "long",
+      "frequency": 0.2,
+      "effects": {
+        "stats": {
+          "aging": 0.85
+        }
+      }
+    }
+  ]
+}

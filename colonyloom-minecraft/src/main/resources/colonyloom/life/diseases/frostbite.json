@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "category": "injury",
+  "severity": "mild",
+  "systems": [
+    "skin",
+    "musculoskeletal"
+  ],
+  "symptoms": [
+    "pain",
+    "pale"
+  ],
+  "trigger": {
+    "injury": "freeze",
+    "eventChance": 0.4
+  }
+}

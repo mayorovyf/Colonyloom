@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "genetic",
+  "severity": "moderate",
+  "systems": [
+    "sensory"
+  ],
+  "symptoms": [
+    "deafness"
+  ],
+  "effects": {
+    "capacities": {
+      "hearing": -0.6
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "purpose": "mental",
+  "mental": "extreme",
+  "place": "here",
+  "pose": "lie",
+  "schedule": [
+    "sleep",
+    "work",
+    "leisure"
+  ],
+  "durationTicks": [
+    2400,
+    6000
+  ]
+}

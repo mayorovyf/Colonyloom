@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "here",
+  "gains": {
+    "recreation": 6,
+    "rest": 0.5
+  },
+  "joy": "meditative",
+  "tags": [
+    "calm"
+  ],
+  "memory": "colonyloom:meditated",
+  "ages": [
+    14,
+    999
+  ],
+  "durationTicks": [
+    500,
+    1000
+  ]
+}

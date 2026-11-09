@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "mild",
+  "systems": [
+    "sensory"
+  ],
+  "routes": [
+    "spontaneous"
+  ],
+  "symptoms": [
+    "pain",
+    "fever"
+  ],
+  "trigger": {
+    "chancePerDay": 0.004,
+    "maxAge": 12
+  }
+}

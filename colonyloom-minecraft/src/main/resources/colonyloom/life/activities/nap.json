@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "bed",
+  "pose": "lie",
+  "gains": {
+    "rest": 3
+  },
+  "durationTicks": [
+    600,
+    1500
+  ],
+  "tags": [
+    "rest",
+    "calm"
+  ],
+  "weight": 0.4,
+  "emote": "sleep"
+}

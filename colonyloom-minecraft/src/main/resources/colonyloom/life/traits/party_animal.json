@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "group": "nature",
+  "effects": {
+    "activities": {
+      "crowd": 2.5,
+      "music": 1.5,
+      "calm": 0.5
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.97
+    },
+    {
+      "id": "risk",
+      "frequency": 0.03,
+      "dominance": 2,
+      "effects": {
+        "susceptibility": {
+          "reproductive": 2.0
+        }
+      }
+    }
+  ]
+}

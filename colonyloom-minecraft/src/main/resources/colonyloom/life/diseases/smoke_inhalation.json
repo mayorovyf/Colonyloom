@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "environmental",
+  "severity": "moderate",
+  "systems": [
+    "respiratory"
+  ],
+  "routes": [
+    "injury"
+  ],
+  "symptoms": [
+    "cough",
+    "breathless"
+  ],
+  "trigger": {
+    "injury": "fire",
+    "eventChance": 0.2
+  }
+}

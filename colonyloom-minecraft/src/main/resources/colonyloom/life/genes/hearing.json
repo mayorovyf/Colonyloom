@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "dull",
+      "frequency": 0.15,
+      "effects": {
+        "capacities": {
+          "hearing": -0.08
+        }
+      }
+    },
+    {
+      "id": "typical",
+      "frequency": 0.7
+    },
+    {
+      "id": "keen",
+      "frequency": 0.15,
+      "effects": {
+        "capacities": {
+          "hearing": 0.08
+        }
+      }
+    }
+  ]
+}

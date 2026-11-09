@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "category": "reproductive",
+  "severity": "mild",
+  "systems": [
+    "reproductive"
+  ],
+  "symptoms": [
+    "pain"
+  ],
+  "effects": {
+    "capacities": {
+      "fertility": -0.25
+    }
+  },
+  "trigger": {
+    "chancePerDay": 0.0008,
+    "minAge": 16,
+    "sex": "female"
+  }
+}

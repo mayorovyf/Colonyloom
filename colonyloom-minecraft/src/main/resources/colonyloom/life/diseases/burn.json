@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "injury",
+  "severity": "mild",
+  "systems": [
+    "skin"
+  ],
+  "symptoms": [
+    "pain",
+    "rash"
+  ],
+  "trigger": {
+    "injury": "fire",
+    "eventChance": 0.5
+  }
+}

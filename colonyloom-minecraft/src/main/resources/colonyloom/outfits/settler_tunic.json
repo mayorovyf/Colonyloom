@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "model": "models/settler_tunic.geo.json",
+  "texture": "textures/settler_tunic.png",
+  "skin": "skins/settler.png",
+  "weight": 10,
+  "wearers": {
+    "kinds": [
+      "citizen"
+    ],
+    "stages": [
+      "adult",
+      "elder"
+    ]
+  }
+}

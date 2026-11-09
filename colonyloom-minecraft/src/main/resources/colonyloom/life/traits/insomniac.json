@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "group": "sleep",
+  "effects": {
+    "stats": {
+      "rest_gain": 0.75
+    }
+  }
+}

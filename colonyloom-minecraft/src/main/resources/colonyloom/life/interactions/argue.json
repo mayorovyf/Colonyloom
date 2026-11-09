@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "kind": "insult",
+  "weight": 0.4,
+  "speech": 6,
+  "emote": "angry",
+  "requires": {
+    "initiatorMinAge": 6,
+    "maxOpinion": 15
+  },
+  "onSuccess": {
+    "initiator": "colonyloom:argued",
+    "recipient": "colonyloom:argued"
+  },
+  "journal": false
+}

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "xLinked": true,
+  "alleles": [
+    {
+      "id": "calm",
+      "frequency": 0.6,
+      "dominance": 2
+    },
+    {
+      "id": "hot",
+      "frequency": 0.4,
+      "effects": {
+        "interactions": {
+          "colonyloom:insult": 1.3,
+          "colonyloom:argue": 1.3
+        }
+      },
+      "traits": {
+        "colonyloom:abrasive": 1
+      }
+    }
+  ]
+}

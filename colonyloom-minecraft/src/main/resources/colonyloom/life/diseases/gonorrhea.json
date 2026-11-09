@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "mild",
+  "systems": [
+    "reproductive"
+  ],
+  "routes": [
+    "blood"
+  ],
+  "contagiousness": 0.2,
+  "symptoms": [
+    "pain"
+  ],
+  "effects": {
+    "capacities": {
+      "fertility": -0.2
+    }
+  },
+  "rarity": 0.3,
+  "varieties": {
+    "count": 6
+  }
+}

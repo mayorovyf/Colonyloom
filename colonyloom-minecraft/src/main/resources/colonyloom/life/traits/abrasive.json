@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "group": "temper",
+  "conflicts": [
+    "colonyloom:kind"
+  ],
+  "effects": {
+    "interactions": {
+      "colonyloom:insult": 4,
+      "colonyloom:slight": 3,
+      "colonyloom:argue": 2
+    }
+  }
+}

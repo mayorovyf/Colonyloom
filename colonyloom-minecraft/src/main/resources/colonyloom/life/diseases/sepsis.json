@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "deadly",
+  "systems": [
+    "blood"
+  ],
+  "routes": [
+    "injury"
+  ],
+  "symptoms": [
+    "fever",
+    "pale",
+    "confusion",
+    "breathless"
+  ],
+  "trigger": {
+    "injury": "any",
+    "eventChance": 0.003
+  }
+}

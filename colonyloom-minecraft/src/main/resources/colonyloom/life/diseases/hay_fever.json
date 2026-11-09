@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "allergy",
+  "severity": "mild",
+  "systems": [
+    "respiratory",
+    "immune"
+  ],
+  "symptoms": [
+    "sneeze",
+    "itch"
+  ],
+  "trigger": {
+    "environment": [
+      "near_flowers"
+    ],
+    "chancePerDay": 0.01
+  }
+}

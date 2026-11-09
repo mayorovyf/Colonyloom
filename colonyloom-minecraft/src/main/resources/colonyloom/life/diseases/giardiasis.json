@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "parasite",
+  "severity": "mild",
+  "systems": [
+    "digestive"
+  ],
+  "routes": [
+    "water"
+  ],
+  "symptoms": [
+    "nausea",
+    "pain"
+  ],
+  "trigger": {
+    "chancePerDay": 0.002
+  }
+}

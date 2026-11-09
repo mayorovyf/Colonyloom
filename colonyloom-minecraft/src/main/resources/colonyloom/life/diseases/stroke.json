@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "category": "age",
+  "severity": "deadly",
+  "systems": [
+    "nervous",
+    "cardiovascular"
+  ],
+  "symptoms": [
+    "confusion",
+    "limp",
+    "headache"
+  ],
+  "trigger": {
+    "minAge": 55,
+    "chancePerDay": 0.0008
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "kind": "chat",
+  "weight": 1.2,
+  "intimacy": 1.3,
+  "social": 0.05,
+  "recipientSocial": 0.04,
+  "speech": 5,
+  "requires": {
+    "initiatorMinAge": 10,
+    "recipientMinAge": 10,
+    "minOpinion": 15
+  },
+  "onSuccess": {
+    "initiator": "colonyloom:deep_talk",
+    "recipient": "colonyloom:deep_talk"
+  }
+}

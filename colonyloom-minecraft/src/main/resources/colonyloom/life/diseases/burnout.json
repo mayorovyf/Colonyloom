@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "mental",
+  "severity": "mild",
+  "symptoms": [
+    "sadness",
+    "drowsy"
+  ],
+  "effects": {
+    "stats": {
+      "work_speed": 0.8
+    }
+  },
+  "trigger": {
+    "chancePerDay": 0.003,
+    "minAge": 18,
+    "moodBelow": 40
+  }
+}

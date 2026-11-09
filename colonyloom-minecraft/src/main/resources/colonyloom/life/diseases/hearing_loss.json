@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "age",
+  "severity": "mild",
+  "systems": [
+    "sensory"
+  ],
+  "symptoms": [
+    "deafness"
+  ],
+  "effects": {
+    "capacities": {
+      "hearing": -0.2
+    }
+  },
+  "trigger": {
+    "minAge": 55
+  }
+}

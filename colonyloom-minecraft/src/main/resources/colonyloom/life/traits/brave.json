@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "group": "courage",
+  "breakThreshold": -3,
+  "effects": {
+    "activities": {
+      "explore": 1.5
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "category": "genetic",
+  "severity": "mild",
+  "systems": [
+    "digestive",
+    "immune"
+  ],
+  "symptoms": [
+    "pain",
+    "nausea"
+  ]
+}

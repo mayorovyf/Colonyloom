@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "group": "romance",
+  "effects": {
+    "stats": {
+      "romance": 1.5
+    },
+    "interactions": {
+      "colonyloom:romance": 1.8,
+      "colonyloom:flirt": 2.0
+    },
+    "activities": {
+      "romance": 2.0
+    }
+  }
+}

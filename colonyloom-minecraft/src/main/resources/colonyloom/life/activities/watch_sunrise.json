@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "view",
+  "animation": "look_around",
+  "gains": {
+    "recreation": 9
+  },
+  "joy": "meditative",
+  "tags": [
+    "nature",
+    "calm"
+  ],
+  "time": [
+    22500,
+    1000
+  ],
+  "weather": "clear",
+  "schedule": [
+    "work",
+    "leisure"
+  ],
+  "memory": "colonyloom:watched_sunrise",
+  "durationTicks": [
+    500,
+    1000
+  ]
+}

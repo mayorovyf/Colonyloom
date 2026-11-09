@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "deadly",
+  "systems": [
+    "skin",
+    "immune"
+  ],
+  "contagiousness": 0.18,
+  "immunityDays": -1,
+  "symptoms": [
+    "rash",
+    "fever",
+    "pain",
+    "vomit"
+  ],
+  "rarity": 0.15,
+  "varieties": {
+    "count": 12
+  }
+}

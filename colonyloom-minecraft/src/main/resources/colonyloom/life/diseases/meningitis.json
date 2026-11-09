@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "deadly",
+  "systems": [
+    "nervous"
+  ],
+  "routes": [
+    "contact",
+    "airborne"
+  ],
+  "contagiousness": 0.04,
+  "symptoms": [
+    "headache",
+    "fever",
+    "confusion",
+    "vomit"
+  ],
+  "rarity": 0.3,
+  "varieties": {
+    "count": 10
+  }
+}

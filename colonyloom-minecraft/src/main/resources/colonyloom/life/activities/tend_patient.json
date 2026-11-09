@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "purpose": "care",
+  "place": "here",
+  "weight": 0,
+  "tags": [
+    "care",
+    "medical"
+  ],
+  "allowSick": true,
+  "schedule": [
+    "sleep",
+    "work",
+    "leisure"
+  ],
+  "durationTicks": [
+    200,
+    400
+  ],
+  "animation": "nod",
+  "speech": 3
+}

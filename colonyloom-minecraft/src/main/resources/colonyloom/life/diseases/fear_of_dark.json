@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "mental",
+  "severity": "trivial",
+  "symptoms": [
+    "anxiety"
+  ],
+  "trigger": {
+    "environment": [
+      "dark"
+    ],
+    "chancePerDay": 0.004,
+    "moodBelow": -1,
+    "maxAge": 15
+  }
+}

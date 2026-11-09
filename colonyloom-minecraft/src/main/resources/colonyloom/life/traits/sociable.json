@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "group": "sociability",
+  "effects": {
+    "stats": {
+      "social_fall": 1.3,
+      "social_impact": 1.1
+    },
+    "activities": {
+      "social": 2.0
+    },
+    "interactions": {
+      "colonyloom:chat": 1.5,
+      "colonyloom:deep_talk": 1.3
+    }
+  }
+}

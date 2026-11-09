@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "chronic",
+  "severity": "moderate",
+  "systems": [
+    "respiratory"
+  ],
+  "symptoms": [
+    "cough",
+    "breathless"
+  ],
+  "trigger": {
+    "environment": [
+      "underground"
+    ],
+    "chancePerDay": 0.002,
+    "minAge": 18
+  }
+}

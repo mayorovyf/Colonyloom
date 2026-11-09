@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "group": "curiosity",
+  "effects": {
+    "stats": {
+      "learning": 1.3
+    },
+    "activities": {
+      "books": 2.5,
+      "explore": 2.0
+    }
+  }
+}

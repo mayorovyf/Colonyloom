@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "purpose": "medical",
+  "place": "doctor",
+  "tags": [
+    "medical"
+  ],
+  "allowSick": true,
+  "durationTicks": [
+    300,
+    600
+  ]
+}

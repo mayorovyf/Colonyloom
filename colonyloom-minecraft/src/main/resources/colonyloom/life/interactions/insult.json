@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "kind": "insult",
+  "weight": 0.12,
+  "speech": 8,
+  "emote": "angry",
+  "requires": {
+    "initiatorMinAge": 6
+  },
+  "onSuccess": {
+    "recipient": "colonyloom:insulted"
+  }
+}

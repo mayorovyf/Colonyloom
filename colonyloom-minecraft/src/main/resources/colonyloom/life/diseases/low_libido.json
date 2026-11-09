@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "category": "reproductive",
+  "severity": "trivial",
+  "systems": [
+    "reproductive"
+  ],
+  "chronic": false,
+  "selfLimiting": true,
+  "effects": {
+    "stats": {
+      "romance": 0.5
+    }
+  },
+  "trigger": {
+    "chancePerDay": 0.002,
+    "minAge": 18,
+    "moodBelow": 35
+  }
+}

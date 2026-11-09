@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "severe",
+  "systems": [
+    "nervous"
+  ],
+  "routes": [
+    "animal"
+  ],
+  "symptoms": [
+    "fever",
+    "headache",
+    "confusion"
+  ],
+  "trigger": {
+    "environment": [
+      "forest"
+    ],
+    "chancePerDay": 0.0008
+  },
+  "rarity": 0.3
+}

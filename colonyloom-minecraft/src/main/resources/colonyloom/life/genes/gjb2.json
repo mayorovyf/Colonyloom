@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.96,
+      "dominance": 2
+    },
+    {
+      "id": "congenital_deafness",
+      "frequency": 0.04
+    }
+  ],
+  "condition": {
+    "allele": "congenital_deafness",
+    "zygosity": "homozygous",
+    "disease": "colonyloom:congenital_deafness",
+    "onsetAge": 0
+  }
+}

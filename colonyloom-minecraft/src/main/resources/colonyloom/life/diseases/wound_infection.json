@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "severe",
+  "systems": [
+    "skin",
+    "blood"
+  ],
+  "routes": [
+    "injury"
+  ],
+  "symptoms": [
+    "fever",
+    "swelling",
+    "pain"
+  ],
+  "trigger": {
+    "injury": "attack",
+    "eventChance": 0.08
+  }
+}

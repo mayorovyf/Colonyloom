@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "chronic",
+  "severity": "moderate",
+  "systems": [
+    "nervous"
+  ],
+  "symptoms": [
+    "tremor",
+    "confusion"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0004,
+    "minAge": 3
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.98,
+      "dominance": 2
+    },
+    {
+      "id": "phenylketonuria",
+      "frequency": 0.02
+    }
+  ],
+  "condition": {
+    "allele": "phenylketonuria",
+    "zygosity": "homozygous",
+    "disease": "colonyloom:phenylketonuria",
+    "onsetAge": 0
+  }
+}

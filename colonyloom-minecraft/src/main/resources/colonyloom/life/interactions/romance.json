@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "kind": "romance",
+  "weight": 0.6,
+  "intimacy": 2,
+  "successChance": 0.6,
+  "speech": 5,
+  "emote": "heart",
+  "journal": false,
+  "requires": {
+    "initiatorMinAge": 18,
+    "recipientMinAge": 18,
+    "relation": "single",
+    "minOpinion": 20,
+    "romance": true,
+    "notRelatives": true
+  },
+  "onSuccess": {
+    "initiator": "colonyloom:new_lover",
+    "recipient": "colonyloom:new_lover",
+    "change": "become_lovers"
+  },
+  "onFailure": {
+    "initiator": "colonyloom:rejected"
+  }
+}

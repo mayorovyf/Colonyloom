@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "moderate",
+  "systems": [
+    "respiratory",
+    "immune"
+  ],
+  "contagiousness": 0.22,
+  "symptoms": [
+    "fever",
+    "chills",
+    "cough",
+    "headache",
+    "pain"
+  ],
+  "rarity": 3,
+  "varieties": {
+    "count": 40
+  }
+}

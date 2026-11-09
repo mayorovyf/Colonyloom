@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "purpose": "child",
+  "place": "wander",
+  "radius": 4,
+  "gains": {
+    "recreation": 6
+  },
+  "joy": "play",
+  "schedule": [
+    "work",
+    "leisure"
+  ],
+  "ages": [
+    0,
+    2
+  ],
+  "durationTicks": [
+    300,
+    800
+  ]
+}

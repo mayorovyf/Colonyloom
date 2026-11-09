@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "model": "models/apron_scarf.bbmodel",
+  "skin": "skins/homemaker.png",
+  "hide": [
+    "hat"
+  ],
+  "weight": 9,
+  "wearers": {
+    "kinds": [
+      "citizen"
+    ],
+    "sexes": [
+      "female"
+    ],
+    "stages": [
+      "adult",
+      "elder"
+    ]
+  }
+}

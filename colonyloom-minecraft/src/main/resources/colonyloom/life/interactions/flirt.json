@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "kind": "chat",
+  "weight": 0.7,
+  "intimacy": 1.5,
+  "speech": 6,
+  "emote": "heart",
+  "requires": {
+    "initiatorMinAge": 16,
+    "recipientMinAge": 16,
+    "relation": "single",
+    "minOpinion": 5,
+    "romance": true,
+    "notRelatives": true
+  },
+  "onSuccess": {
+    "initiator": "colonyloom:flirted",
+    "recipient": "colonyloom:flirted"
+  }
+}

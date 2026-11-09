@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "parasite",
+  "severity": "trivial",
+  "systems": [
+    "skin"
+  ],
+  "routes": [
+    "contact"
+  ],
+  "contagiousness": 0.12,
+  "immunityDays": 0,
+  "symptoms": [
+    "itch"
+  ],
+  "rarity": 1.5,
+  "varieties": {
+    "count": 8
+  }
+}

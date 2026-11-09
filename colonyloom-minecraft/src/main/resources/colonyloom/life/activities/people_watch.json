@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "crowd",
+  "gains": {
+    "recreation": 4.5,
+    "social": 1
+  },
+  "joy": "social",
+  "tags": [
+    "crowd",
+    "social",
+    "calm"
+  ],
+  "durationTicks": [
+    400,
+    900
+  ]
+}

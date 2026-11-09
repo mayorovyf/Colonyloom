@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.98
+    },
+    {
+      "id": "hypercholesterolemia",
+      "frequency": 0.02,
+      "dominance": 2
+    }
+  ],
+  "condition": {
+    "allele": "hypercholesterolemia",
+    "zygosity": "any",
+    "disease": "colonyloom:hypercholesterolemia",
+    "onsetAge": 30
+  }
+}

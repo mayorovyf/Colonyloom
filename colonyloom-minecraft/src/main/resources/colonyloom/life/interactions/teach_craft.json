@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "kind": "teach",
+  "weight": 0.5,
+  "skill": "crafting",
+  "xp": 20,
+  "speech": 4,
+  "requires": {
+    "initiatorMinAge": 16,
+    "recipientMinAge": 6
+  },
+  "onSuccess": {
+    "initiator": "colonyloom:taught",
+    "recipient": "colonyloom:was_taught"
+  }
+}

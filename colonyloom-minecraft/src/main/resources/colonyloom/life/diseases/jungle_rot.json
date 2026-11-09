@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "fungus",
+  "severity": "mild",
+  "systems": [
+    "skin"
+  ],
+  "contagiousness": 0.04,
+  "symptoms": [
+    "rash",
+    "itch",
+    "pain"
+  ],
+  "trigger": {
+    "environment": [
+      "jungle"
+    ],
+    "chancePerDay": 0.004
+  },
+  "rarity": 1,
+  "varieties": {
+    "count": 12
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "group": "cleanliness",
+  "effects": {
+    "stats": {
+      "hygiene_fall": 0.8
+    },
+    "activities": {
+      "hygiene": 2.0
+    }
+  }
+}

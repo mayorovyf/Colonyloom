@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "group": "fitness",
+  "effects": {
+    "capacityFactors": {
+      "moving": 1.1
+    },
+    "activities": {
+      "sport": 2.0
+    }
+  }
+}

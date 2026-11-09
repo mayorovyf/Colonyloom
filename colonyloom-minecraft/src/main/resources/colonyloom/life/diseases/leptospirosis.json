@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "moderate",
+  "systems": [
+    "renal"
+  ],
+  "routes": [
+    "water",
+    "animal"
+  ],
+  "symptoms": [
+    "fever",
+    "pain",
+    "headache"
+  ],
+  "trigger": {
+    "chancePerDay": 0.001
+  }
+}

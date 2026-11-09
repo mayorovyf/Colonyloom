@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "sky",
+  "animation": "look_up",
+  "gains": {
+    "recreation": 6
+  },
+  "joy": "meditative",
+  "tags": [
+    "nature",
+    "calm"
+  ],
+  "time": [
+    0,
+    11000
+  ],
+  "weather": "clear",
+  "durationTicks": [
+    400,
+    900
+  ]
+}

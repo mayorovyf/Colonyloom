@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "category": "cancer",
+  "severity": "deadly",
+  "systems": [
+    "digestive"
+  ],
+  "symptoms": [
+    "pain",
+    "nausea",
+    "pale"
+  ],
+  "trigger": {
+    "minAge": 40,
+    "chancePerDay": 0.0002
+  }
+}

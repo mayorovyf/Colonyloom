@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "fragile",
+      "frequency": 0.2,
+      "effects": {
+        "stats": {
+          "break_threshold": 3
+        }
+      },
+      "traits": {
+        "colonyloom:nervous": 1.5
+      }
+    },
+    {
+      "id": "typical",
+      "frequency": 0.6
+    },
+    {
+      "id": "steady",
+      "frequency": 0.2,
+      "effects": {
+        "stats": {
+          "break_threshold": -3
+        }
+      },
+      "traits": {
+        "colonyloom:iron_willed": 1.5
+      }
+    }
+  ]
+}

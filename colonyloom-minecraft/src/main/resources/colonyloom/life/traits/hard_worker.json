@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "group": "industry",
+  "effects": {
+    "stats": {
+      "work_speed": 1.2,
+      "recreation_fall": 0.9
+    }
+  }
+}

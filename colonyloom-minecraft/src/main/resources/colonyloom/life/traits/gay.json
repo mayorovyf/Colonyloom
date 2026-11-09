@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "group": "orientation",
+  "orientation": "gay",
+  "weight": 0.6,
+  "minAge": 13,
+  "childhood": false
+}

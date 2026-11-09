@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "nutritional",
+  "severity": "mild",
+  "systems": [
+    "musculoskeletal"
+  ],
+  "symptoms": [
+    "pain",
+    "limp"
+  ],
+  "trigger": {
+    "environment": [
+      "underground"
+    ],
+    "chancePerDay": 0.002,
+    "maxAge": 12
+  }
+}

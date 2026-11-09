@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "environmental",
+  "severity": "trivial",
+  "systems": [
+    "digestive"
+  ],
+  "symptoms": [
+    "nausea",
+    "vomit"
+  ],
+  "trigger": {
+    "environment": [
+      "ocean",
+      "in_water"
+    ],
+    "chancePerDay": 0.05
+  }
+}

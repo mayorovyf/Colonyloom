@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "kind": "play",
+  "weight": 1.5,
+  "speech": 5,
+  "emote": "happy",
+  "skill": "teaching",
+  "xp": 5,
+  "requires": {
+    "initiatorMinAge": 13,
+    "recipientMinAge": 3,
+    "recipientMaxAge": 12
+  },
+  "onSuccess": {
+    "initiator": "colonyloom:played_together",
+    "recipient": "colonyloom:played_together"
+  }
+}

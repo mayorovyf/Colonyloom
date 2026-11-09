@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "id": "persistent",
+      "frequency": 0.65,
+      "dominance": 2
+    },
+    {
+      "id": "lactose_intolerance",
+      "frequency": 0.35
+    }
+  ],
+  "condition": {
+    "allele": "lactose_intolerance",
+    "zygosity": "homozygous",
+    "disease": "colonyloom:lactose_intolerance",
+    "onsetAge": 6
+  }
+}

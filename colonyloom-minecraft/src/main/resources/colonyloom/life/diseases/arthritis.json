@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "category": "age",
+  "severity": "mild",
+  "systems": [
+    "musculoskeletal"
+  ],
+  "symptoms": [
+    "pain",
+    "limp"
+  ],
+  "trigger": {
+    "minAge": 50
+  }
+}

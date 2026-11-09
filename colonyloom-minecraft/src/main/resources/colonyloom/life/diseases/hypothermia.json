@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "category": "environmental",
+  "severity": "moderate",
+  "systems": [
+    "cardiovascular"
+  ],
+  "routes": [
+    "environment",
+    "injury"
+  ],
+  "symptoms": [
+    "chills",
+    "tremor",
+    "pale"
+  ],
+  "trigger": {
+    "environment": [
+      "cold",
+      "outdoors"
+    ],
+    "chancePerDay": 0.015,
+    "injury": "freeze",
+    "eventChance": 0.3
+  }
+}

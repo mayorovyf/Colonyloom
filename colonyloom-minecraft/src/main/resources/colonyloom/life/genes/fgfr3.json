@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.995
+    },
+    {
+      "id": "achondroplasia",
+      "frequency": 0.005,
+      "dominance": 2
+    }
+  ],
+  "condition": {
+    "allele": "achondroplasia",
+    "zygosity": "any",
+    "disease": "colonyloom:achondroplasia",
+    "onsetAge": 0
+  }
+}

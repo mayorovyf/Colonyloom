@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.95,
+      "dominance": 2
+    },
+    {
+      "id": "night_blindness",
+      "frequency": 0.05
+    }
+  ],
+  "condition": {
+    "allele": "night_blindness",
+    "zygosity": "homozygous",
+    "disease": "colonyloom:night_blindness",
+    "onsetAge": 0
+  }
+}

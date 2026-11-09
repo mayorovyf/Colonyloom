@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "category": "cancer",
+  "severity": "deadly",
+  "systems": [
+    "blood",
+    "immune"
+  ],
+  "symptoms": [
+    "pale",
+    "bleeding",
+    "fever"
+  ],
+  "trigger": {
+    "minAge": 0,
+    "chancePerDay": 0.0001
+  }
+}

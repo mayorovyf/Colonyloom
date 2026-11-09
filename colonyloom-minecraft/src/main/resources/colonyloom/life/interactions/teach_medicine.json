@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "kind": "teach",
+  "weight": 0.3,
+  "skill": "medicine",
+  "xp": 20,
+  "speech": 4,
+  "requires": {
+    "initiatorMinAge": 18,
+    "recipientMinAge": 10
+  },
+  "onSuccess": {
+    "initiator": "colonyloom:taught",
+    "recipient": "colonyloom:was_taught"
+  }
+}

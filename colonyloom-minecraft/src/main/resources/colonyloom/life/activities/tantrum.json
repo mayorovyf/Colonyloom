@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "purpose": "mental",
+  "mental": "major",
+  "place": "here",
+  "animation": "jump",
+  "schedule": [
+    "sleep",
+    "work",
+    "leisure"
+  ],
+  "emote": "angry",
+  "ages": [
+    3,
+    15
+  ],
+  "speech": 4,
+  "durationTicks": [
+    400,
+    1000
+  ]
+}

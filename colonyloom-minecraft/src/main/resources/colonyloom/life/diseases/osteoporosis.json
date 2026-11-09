@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "age",
+  "severity": "mild",
+  "systems": [
+    "musculoskeletal"
+  ],
+  "symptoms": [
+    "pain"
+  ],
+  "trigger": {
+    "minAge": 55,
+    "sex": "female",
+    "chancePerDay": 0.002
+  }
+}

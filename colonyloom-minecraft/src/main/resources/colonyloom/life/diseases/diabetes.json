@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "chronic",
+  "severity": "moderate",
+  "systems": [
+    "endocrine"
+  ],
+  "symptoms": [
+    "pale",
+    "drowsy"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0015,
+    "minAge": 30
+  }
+}

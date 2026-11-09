@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "purpose": "child",
+  "place": "wander",
+  "radius": 10,
+  "animation": "jump",
+  "gains": {
+    "recreation": 9
+  },
+  "joy": "play",
+  "tags": [
+    "play"
+  ],
+  "emote": "happy",
+  "schedule": [
+    "work",
+    "leisure"
+  ],
+  "ages": [
+    3,
+    12
+  ],
+  "memory": "colonyloom:played",
+  "speech": 6,
+  "durationTicks": [
+    400,
+    1000
+  ]
+}

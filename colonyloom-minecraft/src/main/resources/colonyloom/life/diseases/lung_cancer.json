@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "category": "cancer",
+  "severity": "deadly",
+  "systems": [
+    "respiratory"
+  ],
+  "symptoms": [
+    "cough",
+    "breathless",
+    "bleeding"
+  ],
+  "trigger": {
+    "minAge": 40,
+    "chancePerDay": 0.0003
+  }
+}

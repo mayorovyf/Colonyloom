@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "chronic",
+  "severity": "mild",
+  "systems": [
+    "nervous"
+  ],
+  "symptoms": [
+    "headache",
+    "nausea"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0015,
+    "minAge": 12
+  }
+}

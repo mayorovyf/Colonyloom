@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "category": "injury",
+  "severity": "trivial",
+  "symptoms": [
+    "pain"
+  ],
+  "trigger": {
+    "injury": "fall",
+    "eventChance": 0.6
+  }
+}

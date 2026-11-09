@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.9,
+      "dominance": 2
+    },
+    {
+      "id": "delta32",
+      "frequency": 0.1,
+      "resist": {
+        "colonyloom:plague": 0.5,
+        "colonyloom:smallpox": 0.6
+      }
+    }
+  ]
+}

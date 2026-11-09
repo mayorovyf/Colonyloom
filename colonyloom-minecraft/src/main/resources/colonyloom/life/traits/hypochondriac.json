@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "group": "worry",
+  "effects": {
+    "stats": {
+      "mood": -2
+    },
+    "activities": {
+      "medical": 3.0
+    }
+  }
+}

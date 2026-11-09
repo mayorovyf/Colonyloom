@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "moderate",
+  "systems": [
+    "blood"
+  ],
+  "contagiousness": 0.08,
+  "symptoms": [
+    "fever",
+    "sweat",
+    "confusion"
+  ],
+  "trigger": {
+    "environment": [
+      "nether"
+    ],
+    "chancePerDay": 0.01
+  },
+  "rarity": 0.8,
+  "varieties": {
+    "count": 30
+  }
+}

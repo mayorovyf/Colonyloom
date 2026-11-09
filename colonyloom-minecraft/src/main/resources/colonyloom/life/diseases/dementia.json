@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "category": "age",
+  "severity": "moderate",
+  "systems": [
+    "nervous",
+    "mental"
+  ],
+  "symptoms": [
+    "confusion",
+    "anxiety"
+  ],
+  "trigger": {
+    "minAge": 65,
+    "chancePerDay": 0.002
+  }
+}

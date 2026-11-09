@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "group": "loyalty",
+  "effects": {
+    "interactions": {
+      "colonyloom:breakup": 0.2
+    }
+  }
+}

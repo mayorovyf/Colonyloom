@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "kind": "proposal",
+  "weight": 1.5,
+  "intimacy": 2,
+  "successChance": 0.9,
+  "speech": 4,
+  "emote": "heart",
+  "requires": {
+    "relation": "lover",
+    "minOpinion": 45
+  },
+  "onSuccess": {
+    "change": "engage"
+  },
+  "onFailure": {
+    "initiator": "colonyloom:proposal_rejected"
+  }
+}

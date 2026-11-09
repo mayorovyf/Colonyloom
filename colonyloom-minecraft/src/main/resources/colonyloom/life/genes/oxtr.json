@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "reserved",
+      "frequency": 0.25,
+      "effects": {
+        "stats": {
+          "social_fall": 0.9
+        }
+      },
+      "traits": {
+        "colonyloom:loner": 1
+      }
+    },
+    {
+      "id": "typical",
+      "frequency": 0.5
+    },
+    {
+      "id": "warm",
+      "frequency": 0.25,
+      "effects": {
+        "stats": {
+          "social_impact": 1.1
+        }
+      },
+      "traits": {
+        "colonyloom:sociable": 1,
+        "colonyloom:kind": 0.5
+      }
+    }
+  ]
+}

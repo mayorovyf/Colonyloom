@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "group": "temper",
+  "conflicts": [
+    "colonyloom:abrasive"
+  ],
+  "effects": {
+    "interactions": {
+      "colonyloom:insult": 0.05,
+      "colonyloom:slight": 0.1,
+      "colonyloom:comfort": 2.5,
+      "colonyloom:kind_words": 3
+    }
+  }
+}

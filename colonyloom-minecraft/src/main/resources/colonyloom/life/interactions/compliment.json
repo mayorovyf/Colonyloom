@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "kind": "chat",
+  "weight": 0.8,
+  "speech": 6,
+  "emote": "happy",
+  "onSuccess": {
+    "recipient": "colonyloom:complimented"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "fungus",
+  "severity": "mild",
+  "systems": [
+    "respiratory"
+  ],
+  "contagiousness": 0.03,
+  "symptoms": [
+    "cough",
+    "sneeze"
+  ],
+  "trigger": {
+    "environment": [
+      "near_livestock"
+    ],
+    "chancePerDay": 0.002
+  },
+  "rarity": 1,
+  "varieties": {
+    "count": 10
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.8,
+      "dominance": 2
+    },
+    {
+      "id": "atopic",
+      "frequency": 0.2,
+      "effects": {
+        "susceptibility": {
+          "immune": 1.6,
+          "respiratory": 1.2
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "severe",
+  "systems": [
+    "nervous",
+    "musculoskeletal"
+  ],
+  "routes": [
+    "injury"
+  ],
+  "lethal": true,
+  "symptoms": [
+    "tremor",
+    "pain",
+    "breathless"
+  ],
+  "trigger": {
+    "injury": "any",
+    "eventChance": 0.006
+  },
+  "rarity": 0.3
+}

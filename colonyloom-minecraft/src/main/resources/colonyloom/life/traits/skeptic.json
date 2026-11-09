@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "group": "faith",
+  "effects": {
+    "activities": {
+      "prayer": 0.1
+    }
+  }
+}

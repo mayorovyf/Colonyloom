@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "moderate",
+  "systems": [
+    "musculoskeletal",
+    "nervous"
+  ],
+  "routes": [
+    "animal"
+  ],
+  "symptoms": [
+    "rash",
+    "pain",
+    "fever"
+  ],
+  "trigger": {
+    "environment": [
+      "forest"
+    ],
+    "chancePerDay": 0.002
+  },
+  "rarity": 0.5
+}

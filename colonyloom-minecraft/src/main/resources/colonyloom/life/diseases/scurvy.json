@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "category": "nutritional",
+  "severity": "moderate",
+  "systems": [
+    "blood",
+    "skin"
+  ],
+  "symptoms": [
+    "bleeding",
+    "pale",
+    "pain"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0006
+  }
+}

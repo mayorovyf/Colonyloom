@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "low",
+      "frequency": 0.15,
+      "effects": {
+        "stats": {
+          "conception": 0.7
+        }
+      }
+    },
+    {
+      "id": "typical",
+      "frequency": 0.7
+    },
+    {
+      "id": "high",
+      "frequency": 0.15,
+      "effects": {
+        "stats": {
+          "conception": 1.3
+        }
+      }
+    }
+  ]
+}

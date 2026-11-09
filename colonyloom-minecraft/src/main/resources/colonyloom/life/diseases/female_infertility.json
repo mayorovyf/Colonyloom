@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "category": "reproductive",
+  "severity": "moderate",
+  "systems": [
+    "reproductive"
+  ],
+  "symptoms": [
+    "sadness"
+  ],
+  "effects": {
+    "capacities": {
+      "fertility": -0.6
+    }
+  },
+  "trigger": {
+    "chancePerDay": 0.0008,
+    "minAge": 18,
+    "sex": "female"
+  },
+  "subtypes": [
+    {
+      "id": "tubal",
+      "trigger": {
+        "chancePerDay": 0.0005,
+        "minAge": 18,
+        "sex": "female"
+      }
+    },
+    {
+      "id": "hormonal",
+      "systems": [
+        "reproductive",
+        "endocrine"
+      ],
+      "trigger": {
+        "chancePerDay": 0.0005,
+        "minAge": 18,
+        "sex": "female"
+      }
+    }
+  ]
+}

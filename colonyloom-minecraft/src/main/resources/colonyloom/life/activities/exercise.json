@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "here",
+  "animation": "jump",
+  "gains": {
+    "recreation": 4.5,
+    "rest": -1
+  },
+  "joy": "active",
+  "tags": [
+    "sport"
+  ],
+  "memory": "colonyloom:exercised",
+  "ages": [
+    10,
+    999
+  ],
+  "durationTicks": [
+    300,
+    700
+  ],
+  "speech": 3
+}

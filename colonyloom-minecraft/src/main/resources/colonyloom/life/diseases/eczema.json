@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "category": "chronic",
+  "severity": "trivial",
+  "systems": [
+    "skin"
+  ],
+  "symptoms": [
+    "rash",
+    "itch"
+  ],
+  "trigger": {
+    "chancePerDay": 0.001
+  }
+}

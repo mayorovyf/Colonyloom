@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "partner",
+  "weight": 2,
+  "gains": {
+    "recreation": 6,
+    "social": 3
+  },
+  "joy": "social",
+  "tags": [
+    "romance",
+    "social"
+  ],
+  "emote": "heart",
+  "memory": "colonyloom:date_night",
+  "ages": [
+    18,
+    999
+  ],
+  "time": [
+    11000,
+    18000
+  ],
+  "speech": 4,
+  "durationTicks": [
+    800,
+    1600
+  ]
+}

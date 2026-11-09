@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "group": "empathy",
+  "effects": {
+    "interactions": {
+      "colonyloom:comfort": 0.2
+    },
+    "activities": {
+      "care": 0.3
+    }
+  }
+}

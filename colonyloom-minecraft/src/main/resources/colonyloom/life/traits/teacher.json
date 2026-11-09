@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "group": "teaching",
+  "effects": {
+    "interactions": {
+      "colonyloom:teach": 3.0,
+      "colonyloom:advice": 2.0,
+      "colonyloom:tell_story": 2.0
+    }
+  }
+}

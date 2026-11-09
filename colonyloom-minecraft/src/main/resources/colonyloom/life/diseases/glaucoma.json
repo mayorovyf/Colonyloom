@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "age",
+  "severity": "moderate",
+  "systems": [
+    "sensory"
+  ],
+  "symptoms": [
+    "blindness",
+    "headache"
+  ],
+  "trigger": {
+    "minAge": 50,
+    "chancePerDay": 0.001
+  }
+}

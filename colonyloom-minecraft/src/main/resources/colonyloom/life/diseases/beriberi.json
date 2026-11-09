@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "category": "nutritional",
+  "severity": "mild",
+  "systems": [
+    "nervous"
+  ],
+  "symptoms": [
+    "tremor",
+    "limp"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0004
+  }
+}

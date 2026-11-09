@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "kind": "chat",
+  "weight": 1.5,
+  "successChance": 0.75,
+  "speech": 8,
+  "emote": "happy",
+  "onSuccess": {
+    "initiator": "colonyloom:joked_with",
+    "recipient": "colonyloom:joked_with"
+  },
+  "onFailure": {
+    "initiator": "colonyloom:joke_flopped"
+  }
+}

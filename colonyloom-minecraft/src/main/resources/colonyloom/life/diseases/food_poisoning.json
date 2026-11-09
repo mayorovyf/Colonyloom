@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "mild",
+  "systems": [
+    "digestive"
+  ],
+  "routes": [
+    "food"
+  ],
+  "selfLimiting": true,
+  "immunityDays": 0,
+  "symptoms": [
+    "vomit",
+    "nausea",
+    "pain"
+  ],
+  "trigger": {
+    "eventChance": 0.0015
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "category": "genetic",
+  "severity": "trivial",
+  "systems": [
+    "skin",
+    "sensory"
+  ],
+  "effects": {
+    "capacities": {
+      "sight": -0.1
+    },
+    "susceptibility": {
+      "skin": 1.5
+    }
+  }
+}

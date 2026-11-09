@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "category": "environmental",
+  "severity": "moderate",
+  "systems": [
+    "nervous",
+    "cardiovascular"
+  ],
+  "symptoms": [
+    "sweat",
+    "headache",
+    "confusion"
+  ],
+  "trigger": {
+    "environment": [
+      "hot",
+      "outdoors"
+    ],
+    "chancePerDay": 0.02
+  }
+}

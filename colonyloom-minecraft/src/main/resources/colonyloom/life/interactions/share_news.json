@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "kind": "chat",
+  "weight": 1,
+  "speech": 6,
+  "onSuccess": {
+    "initiator": "colonyloom:heard_news",
+    "recipient": "colonyloom:heard_news"
+  }
+}

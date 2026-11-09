@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "allergy",
+  "severity": "trivial",
+  "systems": [
+    "respiratory",
+    "immune"
+  ],
+  "symptoms": [
+    "sneeze",
+    "cough"
+  ],
+  "trigger": {
+    "environment": [
+      "underground"
+    ],
+    "chancePerDay": 0.008
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.97,
+      "dominance": 2
+    },
+    {
+      "id": "cystic_fibrosis",
+      "frequency": 0.03
+    }
+  ],
+  "condition": {
+    "allele": "cystic_fibrosis",
+    "zygosity": "homozygous",
+    "disease": "colonyloom:cystic_fibrosis",
+    "onsetAge": 0
+  }
+}

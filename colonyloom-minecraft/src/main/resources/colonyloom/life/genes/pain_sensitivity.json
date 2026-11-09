@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "low",
+      "frequency": 0.15,
+      "effects": {
+        "stats": {
+          "pain_factor": 0.8
+        }
+      },
+      "traits": {
+        "colonyloom:tough": 1.5
+      }
+    },
+    {
+      "id": "typical",
+      "frequency": 0.7
+    },
+    {
+      "id": "high",
+      "frequency": 0.15,
+      "effects": {
+        "stats": {
+          "pain_factor": 1.2
+        }
+      },
+      "traits": {
+        "colonyloom:wimp": 1.5
+      }
+    }
+  ]
+}

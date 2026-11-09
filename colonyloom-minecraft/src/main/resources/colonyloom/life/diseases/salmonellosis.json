@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "mild",
+  "systems": [
+    "digestive"
+  ],
+  "routes": [
+    "contact",
+    "food"
+  ],
+  "contagiousness": 0.02,
+  "symptoms": [
+    "vomit",
+    "nausea",
+    "fever"
+  ],
+  "trigger": {
+    "eventChance": 0.0005
+  },
+  "rarity": 1,
+  "varieties": {
+    "count": 10
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "category": "injury",
+  "severity": "mild",
+  "symptoms": [
+    "pain",
+    "limp",
+    "swelling"
+  ],
+  "trigger": {
+    "injury": "fall",
+    "eventChance": 0.25
+  }
+}

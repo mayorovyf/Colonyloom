@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.96,
+      "dominance": 2
+    },
+    {
+      "id": "albinism",
+      "frequency": 0.04
+    }
+  ],
+  "condition": {
+    "allele": "albinism",
+    "zygosity": "homozygous",
+    "disease": "colonyloom:albinism",
+    "onsetAge": 0
+  }
+}

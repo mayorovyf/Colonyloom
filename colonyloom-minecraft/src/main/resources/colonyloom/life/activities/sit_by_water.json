@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "water",
+  "gains": {
+    "recreation": 6
+  },
+  "joy": "meditative",
+  "tags": [
+    "nature",
+    "calm"
+  ],
+  "durationTicks": [
+    500,
+    1200
+  ]
+}

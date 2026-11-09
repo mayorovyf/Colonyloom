@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "age",
+  "severity": "moderate",
+  "systems": [
+    "nervous"
+  ],
+  "symptoms": [
+    "tremor",
+    "limp"
+  ],
+  "trigger": {
+    "minAge": 60,
+    "chancePerDay": 0.001
+  }
+}

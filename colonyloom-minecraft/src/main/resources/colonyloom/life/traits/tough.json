@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "group": "pain",
+  "effects": {
+    "stats": {
+      "pain_factor": 0.5
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.9,
+      "dominance": 2
+    },
+    {
+      "id": "celiac",
+      "frequency": 0.1
+    }
+  ],
+  "condition": {
+    "allele": "celiac",
+    "zygosity": "homozygous",
+    "disease": "colonyloom:celiac",
+    "onsetAge": 0
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "normal",
+      "frequency": 0.94,
+      "dominance": 2
+    },
+    {
+      "id": "sickle_cell",
+      "frequency": 0.06,
+      "resist": {
+        "colonyloom:malaria": 0.3
+      }
+    }
+  ],
+  "condition": {
+    "allele": "sickle_cell",
+    "zygosity": "homozygous",
+    "disease": "colonyloom:sickle_cell",
+    "onsetAge": 0
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "purpose": "mental",
+  "mental": "minor",
+  "place": "wander",
+  "radius": 20,
+  "schedule": [
+    "sleep",
+    "work",
+    "leisure"
+  ],
+  "emote": "sad",
+  "speech": 4,
+  "durationTicks": [
+    1200,
+    3000
+  ]
+}

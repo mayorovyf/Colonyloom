@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "group": "play",
+  "effects": {
+    "activities": {
+      "play": 2.0
+    },
+    "interactions": {
+      "colonyloom:play_with_child": 2.0,
+      "colonyloom:joke": 1.5
+    }
+  }
+}

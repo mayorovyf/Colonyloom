@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "chronic",
+  "severity": "moderate",
+  "systems": [
+    "renal"
+  ],
+  "chronic": false,
+  "symptoms": [
+    "pain"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0008,
+    "minAge": 25
+  }
+}

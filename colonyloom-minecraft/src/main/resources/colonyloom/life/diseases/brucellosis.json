@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "moderate",
+  "systems": [
+    "musculoskeletal"
+  ],
+  "routes": [
+    "animal",
+    "food"
+  ],
+  "symptoms": [
+    "fever",
+    "sweat",
+    "pain"
+  ],
+  "trigger": {
+    "environment": [
+      "near_livestock"
+    ],
+    "chancePerDay": 0.001
+  }
+}

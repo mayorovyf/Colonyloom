@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "category": "environmental",
+  "severity": "mild",
+  "systems": [
+    "nervous"
+  ],
+  "symptoms": [
+    "nausea",
+    "confusion"
+  ],
+  "trigger": {
+    "environment": [
+      "end"
+    ],
+    "chancePerDay": 0.05
+  }
+}

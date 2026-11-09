@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "moderate",
+  "systems": [
+    "blood"
+  ],
+  "routes": [
+    "vector"
+  ],
+  "symptoms": [
+    "fever",
+    "pain",
+    "rash"
+  ],
+  "trigger": {
+    "chancePerDay": 0.003
+  },
+  "rarity": 0.5
+}

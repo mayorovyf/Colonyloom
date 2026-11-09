@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "category": "cancer",
+  "severity": "severe",
+  "systems": [
+    "reproductive"
+  ],
+  "symptoms": [
+    "pain",
+    "swelling"
+  ],
+  "trigger": {
+    "minAge": 35,
+    "sex": "female",
+    "chancePerDay": 0.0003
+  }
+}

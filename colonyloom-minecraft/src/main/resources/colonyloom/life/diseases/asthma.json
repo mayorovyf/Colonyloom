@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "chronic",
+  "severity": "mild",
+  "systems": [
+    "respiratory"
+  ],
+  "symptoms": [
+    "wheeze",
+    "breathless"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0008,
+    "minAge": 3
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "fungus",
+  "severity": "moderate",
+  "systems": [
+    "respiratory"
+  ],
+  "routes": [
+    "environment"
+  ],
+  "symptoms": [
+    "cough",
+    "breathless",
+    "fever"
+  ],
+  "trigger": {
+    "environment": [
+      "underground",
+      "dark"
+    ],
+    "chancePerDay": 0.002
+  }
+}

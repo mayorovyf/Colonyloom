@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "group": "romance",
+  "effects": {
+    "stats": {
+      "romance": 0.5
+    },
+    "interactions": {
+      "colonyloom:romance": 0.4,
+      "colonyloom:comfort": 0.5
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "mild",
+  "systems": [
+    "immune",
+    "blood"
+  ],
+  "routes": [
+    "contact"
+  ],
+  "contagiousness": 0.05,
+  "immunityDays": -1,
+  "symptoms": [
+    "fever",
+    "drowsy",
+    "swelling"
+  ],
+  "rarity": 0.8,
+  "varieties": {
+    "count": 8
+  }
+}

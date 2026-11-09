@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "fungus",
+  "severity": "mild",
+  "systems": [
+    "skin",
+    "reproductive"
+  ],
+  "contagiousness": 0.02,
+  "symptoms": [
+    "itch",
+    "pain"
+  ],
+  "rarity": 0.8,
+  "varieties": {
+    "count": 6
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "deadly",
+  "systems": [
+    "blood"
+  ],
+  "routes": [
+    "contact",
+    "animal"
+  ],
+  "contagiousness": 0.08,
+  "symptoms": [
+    "fever",
+    "bleeding",
+    "vomit",
+    "pale"
+  ],
+  "trigger": {
+    "environment": [
+      "jungle"
+    ],
+    "chancePerDay": 0.0002
+  },
+  "rarity": 0.1,
+  "varieties": {
+    "count": 10
+  }
+}

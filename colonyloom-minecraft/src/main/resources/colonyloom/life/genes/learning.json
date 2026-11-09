@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "slow",
+      "frequency": 0.2,
+      "effects": {
+        "stats": {
+          "learning": 0.85
+        }
+      },
+      "traits": {
+        "colonyloom:slow_learner": 1
+      }
+    },
+    {
+      "id": "typical",
+      "frequency": 0.6
+    },
+    {
+      "id": "quick",
+      "frequency": 0.2,
+      "effects": {
+        "stats": {
+          "learning": 1.15
+        }
+      },
+      "traits": {
+        "colonyloom:quick_learner": 1
+      }
+    }
+  ]
+}

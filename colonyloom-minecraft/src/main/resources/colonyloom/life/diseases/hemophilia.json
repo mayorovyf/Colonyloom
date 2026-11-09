@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "category": "genetic",
+  "severity": "moderate",
+  "systems": [
+    "blood"
+  ],
+  "symptoms": [
+    "bleeding",
+    "pain"
+  ]
+}

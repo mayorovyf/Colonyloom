@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "severe",
+  "systems": [
+    "nervous",
+    "musculoskeletal"
+  ],
+  "routes": [
+    "contact",
+    "food"
+  ],
+  "contagiousness": 0.1,
+  "lethal": false,
+  "immunityDays": -1,
+  "symptoms": [
+    "fever",
+    "pain",
+    "limp"
+  ],
+  "rarity": 0.2,
+  "varieties": {
+    "count": 8
+  }
+}

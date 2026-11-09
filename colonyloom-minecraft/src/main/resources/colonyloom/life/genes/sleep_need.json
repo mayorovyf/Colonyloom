@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "short",
+      "frequency": 0.15,
+      "effects": {
+        "stats": {
+          "rest_fall": 0.85
+        }
+      }
+    },
+    {
+      "id": "typical",
+      "frequency": 0.7
+    },
+    {
+      "id": "long",
+      "frequency": 0.15,
+      "effects": {
+        "stats": {
+          "rest_fall": 1.15
+        }
+      },
+      "traits": {
+        "colonyloom:sleepyhead": 2
+      }
+    }
+  ]
+}

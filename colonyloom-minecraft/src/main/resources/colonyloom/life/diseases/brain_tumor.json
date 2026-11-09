@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "category": "cancer",
+  "severity": "deadly",
+  "systems": [
+    "nervous"
+  ],
+  "symptoms": [
+    "headache",
+    "confusion",
+    "vomit"
+  ],
+  "trigger": {
+    "minAge": 20,
+    "chancePerDay": 0.0001
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "mild",
+  "systems": [
+    "skin"
+  ],
+  "contagiousness": 0.28,
+  "immunityDays": -1,
+  "symptoms": [
+    "rash",
+    "itch",
+    "fever"
+  ],
+  "rarity": 1.2,
+  "varieties": {
+    "count": 10
+  }
+}

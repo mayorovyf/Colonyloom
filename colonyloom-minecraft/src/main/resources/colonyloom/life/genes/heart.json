@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "weak",
+      "frequency": 0.15,
+      "effects": {
+        "capacities": {
+          "blood_pumping": -0.05
+        },
+        "susceptibility": {
+          "cardiovascular": 1.3
+        }
+      }
+    },
+    {
+      "id": "typical",
+      "frequency": 0.7
+    },
+    {
+      "id": "strong",
+      "frequency": 0.15,
+      "effects": {
+        "capacities": {
+          "blood_pumping": 0.05
+        },
+        "susceptibility": {
+          "cardiovascular": 0.8
+        }
+      }
+    }
+  ]
+}

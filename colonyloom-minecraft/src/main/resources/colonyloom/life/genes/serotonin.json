@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "short",
+      "frequency": 0.4,
+      "effects": {
+        "stats": {
+          "mood": -2
+        }
+      },
+      "traits": {
+        "colonyloom:pessimist": 0.8
+      }
+    },
+    {
+      "id": "long",
+      "frequency": 0.6,
+      "effects": {
+        "stats": {
+          "mood": 1
+        }
+      },
+      "traits": {
+        "colonyloom:optimist": 0.8
+      }
+    }
+  ]
+}

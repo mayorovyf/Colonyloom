@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "mild",
+  "systems": [
+    "respiratory"
+  ],
+  "contagiousness": 0.12,
+  "symptoms": [
+    "chills",
+    "cough",
+    "sneeze"
+  ],
+  "trigger": {
+    "environment": [
+      "cold"
+    ],
+    "chancePerDay": 0.004
+  },
+  "rarity": 1.5,
+  "varieties": {
+    "count": 30
+  }
+}

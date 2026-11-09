@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "kind": "chat",
+  "weight": 0.8,
+  "speech": 6,
+  "requires": {
+    "initiatorMinAge": 12,
+    "recipientMinAge": 12
+  },
+  "onSuccess": {
+    "initiator": "colonyloom:gossiped",
+    "recipient": "colonyloom:gossiped"
+  }
+}

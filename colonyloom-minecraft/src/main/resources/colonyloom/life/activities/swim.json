@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "water",
+  "gains": {
+    "recreation": 7.5,
+    "hygiene": 12,
+    "rest": -1
+  },
+  "joy": "active",
+  "tags": [
+    "sport",
+    "nature"
+  ],
+  "emote": "splash",
+  "weather": "clear",
+  "memory": "colonyloom:swam",
+  "durationTicks": [
+    400,
+    900
+  ],
+  "ages": [
+    6,
+    999
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "purpose": "mental",
+  "mental": "major",
+  "place": "here",
+  "animation": "look_around",
+  "schedule": [
+    "sleep",
+    "work",
+    "leisure"
+  ],
+  "speech": 3,
+  "durationTicks": [
+    1000,
+    2400
+  ]
+}

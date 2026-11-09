@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "category": "age",
+  "severity": "severe",
+  "systems": [
+    "cardiovascular"
+  ],
+  "lethal": true,
+  "symptoms": [
+    "breathless",
+    "swelling",
+    "pale"
+  ],
+  "trigger": {
+    "minAge": 65,
+    "chancePerDay": 0.002
+  }
+}

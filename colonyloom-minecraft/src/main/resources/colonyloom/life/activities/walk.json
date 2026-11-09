@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "wander",
+  "radius": 16,
+  "gains": {
+    "recreation": 4.5
+  },
+  "joy": "active",
+  "durationTicks": [
+    600,
+    1400
+  ],
+  "tags": [
+    "nature",
+    "calm"
+  ],
+  "memory": "colonyloom:walked",
+  "speech": 4
+}

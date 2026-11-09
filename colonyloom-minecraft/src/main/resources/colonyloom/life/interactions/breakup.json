@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "kind": "breakup",
+  "weight": 1,
+  "speech": 4,
+  "emote": "sad",
+  "requires": {
+    "relation": "partner"
+  },
+  "onSuccess": {
+    "change": "break_up"
+  }
+}

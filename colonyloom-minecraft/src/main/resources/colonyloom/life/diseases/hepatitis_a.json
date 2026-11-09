@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "moderate",
+  "systems": [
+    "digestive",
+    "renal"
+  ],
+  "routes": [
+    "contact",
+    "food",
+    "water"
+  ],
+  "contagiousness": 0.08,
+  "immunityDays": -1,
+  "symptoms": [
+    "nausea",
+    "pale",
+    "pain"
+  ],
+  "rarity": 0.6,
+  "varieties": {
+    "count": 10
+  }
+}

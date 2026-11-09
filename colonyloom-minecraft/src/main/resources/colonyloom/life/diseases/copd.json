@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "chronic",
+  "severity": "moderate",
+  "systems": [
+    "respiratory"
+  ],
+  "symptoms": [
+    "cough",
+    "breathless"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0006,
+    "minAge": 45
+  }
+}

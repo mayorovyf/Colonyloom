@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "trivial",
+  "systems": [
+    "respiratory"
+  ],
+  "contagiousness": 0.18,
+  "immunityDays": 2,
+  "symptoms": [
+    "cough",
+    "sneeze",
+    "headache"
+  ],
+  "rarity": 5,
+  "varieties": {
+    "count": 40
+  }
+}

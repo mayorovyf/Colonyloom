@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "group": "nature",
+  "effects": {
+    "activities": {
+      "nature": 2.5
+    }
+  }
+}

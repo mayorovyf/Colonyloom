@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "genetic",
+  "severity": "severe",
+  "systems": [
+    "nervous",
+    "mental"
+  ],
+  "severityPerDay": 0.03,
+  "lethal": true,
+  "symptoms": [
+    "tremor",
+    "confusion",
+    "anxiety"
+  ]
+}

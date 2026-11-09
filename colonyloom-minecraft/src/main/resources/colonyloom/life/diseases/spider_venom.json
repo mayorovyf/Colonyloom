@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "category": "injury",
+  "severity": "mild",
+  "systems": [
+    "nervous",
+    "skin"
+  ],
+  "symptoms": [
+    "swelling",
+    "pain",
+    "nausea"
+  ],
+  "trigger": {
+    "injury": "attack",
+    "eventChance": 0.03
+  }
+}

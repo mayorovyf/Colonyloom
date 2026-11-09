@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "category": "genetic",
+  "severity": "severe",
+  "systems": [
+    "respiratory",
+    "digestive"
+  ],
+  "symptoms": [
+    "cough",
+    "breathless",
+    "wheeze"
+  ]
+}

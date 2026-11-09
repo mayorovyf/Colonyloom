@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "flowers",
+  "gains": {
+    "recreation": 7.5
+  },
+  "joy": "meditative",
+  "tags": [
+    "nature",
+    "calm"
+  ],
+  "memory": "colonyloom:admired_flowers",
+  "time": [
+    0,
+    12000
+  ],
+  "durationTicks": [
+    400,
+    900
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "pathogen": "bacterium",
+  "severity": "moderate",
+  "systems": [
+    "blood"
+  ],
+  "contagiousness": 0.05,
+  "symptoms": [
+    "fever",
+    "sweat",
+    "headache"
+  ],
+  "trigger": {
+    "environment": [
+      "desert"
+    ],
+    "chancePerDay": 0.003
+  },
+  "rarity": 1,
+  "varieties": {
+    "count": 15
+  }
+}

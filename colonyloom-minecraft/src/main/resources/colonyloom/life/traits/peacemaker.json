@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "group": "temper",
+  "effects": {
+    "interactions": {
+      "colonyloom:apology": 3,
+      "colonyloom:insult": 0.3,
+      "colonyloom:argue": 0.3
+    }
+  }
+}

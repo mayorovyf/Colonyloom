@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "age",
+  "severity": "mild",
+  "systems": [
+    "musculoskeletal"
+  ],
+  "symptoms": [
+    "limp",
+    "drowsy"
+  ],
+  "trigger": {
+    "minAge": 70,
+    "chancePerDay": 0.006
+  }
+}

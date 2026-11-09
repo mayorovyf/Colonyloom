@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "expression": "additive",
+  "alleles": [
+    {
+      "id": "slow",
+      "frequency": 0.2,
+      "effects": {
+        "capacityFactors": {
+          "metabolism": 0.9
+        }
+      }
+    },
+    {
+      "id": "typical",
+      "frequency": 0.6
+    },
+    {
+      "id": "fast",
+      "frequency": 0.2,
+      "effects": {
+        "capacityFactors": {
+          "metabolism": 1.1
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "group": "sleep",
+  "effects": {
+    "stats": {
+      "rest_fall": 1.3
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "category": "infectious",
+  "severity": "severe",
+  "systems": [
+    "renal",
+    "respiratory"
+  ],
+  "routes": [
+    "animal"
+  ],
+  "lethal": true,
+  "symptoms": [
+    "fever",
+    "breathless",
+    "pain"
+  ],
+  "trigger": {
+    "environment": [
+      "near_wild_animals"
+    ],
+    "chancePerDay": 0.0005
+  }
+}

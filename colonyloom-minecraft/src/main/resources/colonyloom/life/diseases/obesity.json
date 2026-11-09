@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "category": "nutritional",
+  "severity": "mild",
+  "systems": [
+    "cardiovascular",
+    "musculoskeletal"
+  ],
+  "chronic": true,
+  "symptoms": [
+    "breathless"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0005,
+    "minAge": 16
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "category": "injury",
+  "severity": "moderate",
+  "immunityPerDay": 0.2,
+  "symptoms": [
+    "pain",
+    "limp",
+    "swelling"
+  ],
+  "trigger": {
+    "injury": "fall",
+    "eventChance": 0.12
+  }
+}

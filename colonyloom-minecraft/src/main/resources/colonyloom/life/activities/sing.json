@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "purpose": "leisure",
+  "place": "here",
+  "gains": {
+    "recreation": 6,
+    "social": 0.5
+  },
+  "joy": "music",
+  "tags": [
+    "music",
+    "art"
+  ],
+  "emote": "note",
+  "speech": 6,
+  "memory": "colonyloom:sang",
+  "durationTicks": [
+    300,
+    700
+  ]
+}

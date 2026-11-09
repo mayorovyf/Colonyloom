@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "category": "chronic",
+  "severity": "mild",
+  "systems": [
+    "digestive"
+  ],
+  "symptoms": [
+    "pain",
+    "nausea"
+  ],
+  "trigger": {
+    "chancePerDay": 0.0008,
+    "minAge": 20
+  }
+}
